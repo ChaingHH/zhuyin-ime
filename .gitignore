@@ -14,3 +14,7 @@ data/user/
 
 # Kev 打分中間產物（腳本 *.py 保留）
 data/kev/**/*.jsonl
+
+# 建置快取與 Claude Code 工作樹
+*.tsbuildinfo
+.claude/worktrees/

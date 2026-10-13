@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注音測試台</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
+    --accent: #2f6fdb; --l6: #e8f0ff; --warn-bg: #fff4d6; --warn: #7a5a00; --pending: #9a9a93;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1e; --text: #ececea; --muted: #9d9d97; --line: #33332f;
+      --accent: #7aa7ff; --l6: #1f2c46; --warn-bg: #3a3014; --warn: #f1d58a; --pending: #77776f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 system-ui, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 48px; display: grid; gap: 16px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .status { color: var(--muted); font-size: 13px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  #comp {
+    min-height: 56px; font-size: 32px; letter-spacing: 1px; word-break: break-all;
+    border-radius: 8px; padding: 4px 8px; transition: background-color .6s;
+  }
+  #comp.flash { background: var(--l6); transition: none; }
+  #comp:empty::before { content: "直接用鍵盤打注音（大千排列）"; color: var(--pending); font-size: 18px; }
+  #cands { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  #cands button {
+    font: inherit; font-size: 16px; color: var(--text); background: transparent;
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  #cands button:hover, #cands button:focus-visible { border-color: var(--accent); outline: none; }
+  #cands small { color: var(--muted); margin-right: 6px; }
+  #out { width: 100%; min-height: 72px; font: inherit; font-size: 18px; color: var(--text);
+    background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 8px; resize: vertical; }
+  .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .row button { font: inherit; font-size: 13px; color: var(--text); background: transparent;
+    border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+  #log { font: 13px/1.5 ui-monospace, Consolas, monospace; max-height: 220px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+  #log .l6 { color: var(--accent); }
+  #warn { display: none; background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 12px; }
+  .help { font-size: 13px; color: var(--muted); }
+  .kb { display: grid; gap: 4px; margin-top: 8px; overflow-x: auto; }
+  .kb div { display: flex; gap: 4px; }
+  .kb span { min-width: 34px; text-align: center; border: 1px solid var(--line); border-radius: 4px; padding: 2px 0; font-size: 13px; }
+  .kb span b { display: block; font-weight: 400; font-size: 10px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <div class="row">
+    <h1>注音測試台</h1>
+    <span class="status" id="status">連線中…</span>
+  </div>
+  <div id="warn">偵測到系統輸入法正在組字。請把系統輸入法切到英文，這個頁面自己處理注音。</div>
+
+  <section>
+    <div class="label">組字區（L5 即時；L6 替換時會閃一下）</div>
+    <div id="comp" aria-live="polite"></div>
+  </section>
+
+  <section>
+    <div class="label">候選（點選即送出該候選）</div>
+    <ul id="cands"></ul>
+  </section>
+
+  <section>
+    <div class="row"><div class="label">已送出（Enter 送出首選）</div><button id="clear" type="button">清空</button></div>
+    <textarea id="out" readonly></textarea>
+  </section>
+
+  <section>
+    <div class="label">事件紀錄</div>
+    <ul id="log"></ul>
+  </section>
+
+  <section class="help">
+    Backspace 退格、空白鍵＝一聲、Enter 送出。大千鍵位：
+    <div class="kb" id="kb"></div>
+  </section>
+</main>
+<script>
+const KB = [
+  [['1','ㄅ'],['2','ㄉ'],['3','ˇ'],['4','ˋ'],['5','ㄓ'],['6','ˊ'],['7','˙'],['8','ㄚ'],['9','ㄞ'],['0','ㄢ'],['-','ㄦ']],
+  [['Q','ㄆ'],['W','ㄊ'],['E','ㄍ'],['R','ㄐ'],['T','ㄔ'],['Y','ㄗ'],['U','ㄧ'],['I','ㄛ'],['O','ㄟ'],['P','ㄣ']],
+  [['A','ㄇ'],['S','ㄋ'],['D','ㄎ'],['F','ㄑ'],['G','ㄕ'],['H','ㄘ'],['J','ㄨ'],['K','ㄜ'],['L','ㄠ'],[';','ㄤ']],
+  [['Z','ㄈ'],['X','ㄌ'],['C','ㄏ'],['V','ㄒ'],['B','ㄖ'],['N','ㄙ'],['M','ㄩ'],[',','ㄝ'],['.','ㄡ'],['/','ㄥ']],
+];
+document.getElementById('kb').innerHTML = KB.map(r =>
+  '<div>' + r.map(([k, z]) => `<span>${z}<b>${k}</b></span>`).join('') + '</div>').join('');
+
+const $ = id => document.getElementById(id);
+const comp = $('comp'), cands = $('cands'), out = $('out'), log = $('log'), status = $('status');
+
+function render(s) {
+  comp.textContent = s.composition;
+  cands.innerHTML = '';
+  s.candidates.forEach((t, i) => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.innerHTML = `<small>${i + 1}</small>`;
+    b.append(t);
+    b.onclick = () => enqueue(() => commit(i));
+    li.append(b);
+    cands.append(li);
+  });
+}
+function addLog(text, cls) {
+  const li = document.createElement('li');
+  li.textContent = text;
+  if (cls) li.className = cls;
+  log.prepend(li);
+  while (log.children.length > 60) log.lastChild.remove();
+}
+async function post(url, data) {
+  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function commit(k) {
+  const { text } = await post('/commit', { k });
+  out.value += text;
+  addLog(`送出 ${text}${k ? `（第 ${k + 1} 候選）` : ''}`);
+  render({ composition: '', candidates: [] });
+}
+// 按鍵依序送出，確保伺服器端的順序與打字順序一致
+let chain = Promise.resolve();
+const enqueue = fn => (chain = chain.then(fn).catch(e => addLog('錯誤：' + e.message)));
+
+const SEND = /^(Key[A-Z]|Digit\d|Minus|Semicolon|Comma|Period|Slash|Space|Backspace)$/;
+// 有些環境（遠端桌面、虛擬鍵盤、自動化工具）keydown 不帶 code：依美式鍵盤從 key 推回實體鍵位
+const PUNCT = { '/': 'Slash', ';': 'Semicolon', '.': 'Period', ',': 'Comma', '-': 'Minus', ' ': 'Space' };
+function codeOf(e) {
+  if (e.code) return e.code;
+  const k = e.key || '';
+  if (/^[a-z]$/i.test(k)) return 'Key' + k.toUpperCase();
+  if (/^\d$/.test(k)) return 'Digit' + k;
+  return PUNCT[k] || (k === 'Backspace' || k === 'Enter' ? k : '');
+}
+document.addEventListener('keydown', e => {
+  if (e.isComposing || e.key === 'Process') { $('warn').style.display = 'block'; return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const code = codeOf(e);
+  if (code === 'Enter') { e.preventDefault(); enqueue(() => commit(0)); return; }
+  if (!SEND.test(code)) return;
+  e.preventDefault();
+  $('warn').style.display = 'none';
+  enqueue(async () => {
+    const s = await post('/key', { code });
+    render(s);
+    if (s.candidates.length || code === 'Backspace') addLog(`L5 ${s.composition}  ${s.ms}ms${s.legal ? '' : '  [不合法音節]'}`);
+  });
+});
+$('clear').onclick = () => { out.value = ''; };
+
+const es = new EventSource('/events');
+es.onmessage = ev => {
+  const m = JSON.parse(ev.data);
+  if (m.type === 'hello') status.textContent = `已連線・重排${m.rerank ? '開' : '關'}`;
+  if (m.type === 'L6') {
+    render(m);
+    comp.classList.add('flash');
+    requestAnimationFrame(() => requestAnimationFrame(() => comp.classList.remove('flash')));
+    addLog(`L6 → ${m.composition}  按鍵後 ${m.ms}ms`, 'l6');
+  }
+};
+es.onerror = () => { status.textContent = '連線中斷（伺服器有在跑嗎？）'; };
+</script>
+</body>
+</html>

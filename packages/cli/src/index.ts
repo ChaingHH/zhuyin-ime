@@ -30,16 +30,17 @@ async function main(): Promise<void> {
       // --rerank：先顯示 L5，BERT 重排完成且首選改變時再印出替換結果（L7）
       let hooks: import('./engine.js').RerankHooks | undefined;
       if (process.argv.includes('--rerank')) {
-        const { PllReranker } = await import('@zhuyin/rerank');
-        const rr = await PllReranker.create({
+        const { RerankWorker } = await import('@zhuyin/rerank');
+        // BERT 放背景執行緒：在主執行緒跑會卡住事件迴圈，重排期間的按鍵要排隊
+        const rr = await RerankWorker.create({
           weight: 0.5,
           maxCandidates: 16,
           gapThreshold: 6,
           flipMargin: 0.75,
-          charFreq: (ch) => lm.char.uni.get(ch) ?? 0,
+          charCounts: Object.fromEntries(lm.char.uni),
         });
         hooks = {
-          rerank: async (paths) => (await rr.rerank(paths)).paths,
+          rerank: (paths) => rr.rerank(paths),
           onUpdate: (st) => console.log(`  ${'[L6]'.padEnd(10)} => ${committed}${st.composition}`),
         };
       }
@@ -187,8 +188,15 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'web': {
+      // 網頁測試台：--port N（預設 8787）、--no-rerank 關閉 L6
+      const { startWeb } = await import('./web.js');
+      await startWeb(argNum(['--port'], 8787)!, !process.argv.includes('--no-rerank'));
+      break;
+    }
+
     default:
-      console.log('用法: zhuyin <type|replay|eval|sweep> [args]');
+      console.log('用法: zhuyin <type|replay|eval|sweep|web> [args]');
       process.exitCode = cmd === undefined ? 0 : 1;
   }
 }

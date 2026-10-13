@@ -43,7 +43,9 @@ export async function loadRuntime(
   const models = path.join(REPO, 'data', 'models');
   const lmFile =
     process.env['ZHUYIN_LM'] ??
-    (existsSync(path.join(models, 'lm.tsv')) ? path.join(models, 'lm.tsv') : path.join(models, 'lm.json'));
+    (existsSync(path.join(models, 'lm.tsv'))
+      ? path.join(models, 'lm.tsv')
+      : path.join(models, 'lm.json'));
   const lexFile = path.join(REPO, 'data', 'processed', 'lexicon.jsonl');
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 
