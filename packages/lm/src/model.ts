@@ -180,12 +180,12 @@ export class LanguageModel {
       const cw = idx.tri.get(`${ctx}\t${w}`);
       if (cw) return Math.log(cw / tt);
     }
-    // 舊行為保留：退回二元時以 c1（較早的詞）為上下文
-    const biCount = idx.bi.get(`${c1} ${w}`);
+    // 退回二元：以 c2（最近的詞）為上下文
+    const biCount = idx.bi.get(`${c2} ${w}`);
     if (biCount) {
-      // P(w | c1) = count(c1,w) / count(c1,*)——正規化在「上下文」上，不是詞自身頻率
-      const total1 = idx.biTotals.get(c1) ?? 0;
-      return Math.log(BACKOFF * (biCount / total1));
+      // P(w | c2) = count(c2,w) / count(c2,*)——正規化在「上下文」上，不是詞自身頻率
+      const total2 = idx.biTotals.get(c2) ?? 0;
+      return Math.log(BACKOFF * (biCount / total2));
     }
     // unigram（含 unseen 的極小機率）
     const u = idx.uni.get(w) ?? 0.5;

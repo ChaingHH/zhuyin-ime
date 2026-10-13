@@ -44,5 +44,7 @@ describe('LanguageModel KN', () => {
     // stupid backoff：三元命中 → c/ctx 總和
     lm.smoothing = 'sb';
     expect(lm.wordLogProb('b', 'b', 'a')).toBeCloseTo(Math.log(1), 10);
+    // 三元未命中 → 二元以最近的詞 a 為上下文：0.4·c(a c)/c(a *)；用 b 的話會落到一元
+    expect(lm.wordLogProb('c', 'b', 'a')).toBeCloseTo(Math.log((0.4 * 1) / 3), 10);
   });
 });
