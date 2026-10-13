@@ -1,5 +1,5 @@
 // L7 防閃動評估（L6 改過的詞加分）：逐音節打字、每音節間 L6 都跑完（最壞閃動情境）。
-// 量最終準確率、已顯示字被改掉的字數、L6→L5 回滾次數。npx tsx debug-lock.ts [nColl] [nWritten]
+// 量最終準確率、已顯示字被改掉的字數、L6→L5 回滾次數。npx tsx debug-lock.ts [nColl] [nWritten] [bonus,...]
 import { syllableToKeyCodes } from './packages/core/src/index.js';
 import { loadRuntime, loadEvalSamples } from './packages/cli/src/runtime.js';
 import { ImeEngine } from './packages/cli/src/engine.js';
@@ -18,11 +18,13 @@ const diff = (a: string, b: string): number => {
   return d;
 };
 
-for (const bonus of [1, 2, 4, 8]) {
+// 第 3 個參數可指定 bonus 清單（逗號分隔），方便各設定開獨立 process 平行跑
+for (const bonus of process.argv[4]?.split(',').map(Number) ?? [0, 2, 4, 6]) {
   const row: string[] = [`stickBonus=${bonus}`.padEnd(20)];
   for (const [name, ss] of Object.entries(sets)) {
     let ok = 0, revised = 0, rollback = 0;
-    for (const s of ss) {
+    const okSplit = [0, 0]; // dev=偶數句、test=奇數句（同 debug-acc.ts）
+    for (const [idx, s] of ss.entries()) {
       let pending: Promise<unknown> = Promise.resolve();
       const disp: Array<{ src: 'L5' | 'L6'; text: string }> = [];
       const engine = new ImeEngine(rt.decoder, rt.legalSyllables, undefined, undefined, {
@@ -42,10 +44,14 @@ for (const bonus of [1, 2, 4, 8]) {
         revised += d;
         if (d > 0 && disp[i - 1]!.src === 'L6' && disp[i]!.src === 'L5') rollback++;
       }
-      if (engine.commit() === s.text) ok++;
+      if (engine.commit() === s.text) {
+        ok++;
+        okSplit[idx % 2]!++;
+      }
     }
     const n = ss.length;
-    row.push(`${name} 句準 ${((ok / n) * 100).toFixed(1)} 改字/句 ${(revised / n).toFixed(2)} 回滾/句 ${(rollback / n).toFixed(2)}`);
+    const pct = (k: number, m: number): string => ((k / m) * 100).toFixed(1);
+    row.push(`${name} 句準 ${pct(ok, n)} (dev ${pct(okSplit[0]!, Math.ceil(n / 2))} test ${pct(okSplit[1]!, Math.floor(n / 2))}) 改字/句 ${(revised / n).toFixed(2)} 回滾/句 ${(rollback / n).toFixed(2)}`);
   }
   console.log(row.join(' | '));
 }
