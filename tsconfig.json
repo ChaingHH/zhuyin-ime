@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/lm" },
+    { "path": "packages/data-pipeline" },
+    { "path": "packages/rerank" },
+    { "path": "packages/cli" }
+  ]
+}

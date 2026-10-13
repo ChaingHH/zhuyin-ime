@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+
+data/raw/
+data/models/
+data/cache/
+data/processed/
+
+packages/*/dist/
+data/user/
+
+# Kev 打分中間產物（腳本 *.py 保留）
+data/kev/**/*.jsonl

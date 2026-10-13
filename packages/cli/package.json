@@ -1,0 +1,18 @@
+{
+  "name": "@zhuyin/cli",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "zhuyin": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "@zhuyin/core": "*",
+    "@zhuyin/data-pipeline": "*",
+    "@zhuyin/lm": "*",
+    "@zhuyin/rerank": "*"
+  }
+}
