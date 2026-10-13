@@ -51,7 +51,8 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 ```bash
 node packages/cli/dist/index.js type                 # interactive: space-separated KeyboardEvent.code per line
 node packages/cli/dist/index.js type --rerank        # L5 shown immediately; BERT rerank replaces it async ([L6] lines)
-node packages/cli/dist/index.js web [--port 8787] [--no-rerank]  # browser testbench: type with the real keyboard (Dachen), L6 pushed via SSE
+node packages/cli/dist/index.js web [--port 8787] [--no-rerank] [--no-l3]  # browser testbench: type with the real keyboard (Dachen), L6 pushed via SSE
+npx tsx debug-l3.ts [keyErr] [cogErr] [scales]   # L3 eval: clean + X3-injected noisy input, L3 off vs cost scales
 node packages/cli/dist/index.js replay <keys.jsonl>
 node packages/cli/dist/index.js eval [-n N] [-a A] [-g GAMMA] [--rerank -b W --gap G --maxc K --flip M] [--kev --kw W --ktop N --knoul] [--idf X] [--baseline classic|bigram]
 node packages/cli/dist/index.js sweep [-n N]         # grid over a × gamma on colloquial set
@@ -64,13 +65,15 @@ node packages/cli/dist/index.js sweep [-n N]         # grid over a × gamma on c
 `packages/rerank/src/kev.ts` calls a System One API server (Kev = open-weight Jev clone, Apache-2.0; also works against TypeSafe's hosted Jev with `TYPESAFE_API_KEY`). Server lives in `data/raw/kev` (cloned `jaredpalmer/kev`, own `.venv` with torch cu128):
 
 ```bash
-cd data/raw/kev && HF_HUB_OFFLINE=1 .venv/Scripts/python -m kev.serve --run runs/zy-choice16k --port 8009
+cd data/raw/kev && KEV_FUSED=0 HF_HUB_OFFLINE=1 .venv/Scripts/python -m kev.serve --run runs/zy-choice16k --port 8009
 ```
 
 - Use `.venv/Scripts/python` directly, not `uv run`: `uv run` re-syncs torch back to the CPU wheel.
 - Local edits to Kev for Windows (`resource`/`fcntl` import guards in `kev/train.py`, `kev/suite.py`, `kev/experiment.py`) are marked `本地修改`.
 - Training on 16 GB needs `--weights_dtype bf16`; fp32 backbone spills to shared memory and crawls.
 - GPU kernels: `triton-windows` 3.4 + `flash-linear-attention==0.5.2` (Kev's pinned version) are installed in the venv, so Qwen3.5's gated delta rule runs on fla's Triton kernels instead of the PyTorch fallback. `causal_conv1d` is not installed (needs a CUDA build on Windows). Fastest measured config on the RTX 5080: `--batch 4 --accum 4 --checkpointing 1` (~0.14 s/record vs 0.23 before); `--batch 8` is slower and `--checkpointing 0` overflows 16 GB.
+- Serving must use `KEV_FUSED=0`: with fla installed, `kev.serve` turns on fused kernels + CUDA graphs by default, which fills 16 GB and drops to ~4 s/request (vs ~60 ms). Send requests one at a time; concurrent requests are slower here.
+- `runs/zy-choice16k-tsv` (trained on lm.tsv N-best) scored 79.9/88.6% at w=3 vs 80.4/89.0% for `runs/zy-choice16k`: no gain, keep the latter.
 - Fine-tune data: `npx tsx debug-kev-train.ts N` → `data/kev/train-{choice,noul}.jsonl` (excludes eval sentences). Question text in `kev.ts` must match it.
 - Offline scoring/sweeps: `data/kev/{score,causal,combine,combine3,combinen}.py` over `npx tsx debug-kev-dump.ts` N-best dumps.
 
@@ -94,6 +97,7 @@ Key design points (from comments in `decode.ts` and `reranker.ts`):
 - `core` depends on the LM only through the structural `Scorer` interface; baselines in `runtime.ts` swap in alternate `Scorer`s.
 - Rerank final score = `a·LM(+γ char + U) + b·PLL`. `gapThreshold`: skip BERT when L5 top-1 − top-2 > threshold (CLI default 6, no dev loss, ~40% fewer BERT calls). Keep the ONNX model fp32: int8 quantization dropped sentence accuracy 70% → 55%.
 - L6 in the engine is async (`ImeEngine` `RerankHooks`): `onKey` returns L5 synchronously, rerank runs in background, stale results (user typed again / committed) are dropped, at most one rerank in flight, `commit` never waits for BERT. BERT must run in `RerankWorker` (worker_threads): in-thread `PllReranker` blocks the event loop for the whole rerank (110–640ms measured), so keystrokes queue behind it. Anti-flicker: words L6 changed get a position-bound bonus (`stickBonus`, default 4) in later L5 decodes of the same composition; the bonus is subtracted again before paths go to L6, so it stabilizes display without biasing the final choice (a hard prefix lock was tried and cost 5–6 points sentence accuracy). Evaluate with `debug-lock.ts`.
+- L3 (`core/src/l3.ts` `Channel`): expands each observed syllable into legal intended syllables with a cost (adjacent key, extra/missed key, adjacent tone key, fuzzy pairs ㄣㄥ/ㄓㄗ/…, wrong tone); one edit per syllable, at most one corrected syllable per word. Decoder adds `chTerm` = −cost and records `reading`. Single-syllable corrections only apply when the observed syllable has no lexicon entries (`altSingleOnlyIfEmpty`): enabling them recovers ~7 more points on noisy input but makes decoding 5–8× slower. Evaluated only on synthetic errors (`cli/src/noise.ts`, shares the adjacency/fuzzy tables with L3 → optimistic); there is no real typing log. X2 learns from `breakdown.reading`, not the observed (typo) syllables.
 - `UserAdapter` (X2) state persists to `data/user/adapter.json`; user phrases are also added live via `decoder.addEntry`.
 
 ## Data licensing constraints

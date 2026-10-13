@@ -4,6 +4,7 @@ import {
   Decoder,
   type DecodePath,
   type KeyEvent,
+  type Channel,
   type UserAdapter,
 } from '@zhuyin/core';
 
@@ -40,15 +41,12 @@ interface AlignedWord {
   seq: string[];
 }
 
-/** 依 breakdown.spanLen 把詞序對齊回音節序列。 */
-export function alignWords(path: DecodePath, sequence: readonly string[]): AlignedWord[] {
-  const out: AlignedWord[] = [];
-  let i = 0;
-  for (const b of path.breakdown) {
-    out.push({ word: b.word, seq: sequence.slice(i, i + b.spanLen) });
-    i += b.spanLen;
-  }
-  return out;
+/**
+ * 詞序對齊到讀音。用 breakdown.reading（L3 更正後的意圖音節）而非觀察音節：
+ * 否則 X2 會把「打錯的讀音 → 詞」當成使用者習慣學起來。
+ */
+export function alignWords(path: DecodePath): AlignedWord[] {
+  return path.breakdown.map((b) => ({ word: b.word, seq: [...b.reading] }));
 }
 
 export class ImeEngine {
@@ -65,6 +63,8 @@ export class ImeEngine {
   private sticky = new Set<string>();
   /** 上次解碼時的已完成音節序列 */
   private seqKey = '';
+  /** L3 通道模型；設定後解碼會考慮打錯／模糊音的更正 */
+  channel?: Channel;
 
   constructor(
     decoder: Decoder,
@@ -100,6 +100,7 @@ export class ImeEngine {
     return this.decoder.decode(seq, {
       modifier,
       nBest: this.hooks ? (this.hooks.nBest ?? 28) : undefined,
+      alternatives: this.channel ? seq.map((s) => this.channel!.expand(s)) : undefined,
     });
   }
 
@@ -218,7 +219,7 @@ export class ImeEngine {
 
     const adapter = this.adapter;
     if (adapter?.enabled && chosen) {
-      const aligned = alignWords(chosen, seq);
+      const aligned = alignWords(chosen);
 
       // 1) 選字覆寫學習（含非 top-1 的明示選擇——這是最強的使用者訊號）
       for (const w of aligned) {

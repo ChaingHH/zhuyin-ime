@@ -8,7 +8,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import type { DecodePath } from '@zhuyin/core';
+import { Channel, type DecodePath } from '@zhuyin/core';
 import { ImeEngine, type EngineState, type RerankHooks } from './engine.js';
 import { loadRuntime, saveAdapter } from './runtime.js';
 
@@ -35,7 +35,7 @@ function json(res: ServerResponse, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-export async function startWeb(port: number, rerank: boolean): Promise<void> {
+export async function startWeb(port: number, rerank: boolean, l3: boolean): Promise<void> {
   console.log('[web] 載入模型中（約 1 分鐘）…');
   const { decoder, legalSyllables, adapter, lm } = await loadRuntime();
   const clients = new Set<ServerResponse>();
@@ -71,6 +71,7 @@ export async function startWeb(port: number, rerank: boolean): Promise<void> {
     };
   }
   const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter, hooks);
+  if (l3) engine.channel = new Channel(legalSyllables);
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -84,7 +85,7 @@ export async function startWeb(port: number, rerank: boolean): Promise<void> {
             'cache-control': 'no-cache',
             connection: 'keep-alive',
           });
-          res.write(`data: ${JSON.stringify({ type: 'hello', rerank })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'hello', rerank, l3 })}\n\n`);
           clients.add(res);
           req.on('close', () => clients.delete(res));
         } else if (req.method === 'POST' && req.url === '/key') {
@@ -112,6 +113,8 @@ export async function startWeb(port: number, rerank: boolean): Promise<void> {
     })();
   });
   server.listen(port, '127.0.0.1', () => {
-    console.log(`[web] http://127.0.0.1:${port}  （重排：${rerank ? '開' : '關'}）`);
+    console.log(
+      `[web] http://127.0.0.1:${port}  （重排：${rerank ? '開' : '關'}，L3：${l3 ? '開' : '關'}）`,
+    );
   });
 }

@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
+import { Channel } from '@zhuyin/core';
 import { ImeEngine } from './engine.js';
 import { loadRuntime, saveAdapter } from './runtime.js';
 import { cmdEval, cmdSweep } from './eval.js';
@@ -45,6 +46,8 @@ async function main(): Promise<void> {
         };
       }
       const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter, hooks);
+      // L3 打錯／模糊音容錯：預設開，--no-l3 關閉
+      if (!process.argv.includes('--no-l3')) engine.channel = new Channel(legalSyllables);
       console.log(
         [
           '互動打字台（行模式）：',
@@ -191,7 +194,11 @@ async function main(): Promise<void> {
     case 'web': {
       // 網頁測試台：--port N（預設 8787）、--no-rerank 關閉 L6
       const { startWeb } = await import('./web.js');
-      await startWeb(argNum(['--port'], 8787)!, !process.argv.includes('--no-rerank'));
+      await startWeb(
+        argNum(['--port'], 8787)!,
+        !process.argv.includes('--no-rerank'),
+        !process.argv.includes('--no-l3'),
+      );
       break;
     }
 

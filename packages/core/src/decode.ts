@@ -10,6 +10,7 @@
  *   樸素「最後兩詞不同」做法的差異會全擠在句尾。
  */
 import type { LexiconEntry } from './index.js';
+import type { Hypothesis } from './l3.js';
 
 /** LM 側介面（結構化型別；@zhuyin/lm 的 LanguageModel 天然滿足）。 */
 export interface Scorer {
@@ -51,8 +52,12 @@ export interface WordBreakdown {
   charTerm: number;
   /** X2 使用者適應修飾 U(w)（log-space 加成） */
   uTerm: number;
+  /** L3 通道項：−（把觀察音節更正為 reading 的代價）；未更正為 0 */
+  chTerm: number;
   /** 該詞消耗的音節數（引擎對齊用） */
   spanLen: number;
+  /** 採用的讀音（L3 更正後的意圖音節；未更正時等於觀察音節） */
+  reading: readonly string[];
 }
 
 /**
@@ -64,6 +69,19 @@ export type ScoreModifier = (word: string, pos: number, spanLen: number) => numb
 export interface DecodeCallOptions {
   nBest?: number;
   modifier?: ScoreModifier;
+  /**
+   * L3 假設：每個位置的候選意圖音節（第一個須為觀察音節本身、代價 0）。
+   * 每個詞最多更正一個音節。未提供＝只用觀察音節（與無 L3 完全相同）。
+   */
+  alternatives?: ReadonlyArray<ReadonlyArray<Hypothesis>>;
+}
+
+/** 格中一條詞邊的候選（每次解碼每個 (起點, 長度) 只算一次） */
+interface SpanCand {
+  word: string;
+  reading: readonly string[];
+  /** 通道代價（≥0） */
+  cost: number;
 }
 
 export interface DecodePath {
@@ -90,7 +108,9 @@ interface PartialPath {
   wordTerm: number;
   charTerm: number;
   uTerm: number;
+  chTerm: number;
   spanLen: number;
+  reading: readonly string[];
 }
 
 const UNK_WORD = '\u25A1'; // □
@@ -162,6 +182,46 @@ export class Decoder {
 
   /** 每個 span 展開的最多候選詞數（高頻優先）。 */
   entryCap = 48;
+  /** L3 更正讀音每個 key 取的最多候選詞數（控制單音節更正爆量） */
+  altEntryCap = 8;
+  /** 單音節只在原讀音查無詞時才套用 L3 更正（見 spanCands） */
+  altSingleOnlyIfEmpty = true;
+
+  /** (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價。 */
+  private spanCands(
+    sequence: readonly string[],
+    pos: number,
+    len: number,
+    alts: ReadonlyArray<ReadonlyArray<Hypothesis>> | undefined,
+  ): SpanCand[] {
+    const obs = sequence.slice(pos, pos + len);
+    const best = new Map<string, SpanCand>();
+    const take = (reading: readonly string[], cost: number, cap: number): void => {
+      const entries = this.index.get(reading.join(' '));
+      if (!entries) return;
+      for (let i = 0; i < Math.min(cap, entries.length); i++) {
+        const w = entries[i]!.word;
+        const prev = best.get(w);
+        if (!prev || cost < prev.cost) best.set(w, { word: w, reading, cost });
+      }
+    };
+    take(obs, 0, this.entryCap);
+    // 單音節更正只在觀察音節查無任何詞（多半是不合法音節）時才做：
+    // 單音節替代每格會多出上百個單字候選、解碼慢 5–10 倍，且 LM 只是在近音單字裡挑。
+    // 多音節更正查詢稀疏（只有真實存在的詞），成本低、價值高，一律做。
+    if (alts && len === 1 && this.altSingleOnlyIfEmpty && best.size > 0) return [...best.values()];
+    if (alts) {
+      for (let i = 0; i < len; i++) {
+        for (const h of alts[pos + i] ?? []) {
+          if (h.cost === 0) continue;
+          const r = obs.slice();
+          r[i] = h.syl;
+          take(r, h.cost, this.altEntryCap);
+        }
+      }
+    }
+    return [...best.values()];
+  }
 
   private maxSpanCap(): number {
     return 10;
@@ -195,9 +255,13 @@ export class Decoder {
       wordTerm: 0,
       charTerm: 0,
       uTerm: 0,
+      chTerm: 0,
       spanLen: 0,
+      reading: [],
     };
     buckets[0]!.set('\t', [seed]);
+    // (起點, 長度) → 候選詞；與狀態無關，整次解碼共用
+    const spanCache = new Map<number, SpanCand[]>();
 
     for (let pos = 0; pos < n; pos++) {
       const stateGroups = buckets[pos]!;
@@ -214,21 +278,24 @@ export class Decoder {
         const rep = groupPaths[0]!;
 
         for (let len = 1; len <= maxLen; len++) {
-          const key = sequence.slice(pos, pos + len).join(' ');
-          const entries = this.index.get(key);
+          const ck = pos * 64 + len;
+          let capped = spanCache.get(ck);
+          if (!capped) {
+            capped = this.spanCands(sequence, pos, len, callOpts.alternatives);
+            spanCache.set(ck, capped);
+          }
           // 詞邊必須落在「實際結束位置」的桶，不是 pos+1
           const target = buckets[pos + len]!;
           touched.add(target);
-          if (!entries || entries.length === 0) {
+          if (capped.length === 0) {
             if (len === 1) {
               // OOV 音節：以未知詞邊保證格連通
               for (const p of groupPaths) {
-                this.extend(p, UNK_WORD, UNK_PENALTY, 0, 0, 1, target);
+                this.extend(p, UNK_WORD, UNK_PENALTY, 0, 0, 0, 1, [sequence[pos]!], target);
               }
             }
             continue;
           }
-          const capped = entries.length > this.entryCap ? entries.slice(0, this.entryCap) : entries;
           const lpws = new Array<number>(capped.length);
           for (let i = 0; i < capped.length; i++) {
             let lp = this.scorer.wordLogProb(capped[i]!.word, w1!, w2!);
@@ -260,7 +327,7 @@ export class Decoder {
             const lpc = lpcs ? lpcs[i]! : 0;
             const u = (us ? us[i]! : 0) + (idfs ? idfs[i]! : 0);
             for (const p of groupPaths) {
-              this.extend(p, ent.word, lpw, lpc, u, len, target);
+              this.extend(p, ent.word, lpw, lpc, u, -ent.cost, len, ent.reading, target);
             }
           }
         }
@@ -314,7 +381,9 @@ export class Decoder {
     lpw: number,
     lpc: number,
     uBonus: number,
+    chTerm: number,
     spanLen: number,
+    reading: readonly string[],
     target: Map<string, PartialPath[]>,
   ): void {
     const wordTerm = this.opts.a * lpw;
@@ -331,13 +400,15 @@ export class Decoder {
       w2: word,
       c1,
       c2,
-      score: p.score + wordTerm + charTerm + uBonus,
+      score: p.score + wordTerm + charTerm + uBonus + chTerm,
       parent: p,
       word,
       wordTerm,
       charTerm,
       uTerm: uBonus,
+      chTerm,
       spanLen,
+      reading,
     };
     const stateKey = `${np.w1}\t${np.w2}`;
     let list = target.get(stateKey);
@@ -357,7 +428,9 @@ export class Decoder {
         wordTerm: cur.wordTerm,
         charTerm: cur.charTerm,
         uTerm: cur.uTerm,
+        chTerm: cur.chTerm,
         spanLen: cur.spanLen,
+        reading: cur.reading,
       });
     }
     chain.reverse();

@@ -164,7 +164,7 @@ $('clear').onclick = () => { out.value = ''; };
 const es = new EventSource('/events');
 es.onmessage = ev => {
   const m = JSON.parse(ev.data);
-  if (m.type === 'hello') status.textContent = `已連線・重排${m.rerank ? '開' : '關'}`;
+  if (m.type === 'hello') status.textContent = `已連線・重排${m.rerank ? '開' : '關'}・L3 ${m.l3 ? '開' : '關'}`;
   if (m.type === 'L6') {
     render(m);
     comp.classList.add('flash');
