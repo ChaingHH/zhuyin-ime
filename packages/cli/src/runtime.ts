@@ -77,10 +77,10 @@ export async function loadRuntime(
     };
   } else if (opts.baseline === 'bigram') {
     scorer = {
-      wordLogProb: (w, c1) => {
-        const bi = lm.word.bi.get(`${c1} ${w}`);
+      wordLogProb: (w, _w1, w2) => {
+        const bi = lm.word.bi.get(`${w2} ${w}`);
         if (bi > 0 && lm.word.uni.has(w)) {
-          return Math.log(0.4 * (bi / (lm.word.biTotals.get(c1) ?? 1)));
+          return Math.log(0.4 * (bi / (lm.word.biTotals.get(w2) ?? 1)));
         }
         return Math.log((0.4 * ((lm.word.uni.get(w) ?? 0) + 1)) / (lm.word.total + 1));
       },
