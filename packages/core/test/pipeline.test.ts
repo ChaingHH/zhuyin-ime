@@ -57,12 +57,25 @@ describe('L1↔L2 往返', () => {
     expect(buf.sequence).toEqual(['ㄐㄧㄣ']);
   });
 
-  it('槽位衝突不接受；Backspace 可回退', () => {
+  it('同槽再按＝覆蓋；Backspace 刪的是剛按的符號', () => {
     const buf = new CompositionBuffer(DACHEN, legal);
     expect(buf.onKeyEvent({ code: 'KeyB', timestampMs: 0 }).accepted).toBe(true); // ㄖ
-    expect(buf.onKeyEvent({ code: 'KeyN', timestampMs: 0 }).accepted).toBe(false); // 第二聲母 ㄙ
+    expect(buf.onKeyEvent({ code: 'KeyU', timestampMs: 0 }).accepted).toBe(true); // ㄧ
+    expect(buf.onKeyEvent({ code: 'KeyN', timestampMs: 0 }).accepted).toBe(true); // ㄙ 覆蓋 ㄖ
+    expect(buf.pendingDisplay).toBe('ㄙㄧ');
+    buf.backspace(); // 刪剛按的 ㄙ（不還原 ㄖ）
+    expect(buf.pendingDisplay).toBe('ㄧ');
     buf.backspace();
     expect(buf.pendingDisplay).toBe('');
+  });
+
+  it('覆蓋後完成的音節用新符號', () => {
+    const buf = new CompositionBuffer(DACHEN, legal);
+    // ㄅ → 改按 ㄐ，再 ㄧ ㄣ 一聲 → ㄐㄧㄣ
+    for (const code of ['Digit1', 'KeyR', 'KeyU', 'KeyP', 'Space']) {
+      buf.onKeyEvent({ code, timestampMs: 0 });
+    }
+    expect(buf.sequence).toEqual(['ㄐㄧㄣ']);
   });
 
   it('非法音節標記為不合法但仍完成（交 L3 容錯）', () => {

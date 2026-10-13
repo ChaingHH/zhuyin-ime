@@ -88,28 +88,16 @@ export class CompositionBuffer {
     if (mapped.kind !== 'symbol') return null;
 
     const s = mapped.symbol;
-    // 槽位法核心：各符號按類別填自己的槽，**與到達順序無關**
-    // （音節內顛倒在此免費吸收）；僅同槽重複視為衝突。
-    if (isInitial(s)) {
-      if (this.partial.initial === undefined) {
-        this.partial.initial = s;
-        this.history.push('initial');
-        return { accepted: true, legal: true };
-      }
-    } else if (isMedial(s)) {
-      if (this.partial.medial === undefined) {
-        this.partial.medial = s;
-        this.history.push('medial');
-        return { accepted: true, legal: true };
-      }
-    } else if (isFinal(s)) {
-      if (this.partial.final === undefined) {
-        this.partial.final = s;
-        this.history.push('final');
-        return { accepted: true, legal: true };
-      }
-    }
-    return null; // 同槽重複 → 不接受（L3 上線後改為送容錯）
+    // 槽位法核心：各符號按類別填自己的槽，**與到達順序無關**（音節內顛倒在此免費吸收）。
+    const slot = isInitial(s) ? 'initial' : isMedial(s) ? 'medial' : isFinal(s) ? 'final' : null;
+    if (slot === null) return null;
+    // 同槽再按＝覆蓋（後按的取代先按的，與微軟注音一致）。
+    // 該槽移到退格歷史最後：接著 Backspace 刪的是剛按的符號，不還原被覆蓋者。
+    // 「覆蓋前那個才是對的」這類機率判斷留給 L3。
+    if (this.partial[slot] !== undefined) this.history = this.history.filter((h) => h !== slot);
+    this.partial[slot] = s;
+    this.history.push(slot);
+    return { accepted: true, legal: true };
   }
 
   /** Backspace：先退部分槽位，再退已完成音節。回傳是否有變動。 */

@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run",
+    "test": "vitest run --dir packages",
     "lint": "eslint packages",
     "format": "prettier --write \"packages/**/src/**/*.ts\" \"packages/**/test/**/*.ts\"",
     "data:lexicon": "npm run data:lexicon -w @zhuyin/data-pipeline",
