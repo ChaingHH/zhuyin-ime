@@ -4,6 +4,7 @@
  *
  * 主執行緒用 RerankWorker；本檔同時是 worker 的進入點（isMainThread=false 時）。
  */
+import { availableParallelism } from 'node:os';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { DecodePath } from '@zhuyin/core';
 import { PllReranker, type RerankerOptions } from './reranker.js';
@@ -24,7 +25,11 @@ export class RerankWorker {
   >();
 
   private constructor(opts: WorkerRerankerOptions) {
-    this.worker = new Worker(new URL(import.meta.url), { workerData: opts });
+    // ORT 預設吃滿核心，會把主執行緒的 L5 解碼從 ~70ms 拖到 ~190ms。
+    // 16 邏輯核實測（debug-threads.ts）：4–6 條時重排最快、L5 幾乎不受影響；≥8 兩者都變慢。
+    // ponytail: 「邏輯核/2−2」只在 16 核量過，其他機器用 numThreads 覆寫
+    const numThreads = opts.numThreads ?? Math.max(1, Math.floor(availableParallelism() / 2) - 2);
+    this.worker = new Worker(new URL(import.meta.url), { workerData: { ...opts, numThreads } });
     this.worker.on('message', (m: Reply) => {
       if ('ready' in m) return;
       const p = this.pending.get(m.id);

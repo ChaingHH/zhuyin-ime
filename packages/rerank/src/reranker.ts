@@ -41,6 +41,11 @@ export interface RerankerOptions {
    * 預設關閉：KN + 大語料 LM 上實測任何門檻（2/4/8）都不比不設好。
    */
   lmConfidentGap?: number;
+  /**
+   * onnxruntime intra-op 執行緒數（0=ORT 預設，吃滿所有核心）。
+   * 只影響速度、不影響結果；在 worker 裡跑時要留核心給主執行緒的 L5 解碼。
+   */
+  numThreads?: number;
 }
 
 export interface RerankResult {
@@ -68,6 +73,7 @@ export class PllReranker {
       charFreq: opts.charFreq ?? (() => Number.MAX_SAFE_INTEGER),
       polySingle: opts.polySingle ?? new Set(),
       lmConfidentGap: opts.lmConfidentGap ?? Infinity,
+      numThreads: opts.numThreads ?? 0,
     };
   }
 
@@ -76,6 +82,7 @@ export class PllReranker {
     r.tokenizer = (await AutoTokenizer.from_pretrained(r.opts.modelId)) as PreTrainedTokenizer;
     r.model = (await AutoModelForMaskedLM.from_pretrained(r.opts.modelId, {
       dtype: r.opts.dtype,
+      session_options: r.opts.numThreads > 0 ? { intraOpNumThreads: r.opts.numThreads } : undefined,
     })) as PreTrainedModel;
     return r;
   }
