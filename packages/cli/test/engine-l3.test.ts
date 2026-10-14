@@ -44,3 +44,21 @@ describe('引擎接 L3', () => {
     expect(typeSyllables(engine, ['ㄐㄧㄣ', 'ㄧㄢˋ'])).toBe('金驗');
   });
 });
+
+describe('英文模式', () => {
+  it('切到英文：先送出組字區、按鍵直接輸出；切回注音恢復組字', () => {
+    const decoder = new Decoder(SCORER);
+    decoder.loadLexicon(LEX);
+    const engine = new ImeEngine(decoder, LEGAL);
+    typeSyllables(engine, ['ㄐㄧㄣ']);
+    expect(engine.toggleMode()).toBe('金');
+    expect(engine.mode).toBe('english');
+    const st = engine.onKey({ code: 'KeyR', key: 'R', timestampMs: 0 });
+    expect(st.text).toBe('R');
+    expect(st.composition).toBe('');
+    expect(engine.syllableSequence).toEqual([]);
+    expect(engine.onKey({ code: 'ShiftLeft', key: 'Shift', timestampMs: 0 }).text).toBeUndefined();
+    expect(engine.toggleMode()).toBe('');
+    expect(typeSyllables(engine, ['ㄐㄧㄣ'])).toBe('金');
+  });
+});

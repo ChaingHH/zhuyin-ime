@@ -16,7 +16,11 @@ export interface EngineState {
   composition: string;
   candidates: DecodePath[];
   lastLegal: boolean;
+  /** 英文模式下這次按鍵直接輸出的字元 */
+  text?: string;
 }
+
+export type InputMode = 'zhuyin' | 'english';
 
 /**
  * L6 非同步重排掛鉤（L7：先顯示 L5，重排完成再替換）。
@@ -66,13 +70,15 @@ export class ImeEngine {
   private seqKey = '';
   /** L3 通道模型；設定後解碼會考慮打錯／模糊音的更正 */
   channel?: Channel;
+  /** 英文模式：按鍵不進 L1/L2，直接輸出字元 */
+  mode: InputMode = 'zhuyin';
 
   constructor(
     decoder: Decoder,
     legalSyllables: Iterable<string>,
     layout = DACHEN,
     adapter?: UserAdapter,
-    private readonly hooks?: RerankHooks,
+    private hooks?: RerankHooks,
   ) {
     this.comp = new CompositionBuffer(layout, legalSyllables);
     this.decoder = decoder;
@@ -81,6 +87,17 @@ export class ImeEngine {
 
   attachAdapter(a: UserAdapter): void {
     this.adapter = a;
+  }
+
+  /**
+   * 換掉 L6（undefined＝關閉）。進行中的重排結果作廢，防閃動記錄清空：
+   * 舊重排器的判斷不該延續到新重排器。下一次按鍵才用新設定重解碼。
+   */
+  setRerankHooks(h?: RerankHooks): void {
+    this.hooks = h;
+    this.gen++;
+    this.reranked = false;
+    this.sticky.clear();
   }
 
   get syllableSequence(): string[] {
@@ -171,7 +188,21 @@ export class ImeEngine {
     };
   }
 
+  /**
+   * 切換注音／英文。「單按 Shift」要看放開事件，由前端偵測後呼叫這裡。
+   * 組字區未送出的內容先送出（回傳送出的文字），避免切到英文後留著半句注音。
+   */
+  toggleMode(): string {
+    const text = this.commit();
+    this.mode = this.mode === 'zhuyin' ? 'english' : 'zhuyin';
+    return text;
+  }
+
   onKey(ev: KeyEvent): EngineState {
+    if (this.mode === 'english') {
+      const ch = ev.key !== undefined && [...ev.key].length === 1 ? ev.key : undefined;
+      return { composition: '', candidates: [], lastLegal: true, text: ch };
+    }
     const outcome = this.comp.onKeyEvent(ev);
     const seq = this.comp.sequence;
     const key = seq.join(' ');

@@ -21,6 +21,27 @@ function argNum(names: string[], def?: number): number | undefined {
   return def;
 }
 
+// 美式鍵盤、未按 Shift 時鍵碼產生的字元（行模式沒有 KeyboardEvent.key，英文模式要用）
+const PUNCT: Record<string, string> = {
+  Space: ' ',
+  Minus: '-',
+  Equal: '=',
+  Comma: ',',
+  Period: '.',
+  Slash: '/',
+  Semicolon: ';',
+  Quote: "'",
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  Backquote: '`',
+};
+function keyOfCode(code: string): string | undefined {
+  const m = /^(?:Key([A-Z])|Digit(\d))$/.exec(code);
+  if (m) return (m[1] ?? m[2])!.toLowerCase();
+  return PUNCT[code];
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2];
 
@@ -53,6 +74,7 @@ async function main(): Promise<void> {
           '互動打字台（行模式）：',
           '  一行 = 空白分隔鍵碼（如 KeyR KeyU KeyP Space）',
           '  Enter=送出 top-1；#2=改選第 2 候選送出（納入學習）',
+          '  ShiftLeft／ShiftRight＝單按 Shift，切換注音／英文（英文模式下鍵碼直接輸出字元）',
           '  :phrase 詞 音節…（手動造詞，如 :phrase 降息 ㄐㄧㄤˋ ㄒㄧ）',
           '  :adapt on|off（X2 開關）；:quit 離開',
         ].join('\n'),
@@ -84,7 +106,14 @@ async function main(): Promise<void> {
           return;
         }
         for (const token of trimmed.split(/\s+/).filter(Boolean)) {
-          if (token === 'Enter') {
+          if (token === 'ShiftLeft' || token === 'ShiftRight') {
+            // 行模式沒有「按住」，單獨一個 Shift 鍵碼就是單按
+            committed += engine.toggleMode();
+            console.log(`  切換為${engine.mode === 'english' ? '英文' : '注音'}：${committed}`);
+          } else if (engine.mode === 'english' && token === 'Backspace') {
+            committed = [...committed].slice(0, -1).join('');
+            console.log(`  ${token.padEnd(10)} => ${committed}`);
+          } else if (token === 'Enter') {
             committed += engine.commit();
             console.log(`  已送出：${committed}`);
           } else if (/^#\d+$/.test(token)) {
@@ -100,8 +129,10 @@ async function main(): Promise<void> {
           } else {
             const st = engine.onKey({
               code: token,
+              key: keyOfCode(token),
               timestampMs: performance.now(),
             });
+            if (st.text) committed += st.text;
             console.log(
               `  ${token.padEnd(10)} => ${committed}${st.composition}${st.lastLegal ? '' : ' [!]'}`,
             );
@@ -192,13 +223,14 @@ async function main(): Promise<void> {
     }
 
     case 'web': {
-      // 網頁測試台：--port N（預設 8787）、--no-rerank 關閉 L6
+      // 網頁測試台：--port N（預設 8787）、--l6 off|bert|kev（預設 bert；--no-rerank＝off）
+      // 網頁上可再切換 L6
       const { startWeb } = await import('./web.js');
-      await startWeb(
-        argNum(['--port'], 8787)!,
-        !process.argv.includes('--no-rerank'),
-        !process.argv.includes('--no-l3'),
-      );
+      const l6At = process.argv.indexOf('--l6');
+      const l6 = (
+        l6At >= 0 ? process.argv[l6At + 1] : process.argv.includes('--no-rerank') ? 'off' : 'bert'
+      ) as import('./web.js').L6Mode;
+      await startWeb(argNum(['--port'], 8787)!, l6, !process.argv.includes('--no-l3'));
       break;
     }
 

@@ -14,6 +14,8 @@ export type KeyCode = string;
 export interface KeyEvent {
   readonly code: KeyCode;
   readonly timestampMs: number;
+  /** 該鍵產生的字元（KeyboardEvent.key）；英文模式直接輸出它，注音管線不看 */
+  readonly key?: string;
 }
 
 /** 注音聲調：1~4 聲與 5（輕聲）。大千鍵盤上分別為空白/6/3/4/7。 */

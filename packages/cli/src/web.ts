@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { Channel, type DecodePath } from '@zhuyin/core';
-import { ImeEngine, type EngineState, type RerankHooks } from './engine.js';
+import { ImeEngine, type EngineState } from './engine.js';
 import { loadRuntime, saveAdapter } from './runtime.js';
 
 const PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'index.html');
@@ -35,7 +35,11 @@ function json(res: ServerResponse, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-export async function startWeb(port: number, rerank: boolean, l3: boolean): Promise<void> {
+/** L6 重排器：關閉、BERT PLL、Kev（Qwen3.5-4B 微調，需另開伺服器） */
+export type L6Mode = 'off' | 'bert' | 'kev';
+const L6_MODES: readonly L6Mode[] = ['off', 'bert', 'kev'];
+
+export async function startWeb(port: number, initialL6: L6Mode, l3: boolean): Promise<void> {
   console.log('[web] 載入模型中（約 1 分鐘）…');
   const { decoder, legalSyllables, adapter, lm } = await loadRuntime();
   const clients = new Set<ServerResponse>();
@@ -44,22 +48,54 @@ export async function startWeb(port: number, rerank: boolean, l3: boolean): Prom
   };
   let lastKeyAt = 0;
 
-  let hooks: RerankHooks | undefined;
-  if (rerank) {
-    const { RerankWorker } = await import('@zhuyin/rerank');
-    // BERT 放背景執行緒：在主執行緒跑會卡住事件迴圈，重排期間的按鍵要排隊
-    const rr = await RerankWorker.create({
-      weight: 0.5,
-      maxCandidates: 16,
-      gapThreshold: 6,
-      flipMargin: 0.75,
-      charCounts: Object.fromEntries(lm.char.uni),
-    });
-    hooks = {
+  // 重排器第一次選到才載入，之後留著：BERT worker 載入要數秒，來回切換不重載
+  type RerankFn = (paths: DecodePath[]) => Promise<DecodePath[]>;
+  const loaded = new Map<L6Mode, Promise<RerankFn>>();
+  const loaders: Record<Exclude<L6Mode, 'off'>, () => Promise<RerankFn>> = {
+    bert: async () => {
+      const { RerankWorker } = await import('@zhuyin/rerank');
+      // BERT 放背景執行緒：在主執行緒跑會卡住事件迴圈，重排期間的按鍵要排隊
+      const rr = await RerankWorker.create({
+        weight: 0.5,
+        maxCandidates: 16,
+        gapThreshold: 6,
+        flipMargin: 0.75,
+        charCounts: Object.fromEntries(lm.char.uni),
+      });
+      return (paths) => rr.rerank(paths);
+    },
+    kev: async () => {
+      const { KevReranker } = await import('@zhuyin/rerank');
+      const kev = new KevReranker({ url: process.env['KEV_URL'] });
+      // 先打一次確認伺服器在：沒開的話切換直接失敗，而不是之後每個音節默默報錯
+      const probe = (w: string): DecodePath => ({ words: [w], score: 0, breakdown: [] });
+      await kev.rerank([probe('今天'), probe('金天')]);
+      return async (paths) => (await kev.rerank(paths)).paths;
+    },
+  };
+  let l6: L6Mode = 'off';
+  const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter);
+  if (l3) engine.channel = new Channel(legalSyllables);
+
+  async function setL6(mode: L6Mode): Promise<void> {
+    if (mode === 'off') {
+      engine.setRerankHooks(undefined);
+      l6 = mode;
+      return;
+    }
+    let p = loaded.get(mode);
+    if (!p) {
+      p = loaders[mode]();
+      loaded.set(mode, p);
+      // 載入失敗不快取，伺服器開好後可以再試
+      p.catch(() => loaded.delete(mode));
+    }
+    const rerank = await p;
+    engine.setRerankHooks({
       rerank: (paths) =>
-        rr.rerank(paths).catch((e: Error) => {
+        rerank(paths).catch((e: Error) => {
           // 引擎會吞掉 L6 錯誤（不影響 L5 畫面）；測試台要看得到
-          console.error('[L6 錯誤]', e.message);
+          console.error(`[L6 ${mode} 錯誤]`, e.message);
           throw e;
         }),
       onUpdate: (st) =>
@@ -68,10 +104,14 @@ export async function startWeb(port: number, rerank: boolean, l3: boolean): Prom
           ...view(st, st.candidates),
           ms: Math.round(performance.now() - lastKeyAt),
         }),
-    };
+    });
+    l6 = mode;
   }
-  const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter, hooks);
-  if (l3) engine.channel = new Channel(legalSyllables);
+  try {
+    await setL6(initialL6);
+  } catch (e) {
+    console.error(`[web] L6=${initialL6} 載入失敗，改為關閉：${(e as Error).message}`);
+  }
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -85,19 +125,33 @@ export async function startWeb(port: number, rerank: boolean, l3: boolean): Prom
             'cache-control': 'no-cache',
             connection: 'keep-alive',
           });
-          res.write(`data: ${JSON.stringify({ type: 'hello', rerank, l3 })}\n\n`);
+          res.write(`data: ${JSON.stringify({ type: 'hello', l6, l3, mode: engine.mode })}\n\n`);
           clients.add(res);
           req.on('close', () => clients.delete(res));
         } else if (req.method === 'POST' && req.url === '/key') {
-          const code = String((await body(req))['code'] ?? '');
+          const b = await body(req);
+          const code = String(b['code'] ?? '');
+          const key = typeof b['key'] === 'string' ? b['key'] : undefined;
           lastKeyAt = performance.now();
-          const st = engine.onKey({ code, timestampMs: lastKeyAt });
+          const st = engine.onKey({ code, key, timestampMs: lastKeyAt });
           const ms = performance.now() - lastKeyAt;
           json(res, {
             ...view(st, engine.getCandidates()),
             legal: st.lastLegal,
+            text: st.text,
             ms: Math.round(ms),
           });
+        } else if (req.method === 'POST' && req.url === '/l6') {
+          const mode = (await body(req))['mode'] as L6Mode;
+          if (!L6_MODES.includes(mode)) throw new Error(`未知的 L6：${String(mode)}`);
+          const t0 = performance.now();
+          await setL6(mode);
+          console.log(`[web] L6 → ${mode}（${Math.round(performance.now() - t0)}ms）`);
+          json(res, { l6 });
+        } else if (req.method === 'POST' && req.url === '/mode') {
+          const text = engine.toggleMode();
+          if (text) saveAdapter(adapter).catch(() => {});
+          json(res, { mode: engine.mode, text });
         } else if (req.method === 'POST' && req.url === '/commit') {
           const k = Number((await body(req))['k'] ?? 0);
           const text = engine.commit(Number.isInteger(k) && k >= 0 ? k : 0);
@@ -114,7 +168,7 @@ export async function startWeb(port: number, rerank: boolean, l3: boolean): Prom
   });
   server.listen(port, '127.0.0.1', () => {
     console.log(
-      `[web] http://127.0.0.1:${port}  （重排：${rerank ? '開' : '關'}，L3：${l3 ? '開' : '關'}）`,
+      `[web] http://127.0.0.1:${port}  （L6：${l6}，L3：${l3 ? '開' : '關'}）`,
     );
   });
 }

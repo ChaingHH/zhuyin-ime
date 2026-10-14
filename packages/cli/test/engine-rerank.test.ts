@@ -90,6 +90,23 @@ describe('L6 非同步重排（先顯示 L5 再替換）', () => {
     await flush();
     expect(b.engine.commit()).toBe('惠');
   });
+
+  it('切換 L6：舊重排器的遲到結果丟棄；關閉後不再重排', async () => {
+    const { engine, updates, calls, type } = setup();
+    type();
+    const next = deferredRerank();
+    engine.setRerankHooks({ rerank: next.rerank, onUpdate: (s) => updates.push(s) });
+    calls[0]!.resolve(); // 舊重排器回來了
+    await flush();
+    expect(updates).toHaveLength(0);
+    expect(engine.getCandidates()[0]!.words.join('')).toBe('會');
+    type();
+    expect(next.calls).toHaveLength(1); // 新重排器接手
+
+    engine.setRerankHooks(undefined);
+    type();
+    expect(next.calls).toHaveLength(1);
+  });
 });
 
 describe('L7 防閃動（L6 改過的詞加分）', () => {

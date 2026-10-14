@@ -51,7 +51,7 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 ```bash
 node packages/cli/dist/index.js type                 # interactive: space-separated KeyboardEvent.code per line
 node packages/cli/dist/index.js type --rerank        # L5 shown immediately; BERT rerank replaces it async ([L6] lines)
-node packages/cli/dist/index.js web [--port 8787] [--no-rerank] [--no-l3]  # browser testbench: type with the real keyboard (Dachen), L6 pushed via SSE
+node packages/cli/dist/index.js web [--port 8787] [--l6 off|bert|kev] [--no-l3]  # browser testbench: type with the real keyboard (Dachen), L6 pushed via SSE; L6 switchable in the page (kev needs the Kev server, KEV_URL overrides)
 npx tsx debug-l3.ts [keyErr] [cogErr] [scales]   # L3 eval: clean + X3-injected noisy input, L3 off vs cost scales
 node packages/cli/dist/index.js replay <keys.jsonl>
 node packages/cli/dist/index.js eval [-n N] [-a A] [-g GAMMA] [--rerank -b W --gap G --maxc K --flip M] [--kev --kw W --ktop N --knoul] [--idf X] [--baseline classic|bigram]
