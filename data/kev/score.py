@@ -52,7 +52,8 @@ def score(line):
 
 
 lines = [l for l in open(a.inp, encoding="utf-8") if l.strip()]
-with ThreadPoolExecutor(4) as ex, open(a.out, "w", encoding="utf-8") as f:
+# 一次一個請求：並行送反而較慢
+with ThreadPoolExecutor(1) as ex, open(a.out, "w", encoding="utf-8") as f:
     for i, lp in enumerate(ex.map(score, lines)):
         f.write(json.dumps({"logp": lp}) + "\n")
         if i % 100 == 0:
