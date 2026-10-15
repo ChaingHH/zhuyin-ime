@@ -30,6 +30,8 @@ export interface ChannelOptions {
   tone?: number;
   /** 模糊音 */
   fuzzy?: number;
+  /** 前後鼻音 ㄣ/ㄥ：台灣最常見的模糊音，代價比其他模糊音低 */
+  nasal?: number;
   /** 每個音節最多保留幾個非原音節假設（低代價優先） */
   maxAlts?: number;
 }
@@ -122,6 +124,8 @@ export class Channel {
       toneAdj: opts.toneAdj ?? 7.5,
       tone: opts.tone ?? 10.5,
       fuzzy: opts.fuzzy ?? 7.5,
+      // 3.5：ㄧㄣ ㄍㄞ → 應該（照打的「因|該」只贏 3.5）；乾淨輸入 dev/test −0.4/−0.3
+      nasal: opts.nasal ?? 3.5,
       maxAlts: opts.maxAlts ?? 24,
     };
     for (const [code, sym] of Object.entries(layout.codeMap)) {
@@ -175,7 +179,8 @@ export class Channel {
           if (sSlot === slot) add({ ...p, [slot]: s }, o.sub);
           else if (p[sSlot] === undefined) add({ ...p, [slot]: undefined, [sSlot]: s }, o.sub);
         }
-        for (const s of this.fuzzy.get(c) ?? []) add({ ...p, [slot]: s }, o.fuzzy);
+        const fz = c === 'ㄣ' || c === 'ㄥ' ? o.nasal : o.fuzzy;
+        for (const s of this.fuzzy.get(c) ?? []) add({ ...p, [slot]: s }, fz);
       }
       // 漏按一鍵：意圖多一個符號（只補空槽）
       const pools: Record<Slot, readonly string[]> = {

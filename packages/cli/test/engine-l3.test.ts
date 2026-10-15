@@ -27,7 +27,7 @@ describe('引擎接 L3', () => {
     decoder.loadLexicon(LEX);
     const adapter = new UserAdapter();
     const engine = new ImeEngine(decoder, LEGAL, undefined, adapter);
-    engine.channel = new Channel(LEGAL, { fuzzy: 3 });
+    engine.channel = new Channel(LEGAL, { nasal: 3 });
 
     expect(typeSyllables(engine, ['ㄐㄧㄣ', 'ㄧㄢˋ'])).toBe('經驗');
     expect(engine.commit()).toBe('經驗');

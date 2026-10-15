@@ -68,6 +68,7 @@ for (const s of scales) {
     toneAdj: 5 * s,
     tone: 7 * s,
     fuzzy: 5 * s,
+    nasal: process.env.NASAL ? Number(process.env.NASAL) : undefined,
   });
   run(`L3 s=${s}`, ch);
 }

@@ -49,7 +49,7 @@ describe('解碼器使用 L3 假設', () => {
   };
   const dec = new Decoder(scorer);
   dec.loadLexicon(lex);
-  const ch = new Channel(['ㄐㄧㄣ', 'ㄐㄧㄥ', 'ㄧㄢˋ'], { fuzzy: 3 });
+  const ch = new Channel(['ㄐㄧㄣ', 'ㄐㄧㄥ', 'ㄧㄢˋ'], { nasal: 3 });
   const obs = ['ㄐㄧㄣ', 'ㄧㄢˋ']; // 把 ㄥ 打成 ㄣ
 
   it('沒有 L3：只能拼出單字', () => {
