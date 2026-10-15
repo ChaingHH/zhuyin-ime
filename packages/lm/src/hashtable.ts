@@ -140,6 +140,29 @@ export class HashTable {
     }
   }
 
+  /** 序列化用（lm.bin）：內部陣列與量化位元數（0 = 未量化）。 */
+  dump(): { bits: 0 | 8 | 16; size: number; arrays: ArrayBufferView[] } {
+    const bits = this.lut ? (this.lut.length === 256 ? 8 : 16) : 0;
+    return { bits, size: this.size, arrays: [this.k1, this.k2, ...this.cols] };
+  }
+
+  /** dump() 的反向：arrays 直接當成表的儲存（不複製），型別須與 bits 對應。 */
+  static restore(
+    ncols: number,
+    bits: 0 | 8 | 16,
+    size: number,
+    arrays: ArrayBufferView[],
+  ): HashTable {
+    const t = new HashTable(ncols, 0);
+    t.k1 = arrays[0] as Uint32Array;
+    t.k2 = arrays[1] as Uint32Array | Uint16Array;
+    t.cols = arrays.slice(2) as Array<Uint32Array | Uint16Array | Uint8Array>;
+    t.cap = t.k1.length;
+    t.size = size;
+    if (bits) t.lut = codebook(bits).lut;
+    return t;
+  }
+
   /** 佔用位元組數（鍵＋值陣列） */
   get bytes(): number {
     return [this.k1, this.k2, ...this.cols].reduce((s, a) => s + a.byteLength, 0);

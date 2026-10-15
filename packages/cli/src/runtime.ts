@@ -39,13 +39,18 @@ export async function loadRuntime(
     baseline?: 'classic' | 'bigram';
   } = {},
 ): Promise<LoadedRuntime> {
-  // ZHUYIN_LM 可指定模型檔；預設優先用 train.ts 的 .tsv 輸出，否則退回舊 .json
+  // ZHUYIN_LM 可指定模型檔；預設優先用 pack.ts 打包的 .bin（已剪枝量化），其次 train.ts 的
+  // .tsv，最後舊 .json。有設剪枝／量化環境變數時跳過 .bin（bin 的設定在打包時就固定了）。
   const models = path.join(REPO, 'data', 'models');
+  const custom = ['ZHUYIN_LM_MIN_BI', 'ZHUYIN_LM_MIN_TRI', 'ZHUYIN_LM_QUANT'].some(
+    (k) => process.env[k] !== undefined,
+  );
   const lmFile =
     process.env['ZHUYIN_LM'] ??
-    (existsSync(path.join(models, 'lm.tsv'))
-      ? path.join(models, 'lm.tsv')
-      : path.join(models, 'lm.json'));
+    [...(custom ? [] : ['lm.bin']), 'lm.tsv', 'lm.json']
+      .map((f) => path.join(models, f))
+      .find((f) => existsSync(f)) ??
+    path.join(models, 'lm.json');
   const lexFile = path.join(REPO, 'data', 'processed', 'lexicon.jsonl');
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 

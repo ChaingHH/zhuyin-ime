@@ -67,3 +67,33 @@ describe('LanguageModel KN', () => {
     expect(pruned.wordLogProb('b', 'x', 'a')).toBeCloseTo(Math.log(pb), 10);
   });
 });
+
+describe('LanguageModel .bin', () => {
+  it('存檔再載入與原模型機率相同（剪枝＋量化，含 BOS 空字串鍵）', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'lm-'));
+    const lines = ['#meta\t{"wordTokens":9,"charTokens":0,"trainedAt":"x","sources":[]}'];
+    const words = ['', 'a', 'b', 'c', 'd'];
+    for (const w of words) lines.push(`wu\t${w.length + 3}\t${w}`);
+    for (const x of words)
+      for (const y of words) lines.push(`wb\t${(x.length * 3 + y.length) % 4}\t${x} ${y}`);
+    for (const x of words)
+      for (const y of words)
+        for (const z of words) lines.push(`wt\t${(x + y + z).length}\t${x} ${y}\t${z}`);
+    for (let i = 0; i < 300; i++)
+      lines.push(`cu\t${i + 1}\t字${i}`, `cb\t${i * 97}\t字${i} 字${i + 1}`);
+    writeFileSync(path.join(dir, 'lm.tsv'), lines.join('\n'));
+    const opts = { minBi: 2, minTri: 2, quant: 8 } as const;
+    const a = await LanguageModel.load(path.join(dir, 'lm.tsv'), opts);
+    await a.save(path.join(dir, 'lm.bin'));
+    const b = await LanguageModel.load(path.join(dir, 'lm.bin'));
+    expect(b.meta).toEqual(a.meta);
+    expect(b.word.bi.size).toBe(a.word.bi.size);
+    for (const w of words)
+      for (const x of words)
+        for (const y of words) expect(b.wordLogProb(w, x, y)).toBe(a.wordLogProb(w, x, y));
+    for (let i = 0; i < 300; i++)
+      expect(b.charLogProb(`字${i + 1}`, '', `字${i}`)).toBe(
+        a.charLogProb(`字${i + 1}`, '', `字${i}`),
+      );
+  });
+});

@@ -6,7 +6,7 @@
  *   在解碼器以 log-linear 相加（權重 a、γ），不做線性內插。
  */
 import { createReadStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { HashTable } from './hashtable.js';
 
@@ -50,6 +50,29 @@ export interface NgramIndex {
 }
 
 const BACKOFF = 0.4;
+
+const BIN_MAGIC = 'ZYLMBIN1';
+type Blob = [offset: number, bytes: number];
+interface BinMap {
+  n: number;
+  keys: Blob;
+  vals: Blob;
+}
+interface BinTable {
+  ncols: number;
+  bits: 0 | 8 | 16;
+  size: number;
+  arrays: Blob[];
+}
+type BinIndex = { total: number; contTotal: number; bi: BinTable; tri: BinTable } & Record<
+  'uni' | 'cont' | 'biTotals' | 'biTypes' | 'biKept',
+  BinMap
+>;
+interface BinHeader {
+  meta: LmJson['meta'];
+  word: BinIndex;
+  char: BinIndex;
+}
 
 function emptyIndex(): NgramIndex {
   return {
@@ -128,9 +151,13 @@ export class LanguageModel {
 
   private constructor() {}
 
-  /** 載入 .json（舊格式）或 .tsv（逐行 section\tcount\tkey，train.ts 輸出）。 */
+  /**
+   * 載入 .json（舊格式）、.tsv（逐行 section\tcount\tkey，train.ts 輸出）
+   * 或 .bin（save() 輸出；剪枝／量化在打包時已做完，opts 不再作用）。
+   */
   static async load(file: string, opts: LoadOptions = {}): Promise<LanguageModel> {
     const lm = new LanguageModel();
+    if (file.endsWith('.bin')) return lm.readBin(file);
     const add = (sec: string, key: string, count: number): void => {
       const s = SECTIONS[sec];
       if (s) addEntry(lm[s[0]], s[1], key, count, opts);
@@ -167,6 +194,120 @@ export class LanguageModel {
     if (opts.quant)
       for (const t of [this.word.bi, this.word.tri, this.char.bi, this.char.tri])
         t.freeze(opts.quant);
+    return this;
+  }
+
+  /**
+   * 存成 .bin：magic、u32 標頭長度、JSON 標頭，之後是 8 位元組對齊的原始陣列。
+   * 小表（uni、cont、biTotals…）存成 "
+" 連接的鍵＋Float64 值；
+   * 大表直接倒出 HashTable 內部陣列，載入時以 view 指向檔案 buffer，不重建。
+   * 上下文總量（biTotals、bi 欄 1）含剪掉的計數，所以照存，不從保留項重算。
+   */
+  async save(file: string): Promise<void> {
+    const blobs: Uint8Array[] = [];
+    let off = 0;
+    const put = (a: ArrayBufferView): [number, number] => {
+      const b = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+      const at = off;
+      blobs.push(b);
+      off += b.byteLength;
+      const pad = (8 - (off % 8)) % 8;
+      if (pad) blobs.push(new Uint8Array(pad));
+      off += pad;
+      return [at, b.byteLength];
+    };
+    const map = (m: Map<string, number>) => ({
+      n: m.size,
+      keys: put(Buffer.from([...m.keys()].join('\n'), 'utf8')),
+      vals: put(Float64Array.from(m.values())),
+    });
+    const table = (t: HashTable) => {
+      const d = t.dump();
+      return { ncols: t.ncols, bits: d.bits, size: d.size, arrays: d.arrays.map(put) };
+    };
+    const index = (x: NgramIndex) => ({
+      total: x.total,
+      contTotal: x.contTotal,
+      uni: map(x.uni),
+      cont: map(x.cont),
+      biTotals: map(x.biTotals),
+      biTypes: map(x.biTypes),
+      biKept: map(x.biKept),
+      bi: table(x.bi),
+      tri: table(x.tri),
+    });
+    const header = Buffer.from(
+      JSON.stringify({ meta: this.meta, word: index(this.word), char: index(this.char) }),
+      'utf8',
+    );
+    // 標頭補齊到 8 的倍數，資料區起點才對齊
+    const start = Math.ceil((BIN_MAGIC.length + 4 + header.length) / 8) * 8;
+    const head = Buffer.alloc(start);
+    head.write(BIN_MAGIC, 0, 'latin1');
+    head.writeUInt32LE(header.length, BIN_MAGIC.length);
+    header.copy(head, BIN_MAGIC.length + 4);
+    const fh = await open(file, 'w');
+    try {
+      await fh.write(head);
+      for (const b of blobs) await fh.write(b);
+    } finally {
+      await fh.close();
+    }
+  }
+
+  private async readBin(file: string): Promise<LanguageModel> {
+    let buf: Uint8Array = await readFile(file);
+    // 大檔的 Buffer 自成一塊（byteOffset 0）；小檔可能來自共用池，不對齊就複製一份
+    if (buf.byteOffset % 8) buf = new Uint8Array(buf);
+    const nb = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (nb.toString('latin1', 0, BIN_MAGIC.length) !== BIN_MAGIC)
+      throw new Error(`${file} 不是 lm.bin 格式`);
+    const hlen = nb.readUInt32LE(BIN_MAGIC.length);
+    const h0 = BIN_MAGIC.length + 4;
+    const h = JSON.parse(nb.toString('utf8', h0, h0 + hlen)) as BinHeader;
+    const base = Math.ceil((h0 + hlen) / 8) * 8;
+    const view = <T>(
+      C: { new (b: ArrayBuffer, o: number, n: number): T; BYTES_PER_ELEMENT: number },
+      [o, n]: [number, number],
+    ): T => new C(buf.buffer as ArrayBuffer, buf.byteOffset + base + o, n / C.BYTES_PER_ELEMENT);
+    const map = (m: BinMap): Map<string, number> => {
+      const out = new Map<string, number>();
+      if (!m.n) return out;
+      const keys = nb.toString('utf8', base + m.keys[0], base + m.keys[0] + m.keys[1]).split('\n');
+      const vals = view(Float64Array, m.vals);
+      for (let i = 0; i < m.n; i++) out.set(keys[i]!, vals[i]!);
+      return out;
+    };
+    const table = (t: BinTable): HashTable => {
+      // 與 HashTable.rehash 一致：k1 Uint32；量化後 k2 Uint16、值欄 bits 位元
+      const Col = (t.bits === 8 ? Uint8Array : t.bits === 16 ? Uint16Array : Uint32Array) as {
+        new (b: ArrayBuffer, o: number, n: number): ArrayBufferView;
+        BYTES_PER_ELEMENT: number;
+      };
+      const [k1, k2, ...cols] = t.arrays;
+      const arrays = [
+        view(Uint32Array, k1!),
+        t.bits ? view(Uint16Array, k2!) : view(Uint32Array, k2!),
+        ...cols.map((a) => view(Col, a)),
+      ];
+      return HashTable.restore(t.ncols, t.bits, t.size, arrays);
+    };
+    for (const k of ['word', 'char'] as const) {
+      const x = h[k];
+      Object.assign(this[k], {
+        total: x.total,
+        contTotal: x.contTotal,
+        uni: map(x.uni),
+        cont: map(x.cont),
+        biTotals: map(x.biTotals),
+        biTypes: map(x.biTypes),
+        biKept: map(x.biKept),
+        bi: table(x.bi),
+        tri: table(x.tri),
+      });
+    }
+    this.meta = h.meta;
     return this;
   }
 

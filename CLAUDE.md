@@ -40,12 +40,13 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 `data/raw`, `data/models`, `data/user` are gitignored. The reranker loads `Xenova/bert-base-chinese` fp32 ONNX from `data/models/hf/`.
 
 - `train.ts` 輸出逐行 `.tsv`（`section\tcount\tkey`），不是 JSON：大模型超過 V8 單一字串上限。`LanguageModel.load` 兩種都讀。
-- runtime 預設載入 `data/models/lm.tsv`，不存在才退回舊 `lm.json`；`ZHUYIN_LM=<path>` 可覆寫。
+- runtime 預設載入 `data/models/lm.bin`，其次 `lm.tsv`，最後舊 `lm.json`；`ZHUYIN_LM=<path>` 可覆寫。有設 `ZHUYIN_LM_MIN_*`／`ZHUYIN_LM_QUANT` 時跳過 `.bin`。
+- `lm.bin`：`npx tsx packages/lm/src/pack.ts [lm.tsv] [lm.bin]`（約 40 秒，吃同樣的剪枝／量化環境變數）把剪枝量化後的模型存成二進位（約 330MB）。載入約 1 秒、RSS 約 700MB、準確率與 tsv 路徑相同；HashTable 陣列直接 view 到檔案 buffer。重新訓練 lm.tsv 後要重新打包。
 - runtime 的二元／三元表存在 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map：載入約 2GB RSS、JS heap < 0.1GB，不需加大 heap。改回 Map 會讓每次 major GC 掃描數千萬物件（實測每句 +700ms 延遲）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
 - `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。
 - `LM_TOKEN_PENALTY`（預設 14）必須大於高頻單字的 log(freq)，否則訓練斷詞會把詞切成單字。
 - `debug-acc.ts`：一次載入、多組設定的實驗台；dev=偶數句、test=奇數句，另列 N-best oracle。
-- 載入時剪枝／量化：`ZHUYIN_LM_MIN_BI`、`ZHUYIN_LM_MIN_TRI`（計數低於此值不存，上下文總量仍含被剪部分）、`ZHUYIN_LM_QUANT=0|8|16`（`HashTable.freeze`：對數碼本＋48-bit 指紋）。runtime 預設 `bi>=2 tri>=3 q=8`：RSS 1937→679MB，句準確率 −0.2／−0.6；要原始模型設 `ZHUYIN_LM_MIN_BI=1 ZHUYIN_LM_MIN_TRI=1 ZHUYIN_LM_QUANT=0`；`bi>=2 q=16` 899MB 無損。仍要讀完整 lm.tsv（載入約 70 秒）。實驗台 `debug-prune.ts`（一設定一行程）。`ZHUYIN_NO_USER=1` 不載入 adapter.json。
+- 載入時剪枝／量化：`ZHUYIN_LM_MIN_BI`、`ZHUYIN_LM_MIN_TRI`（計數低於此值不存，上下文總量仍含被剪部分）、`ZHUYIN_LM_QUANT=0|8|16`（`HashTable.freeze`：對數碼本＋48-bit 指紋）。runtime 預設 `bi>=2 tri>=3 q=8`：RSS 1937→679MB，句準確率 −0.2／−0.6；要原始模型設 `ZHUYIN_LM_MIN_BI=1 ZHUYIN_LM_MIN_TRI=1 ZHUYIN_LM_QUANT=0`；`bi>=2 q=16` 899MB 無損。從 tsv 載入要讀完整檔案（約 40–70 秒），日常用打包好的 lm.bin。實驗台 `debug-prune.ts`（一設定一行程）。`ZHUYIN_NO_USER=1` 不載入 adapter.json。
 - 微軟注音對比：`debug-ms-keys.ts` 產生大千 VK 序列，`powershell -STA -File debug-ms-bopomofo.ps1 -Keys k.tsv -Out o.tsv -KeyDelay 2 [-Skip N -Limit N]`（SendInput 打進自己的文字框；要 IMM `ImmSetOpenStatus` 才會進中文模式、`timeBeginPeriod(1)` 才跑得快；前景被搶就中止）會佔用鍵盤，使用者不在電腦前才能跑；`debug-ms-compare.ts` 計分。
 
 ### CLI testbench (`packages/cli`)
