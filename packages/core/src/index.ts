@@ -14,7 +14,7 @@ export type KeyCode = string;
 export interface KeyEvent {
   readonly code: KeyCode;
   readonly timestampMs: number;
-  /** 該鍵產生的字元（KeyboardEvent.key）；英文模式直接輸出它，注音管線不看 */
+  /** 該鍵產生的字元（KeyboardEvent.key）；英文模式直接輸出它，注音模式只用來認標點（Shift+, 等） */
   readonly key?: string;
 }
 

@@ -74,10 +74,22 @@ export interface DecodeCallOptions {
    * 每個詞最多更正一個音節。未提供＝只用觀察音節（與無 L3 完全相同）。
    */
   alternatives?: ReadonlyArray<ReadonlyArray<Hypothesis>>;
+  /**
+   * 使用者選字固定的詞段：解碼只走「該段恰好是這個詞」的路徑，
+   * 跨過段邊界的詞一律不考慮。各段不可重疊（呼叫端保證）。
+   */
+  fixed?: ReadonlyArray<FixedSpan>;
+}
+
+/** 使用者選定的詞段：從第 pos 個音節起、len 個音節固定為 word */
+export interface FixedSpan {
+  pos: number;
+  len: number;
+  word: string;
 }
 
 /** 格中一條詞邊的候選（每次解碼每個 (起點, 長度) 只算一次） */
-interface SpanCand {
+export interface SpanCand {
   word: string;
   reading: readonly string[];
   /** 通道代價（≥0） */
@@ -115,6 +127,14 @@ interface PartialPath {
 
 const UNK_WORD = '\u25A1'; // □
 const UNK_PENALTY = Math.log(1e-7);
+/**
+ * 組字區裡的原樣字元（目前只有組字中按的空格）：不含任何注音符號的 token。
+ * 解碼時原樣輸出、自成一詞，詞不能跨過它。
+ */
+export const isLiteralToken = (t: string): boolean => !/[ㄅ-ㄯ]/u.test(t);
+
+/** spanCache 標記：此 span 被固定段擋住（不同於「查無詞」，不補 UNK） */
+const BLOCKED: SpanCand[] = [];
 
 export class Decoder {
   private readonly scorer: Scorer;
@@ -187,14 +207,20 @@ export class Decoder {
   /** 單音節只在原讀音查無詞時才套用 L3 更正（見 spanCands） */
   altSingleOnlyIfEmpty = true;
 
-  /** (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價。 */
-  private spanCands(
+  /**
+   * (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價。
+   * cap：原讀音取前幾個詞（高頻優先）；選字視窗要列全部時傳 Infinity。
+   */
+  spanCands(
     sequence: readonly string[],
     pos: number,
     len: number,
     alts: ReadonlyArray<ReadonlyArray<Hypothesis>> | undefined,
+    cap = this.entryCap,
   ): SpanCand[] {
     const obs = sequence.slice(pos, pos + len);
+    if (obs.some(isLiteralToken))
+      return len === 1 ? [{ word: obs[0]!, reading: obs, cost: 0 }] : [];
     const best = new Map<string, SpanCand>();
     const take = (reading: readonly string[], cost: number, cap: number): void => {
       const entries = this.index.get(reading.join(' '));
@@ -205,7 +231,7 @@ export class Decoder {
         if (!prev || cost < prev.cost) best.set(w, { word: w, reading, cost });
       }
     };
-    take(obs, 0, this.entryCap);
+    take(obs, 0, cap);
     // 單音節更正只在觀察音節查無任何詞（多半是不合法音節）時才做：
     // 單音節替代每格會多出上百個單字候選、解碼慢 5–10 倍，且 LM 只是在近音單字裡挑。
     // 多音節更正查詢稀疏（只有真實存在的詞），成本低、價值高，一律做。
@@ -237,6 +263,7 @@ export class Decoder {
     if (n === 0) return [];
     const nBest = callOpts.nBest ?? this.opts.nBest;
     const modifier = callOpts.modifier;
+    const fixed = callOpts.fixed ?? [];
 
     // buckets[pos][stateKey] = 該狀態的 top-K 部分路徑
     const buckets: Array<Map<string, PartialPath[]>> = Array.from(
@@ -282,8 +309,20 @@ export class Decoder {
           let capped = spanCache.get(ck);
           if (!capped) {
             capped = this.spanCands(sequence, pos, len, callOpts.alternatives);
+            const f = fixed.find((x) => x.pos < pos + len && pos < x.pos + x.len);
+            if (f) {
+              // 與固定段重疊：只有恰好等於該段的那個詞能走（找不到就走不通，不補 UNK）
+              const exact = f.pos === pos && f.len === len;
+              capped = exact ? capped.filter((c) => c.word === f.word) : [];
+              if (exact && capped.length === 0) {
+                const all = this.spanCands(sequence, pos, len, callOpts.alternatives, Infinity);
+                capped = all.filter((c) => c.word === f.word);
+              }
+              if (capped.length === 0) capped = BLOCKED;
+            }
             spanCache.set(ck, capped);
           }
+          if (capped === BLOCKED) continue;
           // 詞邊必須落在「實際結束位置」的桶，不是 pos+1
           const target = buckets[pos + len]!;
           touched.add(target);

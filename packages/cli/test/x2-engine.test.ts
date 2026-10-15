@@ -46,23 +46,19 @@ describe('X2 引擎整合：覆蓋缺口的學習曲線', () => {
     // commit 已把相鄰單字合併挖詞入格
     expect(adapter.phrases.has('聯準會')).toBe(true);
 
-    // t1：同一引擎再打一次——格上有邊了（且此 stub 下新詞即可競爭）
+    // t1：同一引擎再打一次——格上有邊了。整詞路徑與三單字路徑同形，
+    // 整句候選只留分數高的那條；整詞要從選字視窗選（游標移到最前、↓、選第 1 個＝最長的詞）
     keysFor(engine, SEQ);
-    const cands = engine.getCandidates().map((p) => p.words.join(''));
-    expect(cands).toContain('聯準會');
-
-    // 明示選擇（#n 語意）納入學習——注意：三單字路徑與整詞路徑顯示同形，
-    // 必須以「單一詞路徑」定位（真實候選視窗的去重是 L7 的工作）
-    const k = engine
-      .getCandidates()
-      .findIndex((p) => p.words.length === 1 && p.words[0] === '聯準會');
-    expect(k).toBeGreaterThanOrEqual(0);
-    engine.commit(k);
+    for (const code of ['ArrowLeft', 'ArrowLeft', 'ArrowLeft', 'ArrowDown'])
+      engine.onKey({ code, timestampMs: 0 });
+    engine.onKey({ code: 'Digit1', timestampMs: 0 });
+    expect(engine.getCandidates()[0]!.words).toEqual(['聯準會']);
+    engine.commit();
     expect(adapter.modifierFor(SEQ, '聯準會', 0)).toBeGreaterThan(0);
 
     // t2：之後的解碼以修飾後分數排序
     keysFor(engine, SEQ);
-    expect(engine.getCandidates()[0]!.words.join('')).toBe('聯準會');
+    expect(engine.getCandidates()[0]!.words).toEqual(['聯準會']);
   });
 
   it('kill-switch：關閉後 top-1 的詞與分數與無 X2 完全一致（學到的詞彙仍在格上，但 U(w)=0）', () => {

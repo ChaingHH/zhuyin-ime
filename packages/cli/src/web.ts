@@ -9,16 +9,31 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { Channel, type DecodePath } from '@zhuyin/core';
-import { ImeEngine, type EngineState } from './engine.js';
+import { ImeEngine, type EngineState, type MenuView } from './engine.js';
 import { loadRuntime, saveAdapter } from './runtime.js';
 
 const PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'index.html');
 
 /** 送給瀏覽器的狀態：候選只取前幾名的文字 */
-function view(st: EngineState, cands: DecodePath[]): { composition: string; candidates: string[] } {
+function view(
+  st: EngineState,
+  cands: DecodePath[],
+): {
+  composition: string;
+  segments: string[];
+  candidates: string[];
+  cursor: number;
+  pending?: string;
+  menu?: MenuView;
+} {
   return {
     composition: st.composition,
+    // 首選的斷詞：頁面逐詞畫底線，看得出詞的邊界（composition 尾端多出的是未完成的注音）
+    segments: cands[0]?.words ?? [],
     candidates: cands.slice(0, 8).map((p) => p.words.join('')),
+    cursor: st.cursor,
+    pending: st.pending,
+    menu: st.menu,
   };
 }
 
@@ -135,12 +150,17 @@ export async function startWeb(port: number, initialL6: L6Mode, l3: boolean): Pr
           lastKeyAt = performance.now();
           const st = engine.onKey({ code, key, timestampMs: lastKeyAt });
           const ms = performance.now() - lastKeyAt;
+          // 注音模式下打標點會先送出組字區（有學習）→ 存檔
+          if (st.text && engine.mode === 'zhuyin') saveAdapter(adapter).catch(() => {});
           json(res, {
             ...view(st, engine.getCandidates()),
             legal: st.lastLegal,
             text: st.text,
             ms: Math.round(ms),
           });
+        } else if (req.method === 'GET' && req.url === '/stats') {
+          const m = process.memoryUsage();
+          json(res, { rss: m.rss, heap: m.heapUsed, uptime: Math.round(process.uptime()) });
         } else if (req.method === 'POST' && req.url === '/l6') {
           const mode = (await body(req))['mode'] as L6Mode;
           if (!L6_MODES.includes(mode)) throw new Error(`未知的 L6：${String(mode)}`);
@@ -167,8 +187,6 @@ export async function startWeb(port: number, initialL6: L6Mode, l3: boolean): Pr
     })();
   });
   server.listen(port, '127.0.0.1', () => {
-    console.log(
-      `[web] http://127.0.0.1:${port}  （L6：${l6}，L3：${l3 ? '開' : '關'}）`,
-    );
+    console.log(`[web] http://127.0.0.1:${port}  （L6：${l6}，L3：${l3 ? '開' : '關'}）`);
   });
 }
