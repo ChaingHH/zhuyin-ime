@@ -27,15 +27,33 @@ function hashKey(key: string): void {
   }
   h1 = fmix(a);
   h2 = fmix(b ^ key.length);
-  // (0,0) 保留為空槽
-  if (h1 === 0 && h2 === 0) h2 = 1;
+  // k1=0 保留給空槽
+  if (h1 === 0) h1 = 1;
+}
+
+/**
+ * 計數的對數量化碼本：小於 exact 的值原樣存，以上按等比級距編碼到 2^bits 個碼，
+ * 上限 2^32。16 位元：exact=4096，相對誤差約 1e-4；8 位元：exact=16，約 4%。
+ */
+function codebook(bits: 8 | 16): { encode: (v: number) => number; lut: Float64Array } {
+  const n = 1 << bits;
+  const exact = bits === 16 ? 4096 : 16;
+  const logR = Math.log(2 ** 32 / exact) / (n - 1 - exact);
+  const lut = new Float64Array(n);
+  for (let c = 0; c < n; c++) lut[c] = c < exact ? c : exact * Math.exp((c - exact) * logR);
+  const encode = (v: number): number =>
+    v < exact ? v : Math.min(n - 1, exact + Math.round(Math.log(v / exact) / logR));
+  return { encode, lut };
 }
 
 export class HashTable {
   private k1: Uint32Array;
-  private k2: Uint32Array;
-  private cols: Uint32Array[];
-  private mask: number;
+  /** 凍結後只留 h2 低 16 位元（48-bit 指紋） */
+  private k2: Uint32Array | Uint16Array;
+  private cols: Array<Uint32Array | Uint16Array | Uint8Array>;
+  private cap: number;
+  /** 凍結（量化）後的解碼表；null = 原始 Uint32 計數 */
+  private lut: Float64Array | null = null;
   size = 0;
 
   constructor(
@@ -45,25 +63,27 @@ export class HashTable {
     this.k1 = new Uint32Array(capacity);
     this.k2 = new Uint32Array(capacity);
     this.cols = Array.from({ length: ncols }, () => new Uint32Array(capacity));
-    this.mask = capacity - 1;
+    this.cap = capacity;
   }
 
   /** 找到 h1/h2 的槽位；不存在時回傳 ~空槽位（負數）。 */
   private slot(): number {
-    let i = h1 & this.mask;
+    const b2 = this.lut ? h2 & 0xffff : h2;
+    let i = h1 % this.cap;
     for (;;) {
       const a = this.k1[i]!;
-      const b = this.k2[i]!;
-      if (a === h1 && b === h2) return i;
-      if (a === 0 && b === 0) return ~i;
-      i = (i + 1) & this.mask;
+      if (a === h1 && this.k2[i] === b2) return i;
+      if (a === 0) return ~i;
+      if (++i === this.cap) i = 0;
     }
   }
 
   get(key: string, col = 0): number {
     hashKey(key);
     const i = this.slot();
-    return i >= 0 ? this.cols[col]![i]! : 0;
+    if (i < 0) return 0;
+    const v = this.cols[col]![i]!;
+    return this.lut ? this.lut[v]! : v;
   }
 
   has(key: string): boolean {
@@ -73,7 +93,8 @@ export class HashTable {
 
   /** cols[col][key] += v；key 不存在則先插入（其他欄為 0）。 */
   add(key: string, col: number, v: number): void {
-    if (this.size + 1 > (this.mask + 1) * 0.6) this.grow();
+    if (this.lut) throw new Error('HashTable 已凍結');
+    if (this.size + 1 > this.cap * 0.6) this.rehash(this.cap * 2);
     hashKey(key);
     let i = this.slot();
     if (i < 0) {
@@ -85,21 +106,42 @@ export class HashTable {
     this.cols[col]![i]! += v;
   }
 
-  private grow(): void {
+  /**
+   * 量化並壓緊：計數改存 bits 位元碼、指紋縮成 48 bit、容量收到 size/load。
+   * 之後唯讀。48-bit 指紋在 4000 萬筆內約有個位數碰撞，碰撞者保留先到的一筆。
+   */
+  freeze(bits: 8 | 16, load = 0.75): void {
+    const q = codebook(bits);
+    this.rehash(Math.ceil(this.size / load), bits, q.encode);
+    this.lut = q.lut;
+  }
+
+  private rehash(cap: number, bits?: 8 | 16, encode?: (v: number) => number): void {
     const { k1, k2, cols } = this;
-    const cap = (this.mask + 1) * 2;
+    const Col = bits === 16 ? Uint16Array : bits === 8 ? Uint8Array : Uint32Array;
     this.k1 = new Uint32Array(cap);
-    this.k2 = new Uint32Array(cap);
-    this.cols = Array.from({ length: this.ncols }, () => new Uint32Array(cap));
-    this.mask = cap - 1;
+    this.k2 = bits ? new Uint16Array(cap) : new Uint32Array(cap);
+    this.cols = Array.from({ length: this.ncols }, () => new Col(cap));
+    this.cap = cap;
     for (let j = 0; j < k1.length; j++) {
-      if (k1[j] === 0 && k2[j] === 0) continue;
+      if (k1[j] === 0) continue;
       h1 = k1[j]!;
-      h2 = k2[j]!;
-      const i = ~this.slot();
+      h2 = bits ? k2[j]! & 0xffff : k2[j]!;
+      let i = this.slot();
+      if (i >= 0) {
+        this.size--;
+        continue;
+      }
+      i = ~i;
       this.k1[i] = h1;
       this.k2[i] = h2;
-      for (let c = 0; c < this.ncols; c++) this.cols[c]![i] = cols[c]![j]!;
+      for (let c = 0; c < this.ncols; c++)
+        this.cols[c]![i] = encode ? encode(cols[c]![j]!) : cols[c]![j]!;
     }
+  }
+
+  /** 佔用位元組數（鍵＋值陣列） */
+  get bytes(): number {
+    return [this.k1, this.k2, ...this.cols].reduce((s, a) => s + a.byteLength, 0);
   }
 }

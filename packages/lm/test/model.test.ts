@@ -17,6 +17,19 @@ describe('HashTable', () => {
     expect(t.get('missing')).toBe(0);
     expect(t.has('k0')).toBe(true);
   });
+
+  it('凍結量化後查得到原值（小值精確、大值近似）', () => {
+    const t = new HashTable(2);
+    for (let i = 0; i < 5000; i++) t.add(`k${i}`, 0, i);
+    t.add('big', 1, 1e8);
+    t.freeze(16);
+    expect(t.size).toBe(5001);
+    expect(t.get('k4095')).toBe(4095);
+    expect(t.get('k4999') / 4999).toBeCloseTo(1, 3);
+    expect(t.get('big', 1) / 1e8).toBeCloseTo(1, 3);
+    expect(t.get('missing')).toBe(0);
+    expect(() => t.add('x', 0, 1)).toThrow();
+  });
 });
 
 describe('LanguageModel KN', () => {
@@ -46,5 +59,11 @@ describe('LanguageModel KN', () => {
     expect(lm.wordLogProb('b', 'b', 'a')).toBeCloseTo(Math.log(1), 10);
     // 三元未命中 → 二元以最近的詞 a 為上下文：0.4·c(a c)/c(a *)；用 b 的話會落到一元
     expect(lm.wordLogProb('c', 'b', 'a')).toBeCloseTo(Math.log((0.4 * 1) / 3), 10);
+
+    // 剪掉 count<2 的二元（a c）：a 的總量仍是 3，剪掉的 1 併入退回權重
+    const pruned = await LanguageModel.load(file, { minBi: 2 });
+    const p0 = 0.9 / 3 + (0.1 * 2.5) / 6;
+    const pb = 1.25 / 3 + ((0.75 * 1 + 1) / 3) * p0;
+    expect(pruned.wordLogProb('b', 'x', 'a')).toBeCloseTo(Math.log(pb), 10);
   });
 });

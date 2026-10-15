@@ -50,7 +50,11 @@ export async function loadRuntime(
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 
   const [lm, lexRaw, sylRaw] = await Promise.all([
-    LanguageModel.load(lmFile),
+    LanguageModel.load(lmFile, {
+      minBi: Number(process.env['ZHUYIN_LM_MIN_BI'] ?? 2),
+      minTri: Number(process.env['ZHUYIN_LM_MIN_TRI'] ?? 3),
+      quant: Number(process.env['ZHUYIN_LM_QUANT'] ?? 8) as 0 | 8 | 16,
+    }),
     readFile(lexFile, 'utf8'),
     readFile(sylFile, 'utf8'),
   ]);
@@ -107,6 +111,8 @@ export async function loadRuntime(
 }
 
 async function loadAdapter(): Promise<UserAdapter> {
+  // 和其他輸入法對比時不帶使用者學習資料
+  if (process.env['ZHUYIN_NO_USER']) return new UserAdapter();
   try {
     const raw = JSON.parse(await readFile(ADAPTER_FILE, 'utf8')) as UserAdapterData;
     return UserAdapter.fromJSON(raw);

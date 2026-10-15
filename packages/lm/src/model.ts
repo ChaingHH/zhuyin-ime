@@ -36,9 +36,10 @@ export interface NgramIndex {
   cont: Map<string, number>;
   /** 二元型別總數 N1+(• •) */
   contTotal: number;
-  /** 首詞作為二元上下文：後接計數總和、後接型別數 N1+(w •) */
+  /** 首詞作為二元上下文：後接計數總和（含剪掉的）、保留的後接型別數與計數和 */
   biTotals: Map<string, number>;
   biTypes: Map<string, number>;
+  biKept: Map<string, number>;
   /**
    * "w1 w2" → 欄 0：二元計數；欄 1／2：作為三元上下文時的後接計數總和／型別數。
    * 大表放 typed array（見 hashtable.ts）。
@@ -58,6 +59,7 @@ function emptyIndex(): NgramIndex {
     contTotal: 0,
     biTotals: new Map(),
     biTypes: new Map(),
+    biKept: new Map(),
     bi: new HashTable(3),
     tri: new HashTable(1),
   };
@@ -67,21 +69,42 @@ const inc = (m: Map<string, number>, k: string, v: number): void => {
   m.set(k, (m.get(k) ?? 0) + v);
 };
 
-/** 一筆 n-gram 計數併入索引。order：1=uni、2=bi（"w1 w2"）、3=tri（"w1 w2\tw"）。 */
-function addEntry(idx: NgramIndex, order: number, key: string, count: number): void {
+export interface LoadOptions {
+  /** 二元／三元計數低於此值者不存（剪枝）；上下文總量仍含被剪掉的計數，質量流向低階 */
+  minBi?: number;
+  minTri?: number;
+  /** 載入後把計數量化成 16 或 8 位元（見 hashtable.ts freeze）；0 = 不量化 */
+  quant?: 0 | 8 | 16;
+}
+
+/**
+ * 一筆 n-gram 計數併入索引。order：1=uni、2=bi（"w1 w2"）、3=tri（"w1 w2\tw"）。
+ * 依賴 .tsv 段落順序：同一專家的二元先於三元。
+ */
+function addEntry(
+  idx: NgramIndex,
+  order: number,
+  key: string,
+  count: number,
+  opts: LoadOptions,
+): void {
   if (order === 1) {
     inc(idx.uni, key, count);
     idx.total += count;
   } else if (order === 2) {
     const sp = key.indexOf(' ');
     const c1 = key.slice(0, sp);
-    idx.bi.add(key, 0, count);
     inc(idx.biTotals, c1, count);
-    inc(idx.biTypes, c1, 1);
     inc(idx.cont, key.slice(sp + 1), 1);
     idx.contTotal++;
+    if (count < (opts.minBi ?? 1)) return;
+    idx.bi.add(key, 0, count);
+    inc(idx.biTypes, c1, 1);
+    inc(idx.biKept, c1, count);
   } else {
     const ctx = key.slice(0, key.indexOf('\t'));
+    // 上下文二元不存在（被剪或從未出現）時 KN 本來就不會用到這個三元
+    if (count < (opts.minTri ?? 1) || !idx.bi.get(ctx, 0)) return;
     idx.tri.add(key, 0, count);
     idx.bi.add(ctx, 1, count);
     idx.bi.add(ctx, 2, 1);
@@ -106,11 +129,11 @@ export class LanguageModel {
   private constructor() {}
 
   /** 載入 .json（舊格式）或 .tsv（逐行 section\tcount\tkey，train.ts 輸出）。 */
-  static async load(file: string): Promise<LanguageModel> {
+  static async load(file: string, opts: LoadOptions = {}): Promise<LanguageModel> {
     const lm = new LanguageModel();
     const add = (sec: string, key: string, count: number): void => {
       const s = SECTIONS[sec];
-      if (s) addEntry(lm[s[0]], s[1], key, count);
+      if (s) addEntry(lm[s[0]], s[1], key, count, opts);
     };
     if (file.endsWith('.json')) {
       const j = JSON.parse(await readFile(file, 'utf8')) as LmJson;
@@ -124,7 +147,7 @@ export class LanguageModel {
       ];
       for (const [sec, rec] of parts) for (const k in rec) add(sec, k, rec[k]!);
       lm.meta = j.meta;
-      return lm;
+      return lm.finish(opts);
     }
     const rl = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
     for await (const line of rl) {
@@ -137,7 +160,14 @@ export class LanguageModel {
       const t2 = line.indexOf('\t', t1 + 1);
       add(sec, line.slice(t2 + 1), Number(line.slice(t1 + 1, t2)));
     }
-    return lm;
+    return lm.finish(opts);
+  }
+
+  private finish(opts: LoadOptions): LanguageModel {
+    if (opts.quant)
+      for (const t of [this.word.bi, this.word.tri, this.char.bi, this.char.tri])
+        t.freeze(opts.quant);
+    return this;
   }
 
   /** 平滑法：'kn' = interpolated Kneser-Ney；'sb' = stupid backoff（舊行為） */
@@ -157,8 +187,11 @@ export class LanguageModel {
     // 二元 P(w | c2)
     const bt = idx.biTotals.get(c2);
     if (bt) {
+      // 剪掉的二元計數（bt − 保留和）併入退回權重，與三元同理
       const c = idx.bi.get(`${c2} ${w}`);
-      p = Math.max(c - D, 0) / bt + ((D * idx.biTypes.get(c2)!) / bt) * p;
+      const types = idx.biTypes.get(c2) ?? 0;
+      const kept = idx.biKept.get(c2) ?? 0;
+      p = Math.max(c - D, 0) / bt + ((D * types + (bt - kept)) / bt) * p;
     }
     // 三元 P(w | c1 c2)
     const ctx = `${c1} ${c2}`;

@@ -45,6 +45,8 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 - `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。
 - `LM_TOKEN_PENALTY`（預設 14）必須大於高頻單字的 log(freq)，否則訓練斷詞會把詞切成單字。
 - `debug-acc.ts`：一次載入、多組設定的實驗台；dev=偶數句、test=奇數句，另列 N-best oracle。
+- 載入時剪枝／量化：`ZHUYIN_LM_MIN_BI`、`ZHUYIN_LM_MIN_TRI`（計數低於此值不存，上下文總量仍含被剪部分）、`ZHUYIN_LM_QUANT=0|8|16`（`HashTable.freeze`：對數碼本＋48-bit 指紋）。runtime 預設 `bi>=2 tri>=3 q=8`：RSS 1937→679MB，句準確率 −0.2／−0.6；要原始模型設 `ZHUYIN_LM_MIN_BI=1 ZHUYIN_LM_MIN_TRI=1 ZHUYIN_LM_QUANT=0`；`bi>=2 q=16` 899MB 無損。仍要讀完整 lm.tsv（載入約 70 秒）。實驗台 `debug-prune.ts`（一設定一行程）。`ZHUYIN_NO_USER=1` 不載入 adapter.json。
+- 微軟注音對比：`debug-ms-keys.ts` 產生大千 VK 序列，`powershell -STA -File debug-ms-bopomofo.ps1 -Keys k.tsv -Out o.tsv -KeyDelay 2 [-Skip N -Limit N]`（SendInput 打進自己的文字框；要 IMM `ImmSetOpenStatus` 才會進中文模式、`timeBeginPeriod(1)` 才跑得快；前景被搶就中止）會佔用鍵盤，使用者不在電腦前才能跑；`debug-ms-compare.ts` 計分。
 
 ### CLI testbench (`packages/cli`)
 
