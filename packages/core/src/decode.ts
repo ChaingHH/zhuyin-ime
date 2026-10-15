@@ -102,11 +102,6 @@ export interface DecodePath {
   breakdown: WordBreakdown[];
 }
 
-interface IndexEntry {
-  word: string;
-  reading: readonly string[];
-}
-
 interface PartialPath {
   pos: number;
   w1: string;
@@ -139,7 +134,8 @@ const BLOCKED: SpanCand[] = [];
 export class Decoder {
   private readonly scorer: Scorer;
   private readonly opts: Required<DecoderOptions>;
-  private index = new Map<string, IndexEntry[]>();
+  /** 讀音鍵（音節以空白相連）→ 詞，高頻在前。只存詞字串：讀音就是鍵本身 */
+  private index = new Map<string, string[]>();
   private polyMap = new Map<string, number>(); // 詞 → 讀音數
   private polySingle = new Set<string>(); // 破音單字集合（用於重罰）
   private maxSpan = 1;
@@ -195,8 +191,10 @@ export class Decoder {
         list = [];
         this.index.set(key, list);
       }
-      list.push({ word: e.word, reading });
+      list.push(e.word);
     }
+    // push 長大的陣列會預留空位（1 個元素也佔約 17 格）；縮成剛好大小，約省 40MB
+    for (const [k, list] of this.index) this.index.set(k, list.slice());
     this.maxSpan = Math.min(maxSpan, this.maxSpanCap());
   }
 
@@ -226,7 +224,7 @@ export class Decoder {
       const entries = this.index.get(reading.join(' '));
       if (!entries) return;
       for (let i = 0; i < Math.min(cap, entries.length); i++) {
-        const w = entries[i]!.word;
+        const w = entries[i]!;
         const prev = best.get(w);
         if (!prev || cost < prev.cost) best.set(w, { word: w, reading, cost });
       }
@@ -491,15 +489,15 @@ export class Decoder {
         list = [];
         this.index.set(key, list);
       }
-      if (!list.some((x) => x.word === entry.word)) {
+      if (!list.includes(entry.word)) {
         // 新詞無頻次證據，插到尾端（不搶高頻候選的位子）
-        list.push({ word: entry.word, reading });
+        list.push(entry.word);
       }
     }
   }
 
   /** 該讀音下是否已存在指定詞（挖詞去重用）。 */
   hasEntry(reading: readonly string[], word: string): boolean {
-    return this.index.get(reading.join(' '))?.some((x) => x.word === word) ?? false;
+    return this.index.get(reading.join(' '))?.includes(word) ?? false;
   }
 }

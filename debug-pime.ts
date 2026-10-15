@@ -1,0 +1,146 @@
+// 直接驅動 PIME 後端（模擬 PIMETextService：init → onActivate → 每鍵 filterKeyDown／onKeyDown，
+// 一行一則 `<client>|<json>`，回 `PIME_MSG|<client>|<json>`），量冷啟動、逐鍵來回延遲、準確率、後端記憶體與 CPU。
+// 不經 TSF／視窗，所以不佔鍵盤；數字是「模型＋IPC」，不含 TSF 本身的開銷。
+// npx tsx debug-pime.ts chewing|mcbopomofo [句數上限]
+// 注意：新酷音會把打過的詞學進 %APPDATA%\PIME\chewing\chewing.sqlite3。
+import { spawn } from 'node:child_process';
+import { execSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { syllableToKeyCodes } from '@zhuyin/core';
+import { loadEvalSamples } from './packages/cli/src/runtime.js';
+
+const PIME = 'C:\\Program Files (x86)\\PIME';
+const BACKENDS = {
+  chewing: {
+    exe: `${PIME}\\python\\python3\\python.exe`,
+    args: ['server.py'],
+    cwd: `${PIME}\\python`,
+    guid: '{F80736AA-28DB-423A-92C9-5540F501C939}',
+  },
+  mcbopomofo: {
+    exe: `${PIME}\\node\\node.exe`,
+    args: ['server.js'],
+    cwd: `${PIME}\\node`,
+    guid: '{5340c1d9-706e-4b6b-b022-2e763fa5f674}',
+  },
+} as const;
+
+const which = process.argv[2] as keyof typeof BACKENDS;
+const be = BACKENDS[which];
+if (!be) throw new Error('用法：debug-pime.ts chewing|mcbopomofo [句數]');
+const limit = Number(process.argv[3] ?? Infinity);
+
+// KeyboardEvent.code → [VK, 字元碼]
+const keyOf = (code: string): [number, number] => {
+  const m = /^(Digit|Key)(.)$/.exec(code);
+  if (m) return [m[2]!.toUpperCase().charCodeAt(0), m[2]!.toLowerCase().charCodeAt(0)];
+  const t: Record<string, [number, number]> = {
+    Space: [0x20, 0x20],
+    Minus: [0xbd, 0x2d],
+    Semicolon: [0xba, 0x3b],
+    Comma: [0xbc, 0x2c],
+    Period: [0xbe, 0x2e],
+    Slash: [0xbf, 0x2f],
+    Enter: [0x0d, 0x0d],
+  };
+  const v = t[code];
+  if (!v) throw new Error(`無對應鍵：${code}`);
+  return v;
+};
+
+const t0 = performance.now();
+const child = spawn(be.exe, be.args, {
+  cwd: be.cwd,
+  env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  stdio: ['pipe', 'pipe', 'pipe'],
+});
+child.stderr.on('data', () => {});
+const lines = createInterface({ input: child.stdout });
+let waiting: ((r: Record<string, unknown>) => void) | null = null;
+lines.on('line', (l) => {
+  if (!l.startsWith('PIME_MSG|')) return;
+  const json = l.slice(l.indexOf('|', 9) + 1);
+  const w = waiting;
+  waiting = null;
+  w?.(JSON.parse(json) as Record<string, unknown>);
+});
+let seq = 0;
+const call = (msg: Record<string, unknown>): Promise<Record<string, unknown>> =>
+  new Promise((res) => {
+    waiting = res;
+    child.stdin.write(`bench|${JSON.stringify({ ...msg, seqNum: ++seq })}\n`);
+  });
+
+const keyStates = new Array<number>(256).fill(0);
+const key = async (code: string): Promise<string> => {
+  const [keyCode, charCode] = keyOf(code);
+  const ev = { charCode, keyCode, repeatCount: 1, scanCode: 0, isExtended: false, keyStates };
+  const f = await call({ method: 'filterKeyDown', ...ev });
+  let out = (f['commitString'] as string | undefined) ?? '';
+  if (f['return']) {
+    const r = await call({ method: 'onKeyDown', ...ev });
+    out += (r['commitString'] as string | undefined) ?? '';
+  }
+  return out;
+};
+
+const init = await call({
+  method: 'init',
+  id: be.guid,
+  isWindows8Above: true,
+  isMetroApp: false,
+  isUiLess: false,
+  isConsole: false,
+});
+await call({ method: 'onActivate', isKeyboardOpen: true });
+const coldMs = performance.now() - t0;
+
+const samples = [
+  ...(await loadEvalSamples('eval/colloquial.jsonl')).map((s) => ({ ...s, set: 'colloquial' })),
+  ...(await loadEvalSamples('eval/written.jsonl')).map((s) => ({ ...s, set: 'written' })),
+].slice(0, limit);
+const proc = (): { ws: number; priv: number; peak: number; cpu: number } => {
+  const o = execSync(
+    `powershell -NoProfile -Command "$p = Get-Process -Id ${child.pid}; '{0} {1} {2} {3}' -f $p.WorkingSet64, $p.PrivateMemorySize64, $p.PeakWorkingSet64, $p.TotalProcessorTime.TotalMilliseconds"`,
+  )
+    .toString()
+    .trim()
+    .split(' ')
+    .map(Number);
+  return { ws: o[0]! / 2 ** 20, priv: o[1]! / 2 ** 20, peak: o[2]! / 2 ** 20, cpu: o[3]! };
+};
+const before = proc();
+const lat: number[] = [];
+const commitLat: number[] = [];
+const ok: Record<string, [number, number]> = { colloquial: [0, 0], written: [0, 0] };
+const fails: string[] = [];
+for (const s of samples) {
+  let out = '';
+  for (const code of s.syllables.flatMap((syl) => syllableToKeyCodes(syl))) {
+    const t = performance.now();
+    out += await key(code);
+    lat.push(performance.now() - t);
+  }
+  const t = performance.now();
+  out += await key('Enter');
+  commitLat.push(performance.now() - t);
+  const c = ok[s.set]!;
+  c[1]++;
+  if (out === s.text) c[0]++;
+  else if (fails.length < 5) fails.push(`${s.text} → ${out}`);
+}
+const after = proc();
+child.kill();
+
+const sorted = [...lat].sort((x, y) => x - y);
+const pct = (p: number): string => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!.toFixed(2);
+const acc = (k: string): string => ((ok[k]![0] / Math.max(1, ok[k]![1])) * 100).toFixed(1);
+console.log(`[${which}] init=${JSON.stringify(init).slice(0, 80)}`);
+console.log(
+  `${which} | ${samples.length} 句 ${lat.length} 鍵 | 句 口語 ${acc('colloquial')} 書面 ${acc('written')} | ` +
+    `冷啟動 ${coldMs.toFixed(0)}ms | 每鍵 p50 ${pct(0.5)} p95 ${pct(0.95)} p99 ${pct(0.99)} max ${sorted.at(-1)!.toFixed(2)} ms | ` +
+    `Enter ${(commitLat.reduce((a, b) => a + b, 0) / commitLat.length).toFixed(2)}ms | ` +
+    `CPU ${((after.cpu - before.cpu) / lat.length).toFixed(2)} ms/鍵 | ` +
+    `後端 WS ${after.ws.toFixed(0)}MB private ${after.priv.toFixed(0)}MB peak ${after.peak.toFixed(0)}MB`,
+);
+for (const f of fails) console.log(`  ✗ ${f}`);

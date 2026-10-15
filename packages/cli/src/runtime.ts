@@ -8,8 +8,10 @@ import {
   type Scorer,
   type UserAdapterData,
 } from '@zhuyin/core';
-import { LanguageModel } from '@zhuyin/lm';
+import { LanguageModel, LM_ENV_KEYS, lmOptionsFromEnv } from '@zhuyin/lm';
 import { fileURLToPath } from 'node:url';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(thisDir, '..', '..', '..');
@@ -24,27 +26,32 @@ export interface LoadedRuntime {
   polySingleChars: ReadonlySet<string>;
 }
 
-export async function loadRuntime(
-  opts: {
-    a?: number;
-    gamma?: number;
-    beamWidth?: number;
-    rerank?: {
-      weight?: number;
-      gapThreshold?: number;
-      maxCandidates?: number;
-      flipMargin?: number;
-    };
-    idfBonus?: number;
-    baseline?: 'classic' | 'bigram';
-  } = {},
-): Promise<LoadedRuntime> {
+export type RuntimeOptions = {
+  a?: number;
+  gamma?: number;
+  beamWidth?: number;
+  rerank?: {
+    weight?: number;
+    gapThreshold?: number;
+    maxCandidates?: number;
+    flipMargin?: number;
+  };
+  idfBonus?: number;
+  baseline?: 'classic' | 'bigram';
+};
+
+export async function loadRuntime(opts: RuntimeOptions = {}): Promise<LoadedRuntime> {
+  const rt = await buildRuntime(opts);
+  // 在 buildRuntime 的區域變數（詞典原文、解析出的詞條）都離開作用域之後才做，否則回收不到
+  releaseHeap();
+  return rt;
+}
+
+async function buildRuntime(opts: RuntimeOptions): Promise<LoadedRuntime> {
   // ZHUYIN_LM 可指定模型檔；預設優先用 pack.ts 打包的 .bin（已剪枝量化），其次 train.ts 的
   // .tsv，最後舊 .json。有設剪枝／量化環境變數時跳過 .bin（bin 的設定在打包時就固定了）。
   const models = path.join(REPO, 'data', 'models');
-  const custom = ['ZHUYIN_LM_MIN_BI', 'ZHUYIN_LM_MIN_TRI', 'ZHUYIN_LM_QUANT'].some(
-    (k) => process.env[k] !== undefined,
-  );
+  const custom = LM_ENV_KEYS.some((k) => process.env[k] !== undefined);
   const lmFile =
     process.env['ZHUYIN_LM'] ??
     [...(custom ? [] : ['lm.bin']), 'lm.tsv', 'lm.json']
@@ -55,11 +62,7 @@ export async function loadRuntime(
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 
   const [lm, lexRaw, sylRaw] = await Promise.all([
-    LanguageModel.load(lmFile, {
-      minBi: Number(process.env['ZHUYIN_LM_MIN_BI'] ?? 2),
-      minTri: Number(process.env['ZHUYIN_LM_MIN_TRI'] ?? 3),
-      quant: Number(process.env['ZHUYIN_LM_QUANT'] ?? 8) as 0 | 8 | 16,
-    }),
+    LanguageModel.load(lmFile, lmOptionsFromEnv(process.env)),
     readFile(lexFile, 'utf8'),
     readFile(sylFile, 'utf8'),
   ]);
@@ -113,6 +116,17 @@ export async function loadRuntime(
   }
 
   return { decoder, legalSyllables, lm, adapter, polySingleChars: decoder.polySingleChars };
+}
+
+/**
+ * 解析詞典等載入步驟會產生大量暫時物件；回收後 V8 不會主動把空出的 heap 頁還給系統
+ * （實測 RSS 多約 150MB）。載入完做一次壓縮式（last-resort）GC 把它們還回去。
+ * 解碼也一樣：打 300 句後 heap 撐到約 490MB、存活只有約 80MB；常駐的引擎宿主應在閒置時呼叫。
+ */
+export function releaseHeap(): void {
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc') as (o: object) => void;
+  gc({ type: 'major', execution: 'sync', flavor: 'last-resort' });
 }
 
 async function loadAdapter(): Promise<UserAdapter> {

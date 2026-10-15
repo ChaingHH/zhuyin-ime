@@ -1,4 +1,7 @@
-param([string]$Keys, [string]$Out, [int]$Limit = 0, [int]$KeyDelay = 8, [int]$Skip = 0)
+param([string]$Keys, [string]$Out, [int]$Limit = 0, [int]$KeyDelay = 8, [int]$Skip = 0,
+      [string]$Clsid = 'B115690A-EA02-48D5-A231-E3578D2FDF80', [string]$ImeProfile = 'B2F9C502-1742-11D4-9790-0080C882687E', [int]$Warmup = 1000)
+# 預設微軟注音；PIME 新酷音 -Clsid 35F67E9D-A54D-4177-9697-8B0AB71A9E04 -ImeProfile F80736AA-28DB-423A-92C9-5540F501C939，
+# PIME 小麥注音 -ImeProfile 5340C1D9-706E-4B6B-B022-2E763FA5F674。輸出：集	正解	結果	整句 ms	Enter 到送字 ms
 # 用 SendInput 把大千按鍵打進自己開的文字框（微軟注音），每句按 Enter 送字後讀回文字。
 # 前景視窗不是本視窗就中止，避免按鍵打進別的程式。
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
@@ -17,11 +20,13 @@ public interface ITfInputProcessorProfileMgr {
 
 public static class MsBench {
   // 微軟注音 TIP（Get-WinUserLanguageList 的 0404:{clsid}{profile}）
+  public static string ImeClsid, ImeProfile;
+  public static int Warmup = 1000;
   static void ActivateBopomofo() {
     Type t = Type.GetTypeFromCLSID(new Guid("33C53A50-F456-4884-B049-85FD643ECFED"));
     ITfInputProcessorProfileMgr m = (ITfInputProcessorProfileMgr)Activator.CreateInstance(t);
-    Guid clsid = new Guid("B115690A-EA02-48D5-A231-E3578D2FDF80");
-    Guid prof = new Guid("B2F9C502-1742-11D4-9790-0080C882687E");
+    Guid clsid = new Guid(ImeClsid);
+    Guid prof = new Guid(ImeProfile);
     int hr = m.ActivateProfile(1, 0x0404, ref clsid, ref prof, IntPtr.Zero, 0x10000000);
     Console.WriteLine("ActivateProfile hr=0x" + hr.ToString("X8"));
   }
@@ -137,7 +142,7 @@ public static class MsBench {
             Thread.Sleep(100);
           }
           Console.WriteLine("foreground ok: " + (GetForegroundWindow() == hwnd));
-          Thread.Sleep(1000);
+          Thread.Sleep(Warmup);
           // 校正中英模式：打 ㄅㄚ 一聲，出現 ASCII 就按 Shift 切換再試
           for (int i = 0; i < 3; i++) {
             form.Invoke(new Action(delegate { box.Clear(); }));
@@ -163,14 +168,24 @@ public static class MsBench {
             if (f.Length < 3) continue;
             form.Invoke(new Action(delegate { box.Clear(); }));
             Thread.Sleep(50);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             foreach (string k in f[2].Split(',')) Press(ushort.Parse(k), delay);
             Thread.Sleep(60);
+            string before = Text();
+            var enter = System.Diagnostics.Stopwatch.StartNew();
             Press(0x0D, delay);
+            // Enter 之後每 1ms 看一次，文字一變就記下送字延遲
+            double commitMs = -1;
+            while (enter.ElapsedMilliseconds < 2000) {
+              if (Text() != before) { commitMs = enter.Elapsed.TotalMilliseconds; break; }
+              Thread.Sleep(1);
+            }
             // 等 IME 把字送完：連續兩次讀到相同內容才算穩定
             string prev = null, cur = Text();
             for (int i = 0; i < 40 && cur != prev; i++) { Thread.Sleep(50); prev = cur; cur = Text(); }
+            double totalMs = sw.Elapsed.TotalMilliseconds;
             string got = cur.Replace("\r", "").Replace("\n", "");
-            w.WriteLine(f[0] + "\t" + f[1] + "\t" + got);
+            w.WriteLine(f[0] + "\t" + f[1] + "\t" + got + "\t" + totalMs.ToString("F0") + "\t" + commitMs.ToString("F1"));
             w.Flush();
             n++;
           }
@@ -188,4 +203,7 @@ public static class MsBench {
   }
 }
 '@
+[MsBench]::ImeClsid = $Clsid
+[MsBench]::ImeProfile = $ImeProfile
+[MsBench]::Warmup = $Warmup
 [MsBench]::Run($Keys, $Out, $Limit, $KeyDelay, $Skip)

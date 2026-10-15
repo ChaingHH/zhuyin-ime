@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { HashTable } from '../src/hashtable.js';
+import { HashTable, PerfectTable } from '../src/hashtable.js';
 import { LanguageModel } from '../src/model.js';
 
 describe('HashTable', () => {
@@ -29,6 +29,18 @@ describe('HashTable', () => {
     expect(t.get('big', 1) / 1e8).toBeCloseTo(1, 3);
     expect(t.get('missing')).toBe(0);
     expect(() => t.add('x', 0, 1)).toThrow();
+  });
+
+  it('40-bit 指紋、0.9 載入率凍結後 dump／restore 查得到原值', () => {
+    const t = new HashTable(1);
+    for (let i = 0; i < 5000; i++) t.add(`k${i}`, 0, i % 200);
+    t.freeze(8, 0.9, 40);
+    const { bits, size, arrays } = t.dump();
+    expect(arrays[1]).toBeInstanceOf(Uint8Array);
+    const r = HashTable.restore(1, bits, size, arrays);
+    for (const i of [0, 15, 199, 4999]) expect(r.get(`k${i}`)).toBeCloseTo(i % 200, -1);
+    expect(r.get('k15')).toBe(15);
+    expect(r.get('missing')).toBe(0);
   });
 });
 
@@ -69,31 +81,61 @@ describe('LanguageModel KN', () => {
 });
 
 describe('LanguageModel .bin', () => {
-  it('存檔再載入與原模型機率相同（剪枝＋量化，含 BOS 空字串鍵）', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'lm-'));
-    const lines = ['#meta\t{"wordTokens":9,"charTokens":0,"trainedAt":"x","sources":[]}'];
-    const words = ['', 'a', 'b', 'c', 'd'];
-    for (const w of words) lines.push(`wu\t${w.length + 3}\t${w}`);
-    for (const x of words)
-      for (const y of words) lines.push(`wb\t${(x.length * 3 + y.length) % 4}\t${x} ${y}`);
-    for (const x of words)
-      for (const y of words)
-        for (const z of words) lines.push(`wt\t${(x + y + z).length}\t${x} ${y}\t${z}`);
-    for (let i = 0; i < 300; i++)
-      lines.push(`cu\t${i + 1}\t字${i}`, `cb\t${i * 97}\t字${i} 字${i + 1}`);
-    writeFileSync(path.join(dir, 'lm.tsv'), lines.join('\n'));
-    const opts = { minBi: 2, minTri: 2, quant: 8 } as const;
-    const a = await LanguageModel.load(path.join(dir, 'lm.tsv'), opts);
-    await a.save(path.join(dir, 'lm.bin'));
-    const b = await LanguageModel.load(path.join(dir, 'lm.bin'));
-    expect(b.meta).toEqual(a.meta);
-    expect(b.word.bi.size).toBe(a.word.bi.size);
-    for (const w of words)
+  it.each([false, true])(
+    '存檔再載入與原模型機率相同（剪枝＋量化，含 BOS 空字串鍵；mph=%s）',
+    async (mph) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'lm-'));
+      const lines = ['#meta\t{"wordTokens":9,"charTokens":0,"trainedAt":"x","sources":[]}'];
+      const words = ['', 'a', 'b', 'c', 'd'];
+      for (const w of words) lines.push(`wu\t${w.length + 3}\t${w}`);
       for (const x of words)
-        for (const y of words) expect(b.wordLogProb(w, x, y)).toBe(a.wordLogProb(w, x, y));
-    for (let i = 0; i < 300; i++)
-      expect(b.charLogProb(`字${i + 1}`, '', `字${i}`)).toBe(
-        a.charLogProb(`字${i + 1}`, '', `字${i}`),
-      );
+        for (const y of words) lines.push(`wb\t${(x.length * 3 + y.length) % 4}\t${x} ${y}`);
+      for (const x of words)
+        for (const y of words)
+          for (const z of words) lines.push(`wt\t${(x + y + z).length}\t${x} ${y}\t${z}`);
+      for (let i = 0; i < 300; i++)
+        lines.push(`cu\t${i + 1}\t字${i}`, `cb\t${i * 97}\t字${i} 字${i + 1}`);
+      writeFileSync(path.join(dir, 'lm.tsv'), lines.join('\n'));
+      const opts = { minBi: 2, minTri: 2, quant: 8, mph } as const;
+      const a = await LanguageModel.load(path.join(dir, 'lm.tsv'), opts);
+      await a.save(path.join(dir, 'lm.bin'));
+      const b = await LanguageModel.load(path.join(dir, 'lm.bin'));
+      expect(b.meta).toEqual(a.meta);
+      expect(b.word.bi.size).toBe(a.word.bi.size);
+      for (const w of words)
+        for (const x of words)
+          for (const y of words) expect(b.wordLogProb(w, x, y)).toBe(a.wordLogProb(w, x, y));
+      for (let i = 0; i < 300; i++)
+        expect(b.charLogProb(`字${i + 1}`, '', `字${i}`)).toBe(
+          a.charLogProb(`字${i + 1}`, '', `字${i}`),
+        );
+      // 完美雜湊與開放定址表給出相同機率（小資料下 1/65536 誤中不會發生）
+      const h = await LanguageModel.load(path.join(dir, 'lm.tsv'), { ...opts, mph: false });
+      for (const w of words)
+        for (const x of words)
+          for (const y of words) expect(b.wordLogProb(w, x, y)).toBe(h.wordLogProb(w, x, y));
+    },
+  );
+});
+
+describe('PerfectTable', () => {
+  it('每個鍵拿到自己的值、查不到回 0、dump／restore 一致', () => {
+    const t = new HashTable(2);
+    for (let i = 0; i < 20000; i++) {
+      t.add(`k${i}`, 0, i % 300);
+      t.add(`k${i}`, 1, 7);
+    }
+    const p = t.toPerfect(8);
+    expect(p.size).toBe(20000);
+    for (let i = 0; i < 20000; i += 37)
+      expect(Math.abs(p.get(`k${i}`) - (i % 300))).toBeLessThanOrEqual((i % 300) * 0.05);
+    expect(p.get('k15')).toBe(15);
+    expect(p.get('k15', 1)).toBe(7);
+    let hits = 0;
+    for (let i = 0; i < 20000; i++) if (p.get(`missing${i}`)) hits++;
+    expect(hits).toBeLessThan(5);
+    const d = p.dump();
+    const r = PerfectTable.restore(2, d.bits, d.seed, d.size, d.arrays);
+    for (let i = 0; i < 20000; i += 101) expect(r.get(`k${i}`)).toBe(p.get(`k${i}`));
   });
 });

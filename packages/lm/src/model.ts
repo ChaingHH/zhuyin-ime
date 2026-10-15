@@ -8,7 +8,7 @@
 import { createReadStream } from 'node:fs';
 import { open, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
-import { HashTable } from './hashtable.js';
+import { HashTable, PerfectTable, type Fingerprint, type QuantBits } from './hashtable.js';
 
 export interface LmJson {
   meta: {
@@ -44,9 +44,9 @@ export interface NgramIndex {
    * "w1 w2" → 欄 0：二元計數；欄 1／2：作為三元上下文時的後接計數總和／型別數。
    * 大表放 typed array（見 hashtable.ts）。
    */
-  bi: HashTable;
+  bi: HashTable | PerfectTable;
   /** "w1 w2\tw" → 三元計數 */
-  tri: HashTable;
+  tri: HashTable | PerfectTable;
 }
 
 const BACKOFF = 0.4;
@@ -60,9 +60,12 @@ interface BinMap {
 }
 interface BinTable {
   ncols: number;
-  bits: 0 | 8 | 16;
+  bits: 0 | QuantBits;
   size: number;
   arrays: Blob[];
+  /** 'perfect' = PerfectTable（arrays：位移值、指紋、值欄）；省略 = HashTable */
+  kind?: 'perfect';
+  seed?: number;
 }
 type BinIndex = { total: number; contTotal: number; bi: BinTable; tri: BinTable } & Record<
   'uni' | 'cont' | 'biTotals' | 'biTypes' | 'biKept',
@@ -96,8 +99,35 @@ export interface LoadOptions {
   /** 二元／三元計數低於此值者不存（剪枝）；上下文總量仍含被剪掉的計數，質量流向低階 */
   minBi?: number;
   minTri?: number;
-  /** 載入後把計數量化成 16 或 8 位元（見 hashtable.ts freeze）；0 = 不量化 */
-  quant?: 0 | 8 | 16;
+  /** 載入後把計數量化成 16／8（／實驗用 6、4）位元（見 hashtable.ts freeze）；0 = 不量化 */
+  quant?: 0 | QuantBits;
+  /** 量化後的指紋位元數與雜湊表載入率（freeze 參數） */
+  fp?: Fingerprint;
+  load?: number;
+  /** 量化時改建最小完美雜湊表（PerfectTable）而不是開放定址表；quant 須為 8 或 16 */
+  mph?: boolean;
+}
+
+/** 剪枝／量化設定的環境變數；runtime 與 pack.ts 共用，有設任何一個時 runtime 改讀 tsv。 */
+export const LM_ENV_KEYS = [
+  'ZHUYIN_LM_MIN_BI',
+  'ZHUYIN_LM_MIN_TRI',
+  'ZHUYIN_LM_QUANT',
+  'ZHUYIN_LM_FP',
+  'ZHUYIN_LM_LOAD',
+  'ZHUYIN_LM_MPH',
+] as const;
+
+/** 預設 bi>=2 tri>=4 q=8、最小完美雜湊（docs/MEMORY.md：大表 109MB、句 −0.1／0、比開放定址快）。fp／load 只在 MPH=0 時有作用。 */
+export function lmOptionsFromEnv(env: Record<string, string | undefined>): LoadOptions {
+  return {
+    minBi: Number(env['ZHUYIN_LM_MIN_BI'] ?? 2),
+    minTri: Number(env['ZHUYIN_LM_MIN_TRI'] ?? 4),
+    quant: Number(env['ZHUYIN_LM_QUANT'] ?? 8) as 0 | QuantBits,
+    fp: Number(env['ZHUYIN_LM_FP'] ?? 40) as Fingerprint,
+    load: Number(env['ZHUYIN_LM_LOAD'] ?? 0.75),
+    mph: (env['ZHUYIN_LM_MPH'] ?? '1') === '1',
+  };
 }
 
 /**
@@ -121,16 +151,16 @@ function addEntry(
     inc(idx.cont, key.slice(sp + 1), 1);
     idx.contTotal++;
     if (count < (opts.minBi ?? 1)) return;
-    idx.bi.add(key, 0, count);
+    (idx.bi as HashTable).add(key, 0, count);
     inc(idx.biTypes, c1, 1);
     inc(idx.biKept, c1, count);
   } else {
     const ctx = key.slice(0, key.indexOf('\t'));
     // 上下文二元不存在（被剪或從未出現）時 KN 本來就不會用到這個三元
     if (count < (opts.minTri ?? 1) || !idx.bi.get(ctx, 0)) return;
-    idx.tri.add(key, 0, count);
-    idx.bi.add(ctx, 1, count);
-    idx.bi.add(ctx, 2, 1);
+    (idx.tri as HashTable).add(key, 0, count);
+    (idx.bi as HashTable).add(ctx, 1, count);
+    (idx.bi as HashTable).add(ctx, 2, 1);
   }
 }
 
@@ -191,9 +221,13 @@ export class LanguageModel {
   }
 
   private finish(opts: LoadOptions): LanguageModel {
-    if (opts.quant)
-      for (const t of [this.word.bi, this.word.tri, this.char.bi, this.char.tri])
-        t.freeze(opts.quant);
+    if (!opts.quant) return this;
+    for (const idx of [this.word, this.char])
+      for (const k of ['bi', 'tri'] as const) {
+        const t = idx[k] as HashTable;
+        if (opts.mph) idx[k] = t.toPerfect(opts.quant === 16 ? 16 : 8);
+        else t.freeze(opts.quant, opts.load, opts.fp);
+      }
     return this;
   }
 
@@ -222,7 +256,19 @@ export class LanguageModel {
       keys: put(Buffer.from([...m.keys()].join('\n'), 'utf8')),
       vals: put(Float64Array.from(m.values())),
     });
-    const table = (t: HashTable) => {
+    const table = (t: HashTable | PerfectTable): BinTable => {
+      if (t instanceof PerfectTable) {
+        const d = t.dump();
+        const arrays = d.arrays.map(put);
+        return {
+          kind: 'perfect',
+          ncols: t.ncols,
+          bits: d.bits,
+          seed: d.seed,
+          size: d.size,
+          arrays,
+        };
+      }
       const d = t.dump();
       return { ncols: t.ncols, bits: d.bits, size: d.size, arrays: d.arrays.map(put) };
     };
@@ -279,16 +325,30 @@ export class LanguageModel {
       for (let i = 0; i < m.n; i++) out.set(keys[i]!, vals[i]!);
       return out;
     };
-    const table = (t: BinTable): HashTable => {
+    const table = (t: BinTable): HashTable | PerfectTable => {
+      if (t.kind === 'perfect') {
+        const [pilots, fp, ...cols] = t.arrays;
+        const arrays = [
+          view(Uint16Array, pilots!),
+          view(Uint16Array, fp!),
+          ...cols.map((a) => (t.bits === 16 ? view(Uint16Array, a) : view(Uint8Array, a))),
+        ];
+        return PerfectTable.restore(t.ncols, t.bits as 8 | 16, t.seed!, t.size, arrays);
+      }
       // 與 HashTable.rehash 一致：k1 Uint32；量化後 k2 Uint16、值欄 bits 位元
-      const Col = (t.bits === 8 ? Uint8Array : t.bits === 16 ? Uint16Array : Uint32Array) as {
+      const Col = (t.bits === 16 ? Uint16Array : t.bits ? Uint8Array : Uint32Array) as {
         new (b: ArrayBuffer, o: number, n: number): ArrayBufferView;
         BYTES_PER_ELEMENT: number;
       };
       const [k1, k2, ...cols] = t.arrays;
       const arrays = [
         view(Uint32Array, k1!),
-        t.bits ? view(Uint16Array, k2!) : view(Uint32Array, k2!),
+        // k2 寬度依指紋位元數：每槽 0／1／2／4 bytes（k1 每槽 4 bytes）
+        k2![1] * 2 === k1![1]
+          ? view(Uint16Array, k2!)
+          : k2![1] === k1![1]
+            ? view(Uint32Array, k2!)
+            : view(Uint8Array, k2!),
         ...cols.map((a) => view(Col, a)),
       ];
       return HashTable.restore(t.ncols, t.bits, t.size, arrays);

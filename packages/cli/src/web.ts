@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { Channel, type DecodePath } from '@zhuyin/core';
 import { ImeEngine, type EngineState, type MenuView } from './engine.js';
-import { loadRuntime, saveAdapter } from './runtime.js';
+import { loadRuntime, releaseHeap, saveAdapter } from './runtime.js';
 
 const PAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web', 'index.html');
 
@@ -57,6 +57,7 @@ const L6_MODES: readonly L6Mode[] = ['off', 'bert', 'kev'];
 export async function startWeb(port: number, initialL6: L6Mode, l3: boolean): Promise<void> {
   console.log('[web] 載入模型中（約 1 分鐘）…');
   const { decoder, legalSyllables, adapter, lm } = await loadRuntime();
+  let idleGc: ReturnType<typeof setTimeout> | undefined;
   const clients = new Set<ServerResponse>();
   const push = (data: unknown): void => {
     for (const c of clients) c.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -148,6 +149,9 @@ export async function startWeb(port: number, initialL6: L6Mode, l3: boolean): Pr
           const code = String(b['code'] ?? '');
           const key = typeof b['key'] === 'string' ? b['key'] : undefined;
           lastKeyAt = performance.now();
+          // 停打 3 秒才把解碼產生的垃圾 heap 還給系統（打字中做會卡鍵；見 runtime.ts releaseHeap）
+          clearTimeout(idleGc);
+          idleGc = setTimeout(releaseHeap, 3000);
           const st = engine.onKey({ code, key, timestampMs: lastKeyAt });
           const ms = performance.now() - lastKeyAt;
           // 注音模式下打標點會先送出組字區（有學習）→ 存檔
