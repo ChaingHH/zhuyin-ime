@@ -85,7 +85,12 @@ function hash2Raw(x: string, y: string): void {
  * 計數的對數量化碼本：小於 exact 的值原樣存，以上按等比級距編碼到 2^bits 個碼，
  * 上限 2^32。16 位元：exact=4096，相對誤差約 1e-4；8 位元：exact=16，約 4%。
  */
-function codebook(bits: QuantBits): { encode: (v: number) => number; lut: Float64Array } {
+export interface Codebook {
+  encode: (v: number) => number;
+  lut: Float64Array;
+}
+
+function codebook(bits: QuantBits): Codebook {
   const n = 1 << bits;
   const exact = { 16: 4096, 8: 16, 6: 8, 4: 4 }[bits];
   const logR = Math.log(2 ** 32 / exact) / (n - 1 - exact);
@@ -93,6 +98,56 @@ function codebook(bits: QuantBits): { encode: (v: number) => number; lut: Float6
   for (let c = 0; c < n; c++) lut[c] = c < exact ? c : exact * Math.exp((c - exact) * logR);
   const encode = (v: number): number =>
     v < exact ? v : Math.min(n - 1, exact + Math.round(Math.log(v / exact) / logR));
+  return { encode, lut };
+}
+
+const f32 = new Float32Array(1);
+const u32 = new Uint32Array(f32.buffer);
+
+/** Float32 的位元樣式（HashTable 的 Uint32 欄位暫存浮點值用） */
+export function floatBits(v: number): number {
+  f32[0] = v;
+  return u32[0]!;
+}
+
+/**
+ * 對數機率／退回權重的均勻碼本：[最小值, 最大值]（含 0）等距切成 2^bits 格，最接近 0 的那格改成精確的 0。
+ * 不用分位數切：分位數把格子花在筆數多的中段，高機率的尾端（log p 接近 0）一格很寬，
+ * 實測 8 位元時口語句準掉約 11 點；均勻切每格誤差上限是範圍 / 2^(bits+1)。
+ * encode 吃 Float32 位元樣式（見 floatBits），回傳最近代表值的碼。
+ */
+export function logCodebook(bits: Uint32Array, nbits: 8 | 16): Codebook {
+  const vals = new Float32Array(bits.buffer, bits.byteOffset, bits.length);
+  let min = Infinity;
+  let max = -Infinity;
+  let hasZero = false;
+  for (const v of vals) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+    if (v === 0) hasZero = true;
+  }
+  if (!vals.length) min = max = 0;
+  const n = 1 << nbits;
+  const step = (max - min) / (n - 1) || 1;
+  const centers = Array.from({ length: n }, (_, c) => min + c * step);
+  // 0 在查表時代表「沒存」：只有真的含 0 的欄（退回權重沒設）才放精確的 0。
+  // 機率欄全是負的，接近 0 的（P≈1）必須留在最大的負值，否則會被當成沒存而退回
+  if (hasZero) centers[Math.round(-min / step)] = 0;
+  const lut = Float64Array.from(new Set(centers)).sort();
+  const zero = lut.indexOf(0);
+  const encode = (b: number): number => {
+    u32[0] = b;
+    const v = f32[0]!;
+    if (v === 0) return zero;
+    let lo = 0;
+    let hi = lut.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (v > (lut[mid]! + lut[mid + 1]!) / 2) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
   return { encode, lut };
 }
 
@@ -257,6 +312,15 @@ export class HashTable implements CountTable {
     if (this.lut) throw new Error('toPerfect 需要未凍結的表');
     return PerfectTable.build(this.k1, this.k2 as Uint32Array, this.cols as Uint32Array[], bits);
   }
+
+  /** 欄位存 Float32 位元樣式（floatBits）時：每欄各建均勻碼本（logCodebook），再建 PerfectTable。 */
+  toPerfectFloat(bits: 8 | 16, fpBits: 16 | 32 = 16): PerfectTable {
+    if (this.lut) throw new Error('toPerfectFloat 需要未凍結的表');
+    const cols = this.cols as Uint32Array[];
+    const used = cols.map((c) => c.filter((_, i) => this.k1[i] !== 0));
+    const books = used.map((c) => logCodebook(c, bits));
+    return PerfectTable.build(this.k1, this.k2 as Uint32Array, cols, bits, books, fpBits);
+  }
 }
 
 /** 只讀查詢介面：HashTable（載入中／一般）與 PerfectTable（打包後）共用。 */
@@ -289,9 +353,11 @@ export class PerfectTable implements CountTable {
     readonly bits: 8 | 16,
     readonly seed: number,
     private readonly pilots: Uint16Array,
-    private readonly fp: Uint16Array,
+    /** 指紋：Uint16（h2 高 16 位）或 Uint32（整個 h2）；0 = 空槽 */
+    private readonly fp: Uint16Array | Uint32Array,
     private readonly cols: Array<Uint8Array | Uint16Array>,
-    private readonly lut: Float64Array,
+    /** 每欄的碼本解碼表（計數表各欄相同；機率表各欄不同） */
+    readonly luts: Float64Array[],
   ) {}
 
   private static bucket(seed: number, nb: number): number {
@@ -302,8 +368,8 @@ export class PerfectTable implements CountTable {
     return pick(fmix((h1 ^ Math.imul(pilot + 1, 0x9e3779b1) ^ seed) >>> 0), ns);
   }
 
-  private static tag(): number {
-    return h2 >>> 16 || 1;
+  private static tag(wide: boolean): number {
+    return (wide ? h2 : h2 >>> 16) || 1;
   }
 
   get(key: string, col = 0): number {
@@ -324,20 +390,28 @@ export class PerfectTable implements CountTable {
   private found(col: number): number {
     const b = PerfectTable.bucket(this.seed, this.pilots.length);
     const s = PerfectTable.slot(this.pilots[b]!, this.seed, this.fp.length);
-    return this.fp[s] === PerfectTable.tag() ? this.lut[this.cols[col]![s]!]! : 0;
+    return this.fp[s] === PerfectTable.tag(this.fp.BYTES_PER_ELEMENT === 4)
+      ? this.luts[col]![this.cols[col]![s]!]!
+      : 0;
   }
 
   get bytes(): number {
     return [this.pilots, this.fp, ...this.cols].reduce((s, a) => s + a.byteLength, 0);
   }
 
-  static build(k1: Uint32Array, k2: Uint32Array, cols: Uint32Array[], bits: 8 | 16): PerfectTable {
+  static build(
+    k1: Uint32Array,
+    k2: Uint32Array,
+    cols: Uint32Array[],
+    bits: 8 | 16,
+    books: Codebook[] = cols.map(() => codebook(bits)),
+    fpBits: 16 | 32 = 16,
+  ): PerfectTable {
     const items: number[] = [];
     for (let j = 0; j < k1.length; j++) if (k1[j] !== 0) items.push(j);
     const n = items.length;
     const nb = Math.max(1, Math.ceil(n / BUCKET_LOAD));
     const ns = Math.max(1, Math.ceil(n / SLOT_LOAD));
-    const q = codebook(bits);
     for (let seed = 0x5bd1e995; ; seed = fmix(seed + 1)) {
       // 依桶分組（CSR），大桶先放
       const bucketOf = new Uint32Array(n);
@@ -385,17 +459,26 @@ export class PerfectTable implements CountTable {
         }
       }
       if (!ok) continue;
-      const fp = new Uint16Array(ns);
+      const fp = fpBits === 32 ? new Uint32Array(ns) : new Uint16Array(ns);
       const Col = bits === 16 ? Uint16Array : Uint8Array;
       const out = cols.map(() => new Col(ns));
       for (let i = 0; i < n; i++) {
         const j = items[i]!;
         const s = slotOf[i]!;
         h2 = k2[j]!;
-        fp[s] = PerfectTable.tag();
-        for (let c = 0; c < cols.length; c++) out[c]![s] = q.encode(cols[c]![j]!);
+        fp[s] = PerfectTable.tag(fpBits === 32);
+        for (let c = 0; c < cols.length; c++) out[c]![s] = books[c]!.encode(cols[c]![j]!);
       }
-      return new PerfectTable(cols.length, n, bits, seed, pilots, fp, out, q.lut);
+      return new PerfectTable(
+        cols.length,
+        n,
+        bits,
+        seed,
+        pilots,
+        fp,
+        out,
+        books.map((q) => q.lut),
+      );
     }
   }
 
@@ -416,6 +499,7 @@ export class PerfectTable implements CountTable {
     seed: number,
     size: number,
     arrays: ArrayBufferView[],
+    luts?: Float64Array[],
   ): PerfectTable {
     const [pilots, fp, ...cols] = arrays;
     return new PerfectTable(
@@ -424,9 +508,9 @@ export class PerfectTable implements CountTable {
       bits,
       seed,
       pilots as Uint16Array,
-      fp as Uint16Array,
+      fp as Uint16Array | Uint32Array,
       cols as Array<Uint8Array | Uint16Array>,
-      codebook(bits).lut,
+      luts ?? cols.map(() => codebook(bits).lut),
     );
   }
 }

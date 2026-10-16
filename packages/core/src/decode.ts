@@ -11,6 +11,7 @@
  */
 import type { LexiconEntry } from './index.js';
 import type { Hypothesis } from './l3.js';
+import { LexiconIndex } from './lexicon.js';
 
 /** LM 側介面（結構化型別；@zhuyin/lm 的 LanguageModel 天然滿足）。 */
 export interface Scorer {
@@ -134,10 +135,8 @@ const BLOCKED: SpanCand[] = [];
 export class Decoder {
   private readonly scorer: Scorer;
   private readonly opts: Required<DecoderOptions>;
-  /** 讀音鍵（音節以空白相連）→ 詞，高頻在前。只存詞字串：讀音就是鍵本身 */
-  private index = new Map<string, string[]>();
-  private polyMap = new Map<string, number>(); // 詞 → 讀音數
-  private polySingle = new Set<string>(); // 破音單字集合（用於重罰）
+  /** 讀音 → 詞，高頻在前（lexicon.ts） */
+  private lex = LexiconIndex.build([], 10);
   private maxSpan = 1;
   /** decode 內每組每邊分數的暫存（重用，不夠大才放大；decode 不可重入） */
   private lpwBuf = new Float64Array(64);
@@ -168,45 +167,25 @@ export class Decoder {
     return this.opts;
   }
 
-  /** 破音單字集合：供 PLL 重排時加重罰 */
+  /** 破音單字集合 */
   get polySingleChars(): ReadonlySet<string> {
-    return this.polySingle;
+    return this.lex.polySingle;
+  }
+
+  /** 目前的詞典索引（可存成位元組，下次用 useLexicon 直接載入） */
+  get lexicon(): LexiconIndex {
+    return this.lex;
+  }
+
+  /** 換上已建好的詞典索引（例如從 lexicon.bin 讀回來的） */
+  useLexicon(lex: LexiconIndex): void {
+    this.lex = lex;
+    this.maxSpan = Math.min(lex.maxSpan, this.maxSpanCap());
   }
 
   /** 建立讀音索引：canonical 音節序列 → 詞候選（按詞頻排序）。單字詞同時是 OOV 音節的回退來源。 */
   loadLexicon(entries: readonly LexiconEntry[]): void {
-    this.index = new Map();
-    this.polyMap = new Map();
-    this.polySingle = new Set();
-    let maxSpan = 1;
-    const withFreq: Array<{ e: LexiconEntry; reading: readonly string[]; f: number }> = [];
-    for (const e of entries) {
-      const f = e.freq ?? 0;
-      const prev = this.polyMap.get(e.word) ?? 0;
-      this.polyMap.set(e.word, Math.max(prev, e.readings.length));
-      if ([...e.word].length === 1 && e.readings.length > 1) {
-        this.polySingle.add(e.word);
-      }
-      for (const reading of e.readings) {
-        if (reading.length > this.maxSpanCap()) continue;
-        withFreq.push({ e, reading, f });
-        if (reading.length > maxSpan) maxSpan = reading.length;
-      }
-    }
-    // 高頻優先；解碼時每個 span 只取前 entryCap 個，控制格密度
-    withFreq.sort((x, y) => y.f - x.f);
-    for (const { e, reading } of withFreq) {
-      const key = reading.join(' ');
-      let list = this.index.get(key);
-      if (!list) {
-        list = [];
-        this.index.set(key, list);
-      }
-      list.push(e.word);
-    }
-    // push 長大的陣列會預留空位（1 個元素也佔約 17 格）；縮成剛好大小，約省 40MB
-    for (const [k, list] of this.index) this.index.set(k, list.slice());
-    this.maxSpan = Math.min(maxSpan, this.maxSpanCap());
+    this.useLexicon(LexiconIndex.build(entries, this.maxSpanCap()));
   }
 
   /** 每個 span 展開的最多候選詞數（高頻優先）。 */
@@ -232,13 +211,10 @@ export class Decoder {
       return len === 1 ? [{ word: obs[0]!, reading: obs, cost: 0 }] : [];
     const best = new Map<string, SpanCand>();
     const take = (reading: readonly string[], cost: number, cap: number): void => {
-      const entries = this.index.get(reading.join(' '));
-      if (!entries) return;
-      for (let i = 0; i < Math.min(cap, entries.length); i++) {
-        const w = entries[i]!;
+      this.lex.each(reading, cap, (w) => {
         const prev = best.get(w);
         if (!prev || cost < prev.cost) best.set(w, { word: w, reading, cost });
-      }
+      });
     };
     take(obs, 0, cap);
     // 單音節更正只在觀察音節查無任何詞（多半是不合法音節）時才做：
@@ -263,7 +239,7 @@ export class Decoder {
   }
 
   get stats(): { spans: number; maxSpan: number } {
-    return { spans: this.index.size, maxSpan: this.maxSpan };
+    return { spans: this.lex.size, maxSpan: this.maxSpan };
   }
 
   /** 解碼音節序列，回傳 N-best（含逐詞分數拆解）。 */
@@ -374,7 +350,7 @@ export class Decoder {
             const w = capped[i]!.word;
             let lp = this.scorer.wordLogProb(w, w1!, w2!);
             // 破音字單字重罰：破音字幾乎不以單字存在
-            if (this.polySingle.has(w) && [...w].length === 1) {
+            if (this.lex.polySingle.has(w) && [...w].length === 1) {
               lp -= this.opts.polyPenalty;
             }
             lpws[i] = lp;
@@ -596,21 +572,13 @@ export class Decoder {
     for (const reading of entry.readings) {
       if (reading.length > this.maxSpanCap()) continue;
       if (reading.length > this.maxSpan) this.maxSpan = reading.length;
-      const key = reading.join(' ');
-      let list = this.index.get(key);
-      if (!list) {
-        list = [];
-        this.index.set(key, list);
-      }
-      if (!list.includes(entry.word)) {
-        // 新詞無頻次證據，插到尾端（不搶高頻候選的位子）
-        list.push(entry.word);
-      }
+      // 新詞無頻次證據，接在尾端（不搶高頻候選的位子）
+      this.lex.add(reading, entry.word);
     }
   }
 
   /** 該讀音下是否已存在指定詞（挖詞去重用）。 */
   hasEntry(reading: readonly string[], word: string): boolean {
-    return this.index.get(reading.join(' '))?.includes(word) ?? false;
+    return this.lex.has(reading, word);
   }
 }

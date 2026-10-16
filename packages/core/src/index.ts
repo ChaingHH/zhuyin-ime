@@ -58,6 +58,7 @@ export * from './slots.js';
 export * from './decode.js';
 export * from './x2.js';
 export * from './l3.js';
+export * from './lexicon.js';
 
 export const MEDIAS = ['ㄧ', 'ㄨ', 'ㄩ'] as const;
 

@@ -1,14 +1,15 @@
 ﻿import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import {
   Decoder,
+  LexiconIndex,
   UserAdapter,
   type LexiconEntry,
   type Scorer,
   type UserAdapterData,
 } from '@zhuyin/core';
-import { LanguageModel, LM_ENV_KEYS, lmOptionsFromEnv } from '@zhuyin/lm';
+import { BackoffLM, LanguageModel, LM_ENV_KEYS, lmOptionsFromEnv } from '@zhuyin/lm';
 import { fileURLToPath } from 'node:url';
 import v8 from 'node:v8';
 import vm from 'node:vm';
@@ -21,7 +22,8 @@ const ADAPTER_FILE = path.join(USER_DIR, 'adapter.json');
 export interface LoadedRuntime {
   decoder: Decoder;
   legalSyllables: Set<string>;
-  lm: LanguageModel;
+  /** 預設是退回式模型（lm.bo.bin）；基線與 IDF 需要計數，會改載入計數模型 */
+  lm: LanguageModel | BackoffLM;
   adapter: UserAdapter;
 }
 
@@ -41,29 +43,70 @@ export async function loadRuntime(opts: RuntimeOptions = {}): Promise<LoadedRunt
 }
 
 async function buildRuntime(opts: RuntimeOptions): Promise<LoadedRuntime> {
-  // ZHUYIN_LM 可指定模型檔；預設優先用 pack.ts 打包的 .bin（已剪枝量化），其次 train.ts 的
-  // .tsv，最後舊 .json。有設剪枝／量化環境變數時跳過 .bin（bin 的設定在打包時就固定了）。
+  // ZHUYIN_LM 可指定模型檔。預設依序找：shrink.ts 打包的退回式模型 lm.bo.bin、pack.ts 的計數模型
+  // lm.bin、train.ts 的 lm.tsv、舊 lm.json。有設剪枝／量化環境變數時跳過兩個 .bin（設定在打包時就固定了）；
+  // 基線與 IDF 要讀計數，跳過 lm.bo.bin。
   const models = path.join(REPO, 'data', 'models');
   const custom = LM_ENV_KEYS.some((k) => process.env[k] !== undefined);
+  const needCounts = opts.baseline !== undefined || (opts.idfBonus ?? 0) > 0;
   const lmFile =
     process.env['ZHUYIN_LM'] ??
-    [...(custom ? [] : ['lm.bin']), 'lm.tsv', 'lm.json']
+    [
+      ...(custom || needCounts ? [] : ['lm.bo.bin']),
+      ...(custom ? [] : ['lm.bin']),
+      'lm.tsv',
+      'lm.json',
+    ]
       .map((f) => path.join(models, f))
       .find((f) => existsSync(f)) ??
     path.join(models, 'lm.json');
-  const lexFile = path.join(REPO, 'data', 'processed', 'lexicon.jsonl');
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 
-  const [lm, lexRaw, sylRaw] = await Promise.all([
-    LanguageModel.load(lmFile, lmOptionsFromEnv(process.env)),
-    readFile(lexFile, 'utf8'),
+  const [lm, lexicon, sylRaw] = await Promise.all([
+    lmFile.endsWith('.bo.bin')
+      ? BackoffLM.load(lmFile)
+      : LanguageModel.load(lmFile, lmOptionsFromEnv(process.env)),
+    loadLexicon(),
     readFile(sylFile, 'utf8'),
   ]);
-  const entries = (lexRaw.split('\n').filter(Boolean) as string[]).map(
-    (l) => JSON.parse(l) as LexiconEntry,
-  );
   const legalSyllables = new Set((JSON.parse(sylRaw) as { syllables: string[] }).syllables);
 
+  const decoder = makeDecoder(lm, opts);
+  decoder.useLexicon(lexicon);
+  const adapter = await loadAdapter();
+  // 使用者詞條（手動造詞＋歷史挖詞）注入解碼格
+  for (const e of adapter.drainPendingEntries()) {
+    decoder.addEntry(e);
+  }
+  return { decoder, legalSyllables, lm, adapter };
+}
+
+/**
+ * 詞典索引：lexicon.bin 比 lexicon.jsonl 新就直接讀（不必解析 JSONL，也沒有解析時約 200MB 的暫時物件）；
+ * 否則從 JSONL 建、順手寫出 lexicon.bin。
+ */
+async function loadLexicon(): Promise<LexiconIndex> {
+  const dir = path.join(REPO, 'data', 'processed');
+  const jsonl = path.join(dir, 'lexicon.jsonl');
+  const bin = path.join(dir, 'lexicon.bin');
+  if (existsSync(bin) && statSync(bin).mtimeMs >= statSync(jsonl).mtimeMs)
+    return LexiconIndex.fromBytes(await readFile(bin));
+  const entries = (await readFile(jsonl, 'utf8'))
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as LexiconEntry);
+  const decoder = new Decoder({ wordLogProb: () => 0, charSequenceLogProb: () => 0 });
+  decoder.loadLexicon(entries);
+  await writeFile(bin, decoder.lexicon.toBytes());
+  return decoder.lexicon;
+}
+
+function makeDecoder(lm: LanguageModel | BackoffLM, opts: RuntimeOptions): Decoder {
+  if (lm instanceof BackoffLM) {
+    if (opts.baseline || (opts.idfBonus ?? 0) > 0)
+      throw new Error('基線與 IDF 需要計數模型：用 ZHUYIN_LM 指定 lm.bin 或 lm.tsv');
+    return new Decoder(lm, { a: opts.a, gamma: opts.gamma, beamWidth: opts.beamWidth });
+  }
   // 稀有字 IDF：以字 unigram 總量正規化
   let totalChars = 0;
   for (const v of lm.char.uni.values()) totalChars += v;
@@ -93,22 +136,13 @@ async function buildRuntime(opts: RuntimeOptions): Promise<LoadedRuntime> {
     };
   }
 
-  const decoder = new Decoder(scorer, {
+  return new Decoder(scorer, {
     a: opts.a,
     gamma: opts.gamma,
     beamWidth: opts.beamWidth,
     idfBonus: opts.idfBonus,
     charIdf,
   });
-  decoder.loadLexicon(entries);
-
-  const adapter = await loadAdapter();
-  // 使用者詞條（手動造詞＋歷史挖詞）注入解碼格
-  for (const e of adapter.drainPendingEntries()) {
-    decoder.addEntry(e);
-  }
-
-  return { decoder, legalSyllables, lm, adapter };
 }
 
 /**
