@@ -19,6 +19,8 @@ const row = [
   `rss ${mb(process.memoryUsage().rss)}MB`,
   `tables ${mb(tables.reduce((s, t) => s + t.bytes, 0))}MB`,
   `entries ${(tables.reduce((s, t) => s + t.size, 0) / 1e6).toFixed(1)}M`,
+  // 詞二／詞三／字二／字三 各幾百萬筆
+  `wb/wt/cb/ct ${tables.map((t) => (t.size / 1e6).toFixed(1)).join('/')}M`,
   `load ${loadS.toFixed(0)}s`,
 ];
 for (const f of ['colloquial', 'written']) {

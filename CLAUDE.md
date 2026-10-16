@@ -67,7 +67,7 @@ node packages/cli/dist/index.js sweep [-n N]         # grid over a × gamma on c
 
 ### 已封存：L6 神經重排、L7 防閃動
 
-git tag `archive/l6-l7`（`git checkout archive/l6-l7` 取回）。內容：`packages/rerank`（BERT PLL、`RerankWorker`、Kev 客戶端）、`ImeEngine` 的 `RerankHooks`／`stickBonus`、web 的 L6 切換與 SSE、eval 的 `--rerank`／`--kev`。封存原因：依賴與模型太肥（transformers＋onnxruntime、`data/models/hf` 391MB、Kev venv 7.6GB）。要點：Kev（`runs/zy-choice16k` w=3）80.4/89.0%；BERT 要 fp32、要在 worker 跑；防閃動用軟加分（硬鎖前綴掉 5–6 點）。Kev 伺服器、訓練資料與腳本（`data/raw/kev`、`data/kev`、`debug-kev-*.ts`）沒刪。
+git tag `archive/l6-l7`（`git checkout archive/l6-l7` 取回）。內容：`packages/rerank`（BERT PLL、`RerankWorker`、Kev 客戶端）、`ImeEngine` 的 `RerankHooks`／`stickBonus`、web 的 L6 切換與 SSE、eval 的 `--rerank`／`--kev`。封存原因：依賴與模型太肥（transformers＋onnxruntime、`data/models/hf` 391MB、Kev venv 7.6GB）。要點：Kev（`runs/zy-choice16k` w=3）80.4/89.0%；BERT 要 fp32、要在 worker 跑；防閃動用軟加分（硬鎖前綴掉 5–6 點）。Kev 伺服器、訓練資料、BERT 模型與 Qwen 權重已於 2026-10-16 刪除，要重做得重新下載與訓練。
 
 ## Architecture
 
