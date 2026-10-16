@@ -40,7 +40,9 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 `data/raw`, `data/models`, `data/user` are gitignored.
 
 - `train.ts` 輸出逐行 `.tsv`（`section\tcount\tkey`），不是 JSON：大模型超過 V8 單一字串上限。`LanguageModel.load` 兩種都讀。
-- runtime 預設載入 `data/models/lm.bin`，其次 `lm.tsv`，最後舊 `lm.json`；`ZHUYIN_LM=<path>` 可覆寫。有設任何 `ZHUYIN_LM_*` 剪枝／量化變數（`LM_ENV_KEYS`）時跳過 `.bin`。
+- runtime 預設依序找 `data/models/lm.bo.bin`、`lm.bin`、`lm.tsv`、舊 `lm.json`；`ZHUYIN_LM=<path>` 可覆寫。基線（`--baseline`）與 `--idf` 要計數，會跳過 `lm.bo.bin`。
+- `lm.bo.bin`（預設模型）：退回式模型（`packages/lm/src/backoff.ts` `BackoffLM`），存好算完的 KN 機率與退回權重，查詢不算 KN、沒有小 Map。`NODE_OPTIONS=--max-old-space-size=12000 npx tsx packages/lm/src/shrink.ts [保留筆數百萬=12]`（約 4 分鐘）從 lm.tsv 建：加權差異剪枝（Seymore–Rosenfeld）、重算退回權重、8 位元均勻碼本、16 位元指紋，四表權重 `LM_SHRINK_WEIGHTS` 預設 1:1:2:2。預設 12M 筆：大表 46MB、RSS 115MB、句 76.1／79.4（計數模型 lm.bin 220MB、76.4／79.8）。表裡 0 代表「沒存」：機率欄不能量化成 0（P≈1 會被當成沒存），一元表的鍵要含 `cont`（EOS 只在那裡）。實驗台 `debug-shrink.ts`（全模型與分數只算一次，多組設定）、`debug-bo-diff.ts`（沿正解逐詞比 KN 與退回式機率）。
+- 詞典索引：`core/src/lexicon.ts` `LexiconIndex`（音節編號＋typed array），runtime 快取成 `data/processed/lexicon.bin`（比 lexicon.jsonl 舊就重建），載入 27ms、不解析 JSONL。解碼結果與舊 Map 索引逐位元相同。有設任何 `ZHUYIN_LM_*` 剪枝／量化變數（`LM_ENV_KEYS`）時跳過 `.bin`。
 - `lm.bin`：`npx tsx packages/lm/src/pack.ts [lm.tsv] [lm.bin]`（約 40–70 秒，吃同樣的環境變數，`lmOptionsFromEnv`）把剪枝量化後的模型存成二進位（約 125MB）。載入約 1 秒；表陣列直接 view 到檔案 buffer。重新訓練 lm.tsv 或改預設後要重新打包。
 - 二元／三元表是 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map：載入 tsv 時用開放定址 `HashTable` 累加，量化時預設轉成最小完美雜湊 `PerfectTable`（每鍵 16-bit 指紋＋8-bit 值＋約 4 bit 位移值，沒有探測）。改回 Map 會讓每次 major GC 掃描數千萬物件（實測每句 +700ms 延遲）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
 - `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。

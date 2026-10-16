@@ -317,6 +317,32 @@ export async function scoreNgrams(full: LanguageModel, tsv: string): Promise<Ngr
   return { word: done(acc.word), char: done(acc.char) };
 }
 
+/**
+ * 四張表（詞二、詞三、字二、字三）的分數各乘上權重，再取「總共保留 keep 筆」的門檻 θ。
+ * 權重只改表之間的分配：預設 1:1:2:2（字級加倍）在 6M 筆時比 1:1:1:1 好 0.7／−0.2 點（docs/MEMORY.md）。
+ * 回傳加權後的分數（交給 buildBackoff）與 θ；被留下的三元的上下文二元另外保留，實際筆數會略多。
+ */
+export function selectTop(
+  scores: NgramScores,
+  keep: number,
+  weights: readonly number[] = [1, 1, 2, 2],
+): { scores: NgramScores; theta: number } {
+  const [wb, wt, cb, ct] = [scores.word.bi, scores.word.tri, scores.char.bi, scores.char.tri].map(
+    (a, i) => a.map((v) => (v < 0 ? v : v * weights[i]!)),
+  );
+  const all = new Float32Array(wb!.length + wt!.length + cb!.length + ct!.length);
+  let o = 0;
+  for (const a of [wb!, wt!, cb!, ct!]) {
+    all.set(a, o);
+    o += a.length;
+  }
+  all.sort();
+  return {
+    scores: { word: { bi: wb!, tri: wt! }, char: { bi: cb!, tri: ct! } },
+    theta: all[Math.max(0, all.length - Math.round(keep))]!,
+  };
+}
+
 export interface BuildOptions {
   /** 分數低於此值的 n-gram 刪掉；0 = 全留 */
   theta: number;

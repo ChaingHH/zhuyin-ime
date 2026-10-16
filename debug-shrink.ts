@@ -8,7 +8,7 @@ import {
   LanguageModel,
   buildBackoff,
   scoreNgrams,
-  type NgramScores,
+  selectTop,
 } from './packages/lm/src/index.js';
 import { loadRuntime, loadEvalSamples } from './packages/cli/src/runtime.js';
 
@@ -30,19 +30,6 @@ console.log(`載入全模型 ${((Date.now() - t) / 1000).toFixed(0)}s`);
 t = Date.now();
 const scores = await scoreNgrams(full, SRC);
 const tables = [scores.word.bi, scores.word.tri, scores.char.bi, scores.char.tri];
-const weighted = (w: number[]): NgramScores => {
-  const [wb, wt, cb, ct] = tables.map((a, i) => a.map((v) => (v < 0 ? v : v * w[i]!)));
-  return { word: { bi: wb!, tri: wt! }, char: { bi: cb!, tri: ct! } };
-};
-const sortedOf = (s: NgramScores): Float32Array => {
-  const out = new Float32Array(tables.reduce((n, a) => n + a.length, 0));
-  let o = 0;
-  for (const a of [s.word.bi, s.word.tri, s.char.bi, s.char.tri]) {
-    out.set(a, o);
-    o += a.length;
-  }
-  return out.sort();
-};
 const n = tables.reduce((m, a) => m + a.length, 0);
 console.log(`算分數 ${((Date.now() - t) / 1000).toFixed(0)}s，共 ${(n / 1e6).toFixed(1)}M 筆`);
 
@@ -52,9 +39,7 @@ const samples = {
 };
 
 for (const { k, bits, fpBits, weights } of configs) {
-  const ws = weighted(weights);
-  const all = sortedOf(ws);
-  const theta = all[Math.max(0, all.length - Math.round(k * 1e6))]!;
+  const { scores: ws, theta } = selectTop(scores, k * 1e6, weights);
   t = Date.now();
   const bo = await buildBackoff(full, SRC, ws, { theta, bits, fpBits });
   const file = `data/models/tmp-${k}-${bits}-${fpBits}.bo.bin`;
