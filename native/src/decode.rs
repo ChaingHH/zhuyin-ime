@@ -1,6 +1,8 @@
 //! L4 詞格 + L5 list-Viterbi 解碼：packages/core/src/decode.ts Decoder.decode 的移植。
-//! 只做預設設定：沒有 L3 通道、X2 修飾、固定段、IDF。迭代順序與同分處理都照 TS
-//! （狀態依插入順序、同分排後、全域 beam 同分依桶的迭代順序），結果逐位元相同。
+//! 含 L3 更正讀音（alternatives）、X2 修飾（modifier）、固定段（fixed）、執行中加詞；沒有 IDF。
+//! 迭代順序與同分處理都照 TS（狀態依插入順序、同分排後、全域 beam 同分依桶的迭代順序），
+//! 結果逐位元相同。
+use crate::l3::Hypothesis;
 use crate::lexicon::Lexicon;
 use crate::lm::BackoffLm;
 use std::collections::HashMap;
@@ -10,11 +12,10 @@ const EOS: &str = "\u{3}";
 const UNK_WORD: &str = "\u{25A1}";
 /// JS 的 Math.log(1e-7)：寫死，免得 libm 的末位與 V8 不同
 const UNK_PENALTY: f64 = -16.11809565095832;
-const ENTRY_CAP: usize = 48;
 const NONE: u32 = u32::MAX;
 
 /// 不含任何注音符號的 token（組字中按的空格等）：原樣輸出、自成一詞
-fn is_literal(t: &str) -> bool {
+pub fn is_literal(t: &str) -> bool {
     !t.chars().any(|c| ('ㄅ'..='ㄯ').contains(&c))
 }
 
@@ -27,6 +28,9 @@ struct Path {
     w2: u32,
     c1: char,
     c2: char,
+    /// 詞邊所在的 span（span 快取索引）與其中第幾個候選；NONE＝未知詞邊
+    ci: u32,
+    cand: u32,
 }
 
 /// 依插入順序迭代的 狀態（前兩詞）→ 由高到低的路徑清單（JS Map 的語意）
@@ -36,14 +40,71 @@ struct Bucket {
     lists: Vec<(u64, Vec<u32>)>,
 }
 
-pub struct Decoder<'a> {
-    pub lm: &'a BackoffLm,
-    pub lex: &'a Lexicon,
+pub struct Decoder {
+    pub lm: BackoffLm,
+    pub lex: Lexicon,
     pub a: f64,
     pub gamma: f64,
     pub beam: usize,
     pub poly_penalty: f64,
+    pub entry_cap: usize,
+    /// L3 更正讀音每個 key 取的最多候選詞數
+    pub alt_entry_cap: usize,
+    /// 單音節只在原讀音查無詞時才套用 L3 更正
+    pub alt_single_only_if_empty: bool,
     max_span: usize,
+}
+
+/// 使用者選定的詞段：從第 pos 個音節起、len 個音節固定為 word
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixedSpan {
+    pub pos: usize,
+    pub len: usize,
+    pub word: String,
+}
+
+/// 格中一條詞邊的候選；讀音＝觀察音節，fix 有值時第 i 個換成 L3 更正的音節
+#[derive(Clone)]
+struct Cand {
+    word: u32,
+    fix: Option<(usize, String)>,
+    cost: f64,
+}
+
+/// 對外的候選（選字視窗用）
+pub struct SpanCand {
+    pub word: String,
+    pub cost: f64,
+}
+
+pub struct WordBreakdown {
+    pub word: String,
+    /// 採用的讀音（L3 更正後的意圖音節）
+    pub reading: Vec<String>,
+}
+
+pub struct DecodePath {
+    pub score: f64,
+    pub breakdown: Vec<WordBreakdown>,
+}
+
+impl DecodePath {
+    pub fn words(&self) -> Vec<&str> {
+        self.breakdown.iter().map(|b| b.word.as_str()).collect()
+    }
+    pub fn text(&self) -> String {
+        self.words().concat()
+    }
+}
+
+#[derive(Default)]
+pub struct DecodeOptions<'m> {
+    pub n_best: usize,
+    /// X2 修飾：詞、起點、長度 → log 加成
+    pub modifier: Option<&'m dyn Fn(&str, usize, usize) -> f64>,
+    /// L3 假設：每個位置的候選意圖音節（第一個是觀察音節、代價 0）
+    pub alternatives: Option<&'m [Vec<Hypothesis>]>,
+    pub fixed: &'m [FixedSpan],
 }
 
 /// 詞編號：小於詞典詞數的是詞典詞，其餘是這次解碼的額外詞（空詞、□、原樣 token）
@@ -71,9 +132,8 @@ impl Words<'_> {
         }
     }
     fn poly(&self, id: u32) -> bool {
-        let n = self.lex.word_count() as u32;
-        if id < n {
-            self.lex.poly[id as usize]
+        if id < self.lex.word_count() as u32 {
+            self.lex.is_poly(id)
         } else {
             let s = self.name(id);
             s.chars().count() == 1 && self.lex.poly_set.contains(s)
@@ -135,8 +195,9 @@ fn prune_beam(bucket: &mut Bucket, beam: usize, paths: &[Path]) -> f64 {
     t
 }
 
-impl<'a> Decoder<'a> {
-    pub fn new(lm: &'a BackoffLm, lex: &'a Lexicon, a: f64, gamma: f64) -> Self {
+impl Decoder {
+    pub fn new(lm: BackoffLm, lex: Lexicon, a: f64, gamma: f64) -> Self {
+        let max_span = lex.max_span().min(10);
         Decoder {
             lm,
             lex,
@@ -144,18 +205,22 @@ impl<'a> Decoder<'a> {
             gamma,
             beam: 200,
             poly_penalty: 2.5,
-            max_span: lex.max_span().min(10),
+            entry_cap: 48,
+            alt_entry_cap: 8,
+            alt_single_only_if_empty: true,
+            max_span,
         }
     }
 
-    /// 解碼音節序列，回傳 N-best（詞序、分數）
-    pub fn decode(&self, seq: &[String], n_best: usize) -> Vec<(Vec<String>, f64)> {
+    /// 解碼音節序列，回傳 N-best（含逐詞拆解）
+    pub fn decode(&self, seq: &[String], o: &DecodeOptions) -> Vec<DecodePath> {
         let n = seq.len();
         if n == 0 {
             return vec![];
         }
+        let n_best = if o.n_best == 0 { 4 } else { o.n_best };
         let mut words = Words {
-            lex: self.lex,
+            lex: &self.lex,
             extra: vec![],
         };
         let empty = words.intern("");
@@ -169,18 +234,22 @@ impl<'a> Decoder<'a> {
             w2: empty,
             c1: BOS,
             c2: BOS,
+            ci: NONE,
+            cand: NONE,
         }];
         let mut buckets: Vec<Bucket> = (0..=n).map(|_| Bucket::default()).collect();
         buckets[0].index.insert(key(empty, empty), 0);
         buckets[0].lists.push((key(empty, empty), vec![0]));
         let ms = self.max_span;
-        let mut span_cache: Vec<Option<Vec<u32>>> = vec![None; n * (ms + 1)];
+        // None＝還沒算；Some(None)＝被固定段擋住（不同於查無詞，不補未知詞）
+        let mut span_cache: Vec<Option<Option<Vec<Cand>>>> = vec![None; n * (ms + 1)];
         let mut floors = vec![f64::NEG_INFINITY; n + 1];
         let mut counts = vec![0usize; n + 1];
         let beam = self.beam;
         let (a, gamma) = (self.a, self.gamma);
         let mut lpws: Vec<f64> = vec![];
         let mut lpcs: Vec<f64> = vec![];
+        let mut us: Vec<f64> = vec![];
 
         for pos in 0..n {
             let groups = std::mem::take(&mut buckets[pos]);
@@ -194,9 +263,11 @@ impl<'a> Decoder<'a> {
                 for len in 1..=max_len {
                     let ci = pos * (ms + 1) + len;
                     if span_cache[ci].is_none() {
-                        span_cache[ci] = Some(self.span_cands(seq, pos, len, &mut words));
+                        span_cache[ci] = Some(self.fixed_cands(seq, pos, len, o, &mut words));
                     }
-                    let cands = span_cache[ci].as_ref().unwrap();
+                    let Some(cands) = span_cache[ci].as_ref().unwrap() else {
+                        continue;
+                    };
                     let q = pos + len;
                     let target = &mut buckets[q];
                     let mut floor = floors[q];
@@ -216,6 +287,8 @@ impl<'a> Decoder<'a> {
                                     w2: unk,
                                     c1,
                                     c2,
+                                    ci: ci as u32,
+                                    cand: NONE,
                                 };
                                 let k = key(np.w1, unk);
                                 let li = *target.index.entry(k).or_insert_with(|| {
@@ -235,12 +308,13 @@ impl<'a> Decoder<'a> {
                     let m = cands.len();
                     lpws.clear();
                     lpcs.clear();
+                    us.clear();
                     let (w1s, w2s) = (words.name(w1), words.name(w2));
-                    for &w in cands {
-                        let name = words.name(w);
+                    for c in cands {
+                        let name = words.name(c.word);
                         let mut lp = self.lm.word_log_prob(name, w1s, w2s);
                         // 破音字單字重罰：破音字幾乎不以單字存在
-                        if words.poly(w) {
+                        if words.poly(c.word) {
                             lp -= self.poly_penalty;
                         }
                         lpws.push(lp);
@@ -249,19 +323,22 @@ impl<'a> Decoder<'a> {
                         } else {
                             self.lm.char_sequence_log_prob(name, (rep.c1, rep.c2))
                         });
+                        us.push(o.modifier.map_or(0.0, |f| f(name, pos, len)));
                     }
                     for i in 0..m {
-                        let word = cands[i];
+                        let word = cands[i].word;
                         let wt = a * lpws[i];
                         let ct = gamma * lpcs[i];
-                        if paths[gp[0] as usize].score + wt + ct < floor {
+                        let ut = us[i];
+                        let ch = -cands[i].cost;
+                        if paths[gp[0] as usize].score + wt + ct + ut + ch < floor {
                             continue;
                         }
                         let k = key(w2, word);
                         let mut li = target.index.get(&k).copied();
                         let mut cc: Option<(char, char)> = None;
                         for &p in gp {
-                            let score = paths[p as usize].score + wt + ct;
+                            let score = paths[p as usize].score + wt + ct + ut + ch;
                             if score < floor {
                                 break;
                             }
@@ -290,6 +367,8 @@ impl<'a> Decoder<'a> {
                                 w2: word,
                                 c1,
                                 c2,
+                                ci: ci as u32,
+                                cand: i as u32,
                             });
                             let id = paths.len() as u32 - 1;
                             counts[q] +=
@@ -334,34 +413,163 @@ impl<'a> Decoder<'a> {
             .iter()
             .take(n_best)
             .map(|&(score, p)| {
-                let mut out = vec![];
+                let mut breakdown = vec![];
                 let mut cur = p;
                 while paths[cur as usize].parent != NONE {
-                    out.push(words.name(paths[cur as usize].word).to_string());
-                    cur = paths[cur as usize].parent;
+                    let pp = &paths[cur as usize];
+                    let (pos, len) = (pp.ci as usize / (ms + 1), pp.ci as usize % (ms + 1));
+                    let mut reading = seq[pos..pos + len].to_vec();
+                    if pp.cand != NONE {
+                        let cs = span_cache[pp.ci as usize]
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap();
+                        if let Some((i, syl)) = &cs[pp.cand as usize].fix {
+                            reading[*i] = syl.clone();
+                        }
+                    }
+                    breakdown.push(WordBreakdown {
+                        word: words.name(pp.word).to_string(),
+                        reading,
+                    });
+                    cur = pp.parent;
                 }
-                out.reverse();
-                (out, score)
+                breakdown.reverse();
+                DecodePath { score, breakdown }
             })
             .collect()
     }
 
-    /// (起點, 長度) 的候選詞（沒有 L3：只查原讀音），同詞只留第一次
-    fn span_cands(&self, seq: &[String], pos: usize, len: usize, words: &mut Words) -> Vec<u32> {
+    /// span 候選再套固定段：與固定段重疊的 span 只有恰好等於該段的那個詞能走；None＝走不通
+    fn fixed_cands(
+        &self,
+        seq: &[String],
+        pos: usize,
+        len: usize,
+        o: &DecodeOptions,
+        words: &mut Words,
+    ) -> Option<Vec<Cand>> {
+        let alts = o.alternatives;
+        let cands = self.cands(seq, pos, len, alts, self.entry_cap, words);
+        let Some(f) = o
+            .fixed
+            .iter()
+            .find(|f| f.pos < pos + len && pos < f.pos + f.len)
+        else {
+            return Some(cands);
+        };
+        if f.pos != pos || f.len != len {
+            return None;
+        }
+        let mut out: Vec<Cand> = cands
+            .into_iter()
+            .filter(|c| words.name(c.word) == f.word)
+            .collect();
+        if out.is_empty() {
+            out = self.cands(seq, pos, len, alts, usize::MAX, words);
+            out.retain(|c| words.name(c.word) == f.word);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價（位置照第一次出現）
+    fn cands(
+        &self,
+        seq: &[String],
+        pos: usize,
+        len: usize,
+        alts: Option<&[Vec<Hypothesis>]>,
+        cap: usize,
+        words: &mut Words,
+    ) -> Vec<Cand> {
         let obs = &seq[pos..pos + len];
         if obs.iter().any(|t| is_literal(t)) {
             return if len == 1 {
-                vec![words.intern(&obs[0])]
+                vec![Cand {
+                    word: words.intern(&obs[0]),
+                    fix: None,
+                    cost: 0.0,
+                }]
             } else {
                 vec![]
             };
         }
-        let mut out: Vec<u32> = vec![];
-        self.lex.each(obs, ENTRY_CAP, |w| {
-            if !out.contains(&w) {
-                out.push(w);
+        let mut best: Vec<Cand> = vec![];
+        let take = |best: &mut Vec<Cand>,
+                    reading: &[String],
+                    fix: Option<(usize, &str)>,
+                    cost: f64,
+                    cap: usize| {
+            self.lex.each(reading, cap, |w| {
+                match best.iter_mut().find(|c| c.word == w) {
+                    Some(prev) => {
+                        if cost < prev.cost {
+                            prev.cost = cost;
+                            prev.fix = fix.map(|(i, s)| (i, s.to_string()));
+                        }
+                    }
+                    None => best.push(Cand {
+                        word: w,
+                        fix: fix.map(|(i, s)| (i, s.to_string())),
+                        cost,
+                    }),
+                }
+            });
+        };
+        take(&mut best, obs, None, 0.0, cap);
+        // 單音節更正只在觀察音節查無任何詞時才做（見 TS spanCands）
+        if let Some(alts) = alts {
+            if !(len == 1 && self.alt_single_only_if_empty && !best.is_empty()) {
+                let mut r = obs.to_vec();
+                for i in 0..len {
+                    for h in alts.get(pos + i).map_or(&[][..], |v| v) {
+                        if h.cost == 0.0 {
+                            continue;
+                        }
+                        r[i] = h.syl.clone();
+                        take(&mut best, &r, Some((i, &h.syl)), h.cost, self.alt_entry_cap);
+                    }
+                    r[i] = obs[i].clone();
+                }
             }
-        });
-        out
+        }
+        best
+    }
+
+    /// 選字視窗用：(起點, 長度) 的所有候選詞與通道代價
+    pub fn span_cands(
+        &self,
+        seq: &[String],
+        pos: usize,
+        len: usize,
+        alts: Option<&[Vec<Hypothesis>]>,
+    ) -> Vec<SpanCand> {
+        let mut words = Words {
+            lex: &self.lex,
+            extra: vec![],
+        };
+        let cs = self.cands(seq, pos, len, alts, usize::MAX, &mut words);
+        cs.iter()
+            .map(|c| SpanCand {
+                word: words.name(c.word).to_string(),
+                cost: c.cost,
+            })
+            .collect()
+    }
+
+    /// 增量加入詞條（X2 挖詞／使用者造詞）
+    pub fn add_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        for r in readings {
+            if r.len() > 10 {
+                continue;
+            }
+            self.max_span = self.max_span.max(r.len());
+            self.lex.add(r, word);
+        }
+    }
+
+    pub fn has_entry(&self, reading: &[String], word: &str) -> bool {
+        self.lex.has(reading, word)
     }
 }

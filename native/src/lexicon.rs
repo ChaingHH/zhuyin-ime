@@ -1,5 +1,5 @@
 //! 讀音 → 詞 索引 lexicon.bin 的唯讀移植（packages/core/src/lexicon.ts LexiconIndex.fromBytes）。
-//! 執行中新增詞的疊加層（使用者造詞、挖詞）還沒移植。
+//! 執行中新增的詞（使用者造詞、挖詞）放在疊加層，語意同 LexiconIndex.add：接在該讀音清單最後。
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +16,11 @@ pub struct Lexicon {
     /// 第 i 個詞是不是破音單字（有多個讀音的單字）
     pub poly: Vec<bool>,
     pub poly_set: HashSet<String>,
+    /// 疊加層：基本詞典沒有的詞（編號接在基本詞後面）
+    added: Vec<String>,
+    /// 已有讀音的新詞（鍵編號 → 詞編號）、全新讀音（音節編號 → 詞編號）
+    extra_by_key: HashMap<usize, Vec<u32>>,
+    extra_new: HashMap<Vec<u16>, Vec<u32>>,
 }
 
 fn hash_ids(ids: &[u16]) -> u32 {
@@ -104,15 +109,39 @@ impl Lexicon {
             slots,
             poly,
             poly_set,
+            added: vec![],
+            extra_by_key: HashMap::new(),
+            extra_new: HashMap::new(),
         })
     }
 
-    pub fn word_count(&self) -> usize {
+    fn base_count(&self) -> usize {
         self.woff.len() - 1
     }
 
+    /// 詞數（含疊加層新增的）
+    pub fn word_count(&self) -> usize {
+        self.base_count() + self.added.len()
+    }
+
     pub fn word(&self, i: u32) -> &str {
-        &self.text[self.woff[i as usize] as usize..self.woff[i as usize + 1] as usize]
+        let i = i as usize;
+        if i < self.base_count() {
+            &self.text[self.woff[i] as usize..self.woff[i + 1] as usize]
+        } else {
+            &self.added[i - self.base_count()]
+        }
+    }
+
+    /// 破音單字（有多個讀音的單字）
+    pub fn is_poly(&self, i: u32) -> bool {
+        match self.poly.get(i as usize) {
+            Some(&p) => p,
+            None => {
+                let w = self.word(i);
+                w.chars().count() == 1 && self.poly_set.contains(w)
+            }
+        }
     }
 
     /// 最長讀音的音節數
@@ -120,37 +149,89 @@ impl Lexicon {
         self.rd_off
             .windows(2)
             .map(|w| (w[1] - w[0]) as usize)
+            .chain(self.extra_new.keys().map(Vec::len))
             .max()
             .unwrap_or(1)
             .max(1)
     }
 
-    /// 讀音的前 cap 個詞編號（高頻在前）
-    pub fn each(&self, reading: &[String], cap: usize, mut f: impl FnMut(u32)) {
-        let mut ids = Vec::with_capacity(reading.len());
-        for s in reading {
-            match self.syl_id.get(s) {
-                Some(&i) => ids.push(i),
-                None => return,
-            }
-        }
+    fn to_ids(&self, reading: &[String]) -> Option<Vec<u16>> {
+        reading
+            .iter()
+            .map(|s| self.syl_id.get(s).copied())
+            .collect()
+    }
+
+    fn find_key(&self, ids: &[u16]) -> Option<usize> {
         let mask = self.slots.len() - 1;
-        let mut i = hash_ids(&ids) as usize & mask;
+        let mut i = hash_ids(ids) as usize & mask;
         loop {
             let k = self.slots[i];
             if k == -1 {
-                return;
+                return None;
             }
             let k = k as usize;
-            if self.rd[self.rd_off[k] as usize..self.rd_off[k + 1] as usize] == ids[..] {
+            if self.rd[self.rd_off[k] as usize..self.rd_off[k + 1] as usize] == *ids {
+                return Some(k);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// 讀音的前 cap 個詞編號（高頻在前；疊加層的接在後面）
+    pub fn each(&self, reading: &[String], cap: usize, mut f: impl FnMut(u32)) {
+        let Some(ids) = self.to_ids(reading) else {
+            return;
+        };
+        let extra = match self.find_key(&ids) {
+            Some(k) => {
                 let lo = self.w_off[k] as usize;
-                let hi = (self.w_off[k + 1] as usize).min(lo + cap);
+                let hi = (self.w_off[k + 1] as usize).min(lo.saturating_add(cap));
                 for &w in &self.wl[lo..hi] {
                     f(w);
                 }
-                return;
+                self.extra_by_key.get(&k).map(|x| (x, cap - (hi - lo)))
             }
-            i = (i + 1) & mask;
+            None => self.extra_new.get(&ids).map(|x| (x, cap)),
+        };
+        if let Some((x, left)) = extra {
+            for &w in x.iter().take(left) {
+                f(w);
+            }
+        }
+    }
+
+    pub fn has(&self, reading: &[String], word: &str) -> bool {
+        let mut found = false;
+        self.each(reading, usize::MAX, |w| found |= self.word(w) == word);
+        found
+    }
+
+    /// 詞字串的編號（基本詞典或疊加層）
+    // ponytail: 線性掃描約 1ms，只在加詞時用；加詞變頻繁再建字串索引
+    fn find_word(&self, word: &str) -> Option<u32> {
+        (0..self.word_count() as u32).find(|&i| self.word(i) == word)
+    }
+
+    /// 執行中新增一個詞（接在該讀音清單最後）。已存在就不動
+    pub fn add(&mut self, reading: &[String], word: &str) {
+        if self.has(reading, word) {
+            return;
+        }
+        for s in reading {
+            if !self.syl_id.contains_key(s) {
+                let id = self.syl_id.len() as u16;
+                self.syl_id.insert(s.clone(), id);
+            }
+        }
+        let w = self.find_word(word).unwrap_or_else(|| {
+            self.added.push(word.to_string());
+            self.word_count() as u32 - 1
+        });
+        let ids = self.to_ids(reading).unwrap();
+        match self.find_key(&ids) {
+            Some(k) => self.extra_by_key.entry(k).or_default().push(w),
+            None => self.extra_new.entry(ids).or_default().push(w),
         }
     }
 }

@@ -156,32 +156,66 @@ heap 上限：改動前設 256MB 可把 RSS 壓到約 477MB；改動後再設只
 - 常駐宿主（PIME）啟動 node 時要加這兩個參數；`.claude/launch.json` 的網頁測試台已加上。
 
 
-### Rust 原型（2026-10-17，`native/`）
+### Rust 引擎（2026-10-17，`native/`）
 
-`native/` 是解碼核心的 Rust 移植：直接讀 `lm.bo.bin` 與 `lexicon.bin`，跑 L4＋L5（a=1、γ=0.5、beam 200、破音罰分、EOS、原樣 token）。沒有 L3、X2、固定段、執行中加詞。
+`native/` 是引擎的 Rust 移植，涵蓋輸入法行程需要的全部層（PIME 協定除外）：
 
-- 結果與 TS **逐位元相同**：1500 句前 4 名共 6000 行，詞與分數字串完全一致（不只在 1e-9 內）。雜湊照 TS 逐 UTF-16 碼元餵；`pick` 用 f64 算（h·n 會超過 2^53，整數算法在進位邊界差一）；`Math.log(1e-7)` 寫死成 JS 的值。
-- 句準確率 76.10／79.40，與 Node 相同。
-- 記憶體（`K32GetProcessMemoryInfo`，模型整個讀進記憶體，沒有 mmap）：
+| 檔案 | 移植自 | 內容 |
+|---|---|---|
+| `keymap.rs`、`slots.rs` | `core/src/keymap.ts`、`slots.ts` | L1 大千、L2 組字區（游標、原樣字元、Backspace／Delete） |
+| `l3.rs` | `core/src/l3.ts` | L3 通道 `Channel` |
+| `decode.rs` | `core/src/decode.ts` | L4＋L5，加上 L3 更正讀音、固定段、X2 修飾、`breakdown.reading` |
+| `lexicon.rs` | `core/src/lexicon.ts` | `lexicon.bin`＋執行中加詞的疊加層（`LexiconIndex.add` 語意） |
+| `x2.rs` | `core/src/x2.ts` | `UserAdapter`，讀寫同格式的 `adapter.json` |
+| `engine.rs` | `cli/src/engine.ts` | `ImeEngine`：選字視窗、游標鍵、標點、Esc、英文模式、送出學習 |
+
+沒有移植：IDF 加成、基線模式（都要計數模型）、L6／L7（已封存）。
+
+#### 對拍（`debug-native-parity.ts`，與 TS 逐位元組比較）
+
+| 層 | 輸入 | 結果 |
+|---|---|---|
+| L1／L2 | 1500 句的大千按鍵 | 音節序列完全相同 |
+| L4／L5 | 1500 句前 4 名 | 6000 行詞與分數完全相同（與原型相同） |
+| L3 | 1500 句前 4 名，L3 開 | 6000 行詞、分數、採用讀音完全相同 |
+| L3 | `debug-l3.ts` 的乾淨＋有錯輸入（a=0.8，s=1、1.5） | 3000 句首選與分數完全相同；句準確率與 `debug-l3.ts` 一致（s=1 有錯口語 53.4／47.4、書面 52.0／60.8） |
+| X2 | 真實 `adapter.json`（16KB）讀進來再寫出 | 與 TS 寫出的、與原檔都相同 |
+| 引擎 | 1500 句重播，72,818 個事件（含選字視窗 1,275 次、游標插字、Backspace／Delete、組字中空格與標點、Esc、英文模式、第 2 候選送出），L3 關／開各一次，固定時鐘 | 每個事件後的組字字串、合法旗標、游標、未完成注音、選字頁、直接輸出，以及送出文字都相同；學習後的 `adapter.json`（648KB，631 個使用者詞、1222 個挖詞）也相同 |
+
+逐位元相同的做法：
+
+- 迭代順序照 JS：狀態依插入順序、L3 候選依第一次出現的位置（更低代價只更新代價與讀音，不換位置）、穩定排序。
+- 詞用編號比對：執行中加的詞若已存在於詞典（別的讀音下），沿用原編號，否則狀態鍵會和 TS（用字串）不同。
+- `adapter.json` 用 serde_json 的 `preserve_order`：物件鍵保持插入順序，整數寫成整數。`phrases` 的順序就是加詞順序，會影響候選順序。
+- X2 的 `Math.log`、`Math.pow` 改用 Rust 的 `ln`、`powf`，這次的資料上沒有出現末位差異。沒有證明一定相同。
+
+#### 記憶體（`K32GetProcessMemoryInfo`）
 
 | | Rust | Node |
 |---|---|---|
 | 載入後 | 工作集 63MB、私有 60MB | RSS 115MB |
-| 解碼完 1500 句 | 工作集 64MB、私有 61MB（峰值工作集 69MB，出現在載入時） | 打 300 句約 312MB，閒置 GC 後 136MB |
-| 載入時間 | 22–26ms | 約 1 秒 |
-| 1500 句解碼 | 32.6 秒（每句 21.8ms） | `debug-decode-dump.ts` 全程 62 秒（含 tsx 啟動與載入） |
-| 執行檔 | 342KB（release，含除錯符號表） | Node 本身約 70MB |
+| 重播 1500 句（L3 開、帶使用者資料、含選字） | 結束時工作集 56MB、私有 52MB；峰值工作集 91MB、峰值私有 90MB | 打 300 句約 312MB，閒置 GC 後 136MB |
+| 每事件 | L3 關 1.6ms、L3 開 1.9ms（含重解碼與選字視窗） | TS 重播同一檔約 6 分鐘（L3 關），Rust 約 2 分鐘 |
+| 載入時間 | 25ms | 約 1 秒 |
+| 執行檔 | 609KB（release，含除錯符號表） | Node 本身約 70MB |
 
-- 剩下的 63MB 幾乎全是模型：`lm.bo.bin` 51.5MB，詞典約 8MB。沒有 GC，所以打字中不會漲：每次解碼的路徑放在一個 Vec，解碼完就丟。
+- 打完之後私有記憶體比載入後還低（60 → 52MB），原因沒查。
+- 峰值 90MB 是某一刻的暫時配置，結束時已經放掉。沒查是哪一步；可能是很長的組字（游標插字讓句子變長）或選字視窗列全部候選。要查就在 `replay` 每個事件後記峰值。
+- 剩下的約 60MB 幾乎全是模型：`lm.bo.bin` 51.5MB，詞典約 8MB。
 - 再縮的方向：模型改 mmap，51MB 從私有變成檔案映射的共享頁（工作集不會變：已量過雜湊表的頁 10 句內就讀到 91–100%）；或縮模型（§3 的剪枝表）。
-- 重現：
+
+#### 重現
 
 ```bash
 cd native && cargo build --release && cd ..
-ZHUYIN_DATA=<data 目錄> native/target/release/zhuyin-native.exe eval
-ZHUYIN_DATA=<data 目錄> native/target/release/zhuyin-native.exe dump rust.txt
-ZHUYIN_NO_USER=1 npx tsx debug-decode-dump.ts node.txt   # 兩個檔應該完全相同
+ZHUYIN_DATA=<data 目錄> native/target/release/zhuyin-native.exe dump rust.txt 4 l3
+ZHUYIN_DATA=<data 目錄> npx tsx debug-native-parity.ts dump node.txt 4 l3   # 兩個檔應該完全相同
+ZHUYIN_DATA=<data 目錄> npx tsx debug-native-parity.ts events ev.txt
+ZHUYIN_DATA=<data 目錄> ZHUYIN_L3=1 ZHUYIN_CLOCK=1792200000000 ZHUYIN_ADAPTER=adapter.json native/target/release/zhuyin-native.exe replay ev.txt rust.txt rust.json
+ZHUYIN_DATA=<data 目錄> ZHUYIN_L3=1 ZHUYIN_CLOCK=1792200000000 ZHUYIN_ADAPTER=adapter.json npx tsx debug-native-parity.ts replay ev.txt node.txt node.json
 ```
+
+`keys`、`l3` 子命令見 `native/src/main.rs` 檔頭。`ZHUYIN_A` 設詞級權重（預設 1；`debug-l3.ts` 用 0.8）。
 
 ### 兩個專家的貢獻（句準確率，口語／書面，`debug-expert.ts`）
 
@@ -228,7 +262,7 @@ ZHUYIN_NO_USER=1 npx tsx debug-decode-dump.ts node.txt   # 兩個檔應該完全
 | 6 | 詞典改成預先編好的二進位（字串表＋索引） | 詞典 | RSS 259 → 220MB，載入 27ms | **已完成**（`lexicon.bin`） |
 | 7 | 熵剪枝 | 大表 | 46MB 時 −0.3／−0.4；25MB 時 −1.3／−3.4 | **已完成**（加權差異版，12M 筆預設） |
 | 8 | 依上下文排序的 trie | 大表 | 有區域性，適合 mmap | 未做，只有要 mmap 時才值得 |
-| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | **原型完成**（`native/`，私有 60MB，只到 L5，見 §3） |
+| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | **引擎完成**（`native/`，私有 60MB，L1–L5＋X2＋引擎，與 TS 逐位元相同；PIME 協定未接，見 §3） |
 
 ## 6. PIME
 
