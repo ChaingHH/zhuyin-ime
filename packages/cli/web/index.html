@@ -7,12 +7,12 @@
 <style>
   :root {
     --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e3de;
-    --accent: #2f6fdb; --l6: #e8f0ff; --warn-bg: #fff4d6; --warn: #7a5a00; --pending: #9a9a93;
+    --accent: #2f6fdb; --hl: #e8f0ff; --warn-bg: #fff4d6; --warn: #7a5a00; --pending: #9a9a93;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #161615; --panel: #1f1f1e; --text: #ececea; --muted: #9d9d97; --line: #33332f;
-      --accent: #7aa7ff; --l6: #1f2c46; --warn-bg: #3a3014; --warn: #f1d58a; --pending: #77776f;
+      --accent: #7aa7ff; --hl: #1f2c46; --warn-bg: #3a3014; --warn: #f1d58a; --pending: #77776f;
     }
   }
   * { box-sizing: border-box; }
@@ -43,11 +43,10 @@
   #editor:not(:focus) .caret.blink { visibility: hidden; }
   @keyframes blink { 50% { visibility: hidden; } }
   #ime { position: relative; transition: background-color .6s; border-radius: 4px; }
-  #ime.flash { background: var(--l6); transition: none; }
   /* 每個詞各自一條底線，詞與詞之間留縫 */
   #ime .seg { border-bottom: 2px solid var(--accent); margin-right: 3px; }
   #ime .pend { color: var(--pending); border-bottom: 2px dotted var(--pending); }
-  #ime .target { background: var(--l6); border-radius: 3px; }
+  #ime .target { background: var(--hl); border-radius: 3px; }
   #editor .caret { display: inline-block; width: 2px; height: 1em; margin: 0 1px; vertical-align: -0.1em;
     background: var(--accent); }
   #popup {
@@ -57,7 +56,7 @@
     color: var(--text); cursor: default; user-select: none;
   }
   #popup li { padding: 1px 12px; cursor: pointer; white-space: nowrap; }
-  #popup li:hover { background: var(--l6); }
+  #popup li:hover { background: var(--hl); }
   #popup small { color: var(--muted); margin-right: 8px; font-size: 14px; }
   #popup .page { font-size: 12px; color: var(--muted); text-align: right; cursor: default; }
   #popup .page:hover { background: none; }
@@ -73,12 +72,9 @@
   .row button { font: inherit; font-size: 13px; color: var(--text); background: transparent;
     border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
   #log { font: 13px/1.5 ui-monospace, Consolas, monospace; max-height: 220px; overflow: auto; margin: 0; padding: 0; list-style: none; }
-  #log .l6 { color: var(--accent); }
   #warn { display: none; background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 8px 12px; }
   .tools { display: flex; gap: 12px; align-items: center; }
   .tools label { font-size: 13px; color: var(--muted); }
-  #l6 { font: inherit; font-size: 13px; color: var(--text); background: var(--panel);
-    border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
   .help { font-size: 13px; color: var(--muted); }
   .kb { display: grid; gap: 4px; margin-top: 8px; overflow-x: auto; }
   .kb div { display: flex; gap: 4px; }
@@ -91,27 +87,19 @@
   <div class="row">
     <h1>注音測試台<span id="mode" title="單按 Shift 切換注音／英文">注</span></h1>
     <div class="tools">
-      <label>L6 重排
-        <select id="l6">
-          <option value="off">關閉</option>
-          <option value="bert">BERT PLL</option>
-          <option value="kev">Qwen3.5（Kev）</option>
-        </select>
-      </label>
       <span class="status" id="status">連線中…</span>
     </div>
   </div>
-  <div id="perf" title="L5＝伺服器解碼時間；往返＝按鍵到畫面更新；L6＝按鍵到重排結果推回；記憶體每 3 秒更新">
+  <div id="perf" title="L5＝伺服器解碼時間；往返＝按鍵到畫面更新；記憶體每 3 秒更新">
     <span>L5 <b id="pL5">–</b> p95 <b id="pL5p">–</b></span>
     <span>往返 <b id="pRtt">–</b></span>
-    <span>L6 <b id="pL6">–</b></span>
     <span>記憶體 <b id="pMem">–</b> heap <b id="pHeap">–</b></span>
   </div>
   <div id="warn">偵測到系統輸入法正在組字。請把系統輸入法切到英文，這個頁面自己處理注音。</div>
 
   <section>
     <div class="row">
-      <div class="label">輸入框（組字時：<b>↓ 選字</b>、←→ 移到要改的字前面、Enter 送出；L6 替換時會閃一下）</div>
+      <div class="label">輸入框（組字時：<b>↓ 選字</b>、←→ 移到要改的字前面、Enter 送出）</div>
       <button id="clear" type="button">清空</button>
     </div>
     <div id="editor" tabindex="0" role="textbox" aria-multiline="true" aria-label="輸入框"></div>
@@ -327,7 +315,7 @@ async function post(url, data) {
   return j;
 }
 
-// 效能列：最近 100 次按鍵的 L5 解碼時間（中位數／p95）、往返、L6、伺服器記憶體
+// 效能列：最近 100 次按鍵的 L5 解碼時間（中位數／p95）、往返、伺服器記憶體
 const l5ms = [];
 const fmtMs = v => Math.round(v) + 'ms';
 const pct = (a, p) => [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))];
@@ -453,47 +441,10 @@ $('clear').onclick = () => {
 paint();
 editor.focus();
 
-// L6 切換：第一次選 BERT／Kev 要載入，失敗（例如 Kev 伺服器沒開）就退回原本的選項
-let l6 = 'off';
-const L6_NAME = { off: '關閉', bert: 'BERT PLL', kev: 'Qwen3.5（Kev）' };
-const l6Sel = $('l6');
-l6Sel.onchange = () => {
-  const want = l6Sel.value;
-  l6Sel.disabled = true;
-  addLog(`L6 切換為 ${L6_NAME[want]}…`);
-  enqueue(async () => {
-    try {
-      ({ l6 } = await post('/l6', { mode: want }));
-      addLog(`L6 已切換為 ${L6_NAME[l6]}`);
-      setPerf('pL6', l6 === 'off' ? '關閉' : '–', false);
-    } catch (e) {
-      addLog(`L6 切換失敗：${e.message}`);
-    } finally {
-      l6Sel.value = l6;
-      l6Sel.disabled = false;
-      l6Sel.blur(); // 焦點留在選單上，打字會被選單吃掉
-    }
-  });
-};
-
-const es = new EventSource('/events');
-es.onmessage = ev => {
-  const m = JSON.parse(ev.data);
-  if (m.type === 'hello') showMode(m.mode);
-  if (m.type === 'hello') {
-    l6 = l6Sel.value = m.l6;
-    setPerf('pL6', m.l6 === 'off' ? '關閉' : '–', false);
-    status.textContent = `已連線・L3 ${m.l3 ? '開' : '關'}`;
-  }
-  if (m.type === 'L6') {
-    render(m);
-    ime.classList.add('flash');
-    requestAnimationFrame(() => requestAnimationFrame(() => ime.classList.remove('flash')));
-    addLog(`L6 → ${m.composition}  按鍵後 ${m.ms}ms`, 'l6');
-    setPerf('pL6', fmtMs(m.ms), m.ms > 500);
-  }
-};
-es.onerror = () => { status.textContent = '連線中斷（伺服器有在跑嗎？）'; };
+fetch('/hello').then(r => r.json()).then(m => {
+  showMode(m.mode);
+  status.textContent = `已連線・L3 ${m.l3 ? '開' : '關'}`;
+}).catch(() => { status.textContent = '連不上伺服器（有在跑嗎？）'; });
 </script>
 </body>
 </html>

@@ -25,21 +25,14 @@ function diffMark(ref: string[], out: string[]): string {
 async function showFailures(
   file: string,
   limit: number,
-  rerank?: { weight?: number },
 ): Promise<void> {
   const { decoder } = await loadRuntime();
-  let rr: import('@zhuyin/rerank').PllReranker | undefined;
-  if (rerank) {
-    const { PllReranker } = await import('@zhuyin/rerank');
-    rr = await PllReranker.create({ weight: rerank.weight ?? 1 });
-  }
   const samples = await loadEvalSamples(file);
   const domain = file.includes('written') ? '書面' : '口語';
 
   const failures: FailureCase[] = [];
   for (const s of samples) {
-    let paths = decoder.decode(s.syllables, rr ? { nBest: 12 } : undefined);
-    if (rr && paths.length > 1) paths = (await rr.rerank(paths)).paths;
+    const paths = decoder.decode(s.syllables);
     const out = paths[0]?.words.join('') ?? '';
     if (out === s.text) continue;
     const ref = [...s.text];
@@ -90,19 +83,12 @@ async function showFailures(
 async function main(): Promise<void> {
   const which = process.argv[3] ?? 'both';
   const limit = Number.parseInt(process.argv[4] ?? '10', 10);
-  const rerank = process.argv.includes('--rerank') ? { weight: argB() } : undefined;
   if (which === 'colloquial' || which === 'both') {
-    await showFailures(path.join(REPO, 'eval', 'colloquial.jsonl'), limit, rerank);
+    await showFailures(path.join(REPO, 'eval', 'colloquial.jsonl'), limit);
   }
   if (which === 'written' || which === 'both') {
-    await showFailures(path.join(REPO, 'eval', 'written.jsonl'), limit, rerank);
+    await showFailures(path.join(REPO, 'eval', 'written.jsonl'), limit);
   }
-}
-
-function argB(): number {
-  const i = process.argv.indexOf('-b');
-  const v = i >= 0 ? Number.parseFloat(process.argv[i + 1] ?? '') : NaN;
-  return Number.isNaN(v) ? 0.25 : v;
 }
 
 main().catch((e) => {

@@ -47,26 +47,9 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case 'type': {
-      const { decoder, legalSyllables, adapter, lm } = await loadRuntime();
+      const { decoder, legalSyllables, adapter } = await loadRuntime();
       let committed = '';
-      // --rerank：先顯示 L5，BERT 重排完成且首選改變時再印出替換結果（L7）
-      let hooks: import('./engine.js').RerankHooks | undefined;
-      if (process.argv.includes('--rerank')) {
-        const { RerankWorker } = await import('@zhuyin/rerank');
-        // BERT 放背景執行緒：在主執行緒跑會卡住事件迴圈，重排期間的按鍵要排隊
-        const rr = await RerankWorker.create({
-          weight: 0.5,
-          maxCandidates: 16,
-          gapThreshold: 6,
-          flipMargin: 0.75,
-          charCounts: Object.fromEntries(lm.char.uni),
-        });
-        hooks = {
-          rerank: (paths) => rr.rerank(paths),
-          onUpdate: (st) => console.log(`  ${'[L6]'.padEnd(10)} => ${committed}${st.composition}`),
-        };
-      }
-      const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter, hooks);
+      const engine = new ImeEngine(decoder, legalSyllables, undefined, adapter);
       // L3 打錯／模糊音容錯：預設開，--no-l3 關閉
       if (!process.argv.includes('--no-l3')) engine.channel = new Channel(legalSyllables);
       console.log(
@@ -179,29 +162,12 @@ async function main(): Promise<void> {
       const limit = argNum(['-n'], undefined);
       const a = argNum(['-a']);
       const gamma = argNum(['-g']);
-      const hasRerank = process.argv.includes('--rerank');
-      const rerank = hasRerank
-        ? {
-            weight: argNum(['-b'], 0.5),
-            gapThreshold: argNum(['--gap'], 6),
-            maxCandidates: argNum(['--maxc'], 16),
-            flipMargin: argNum(['--flip'], 0.75),
-          }
-        : undefined;
       await cmdEval(
         [path.join(REPO, 'eval', 'colloquial.jsonl'), path.join(REPO, 'eval', 'written.jsonl')],
         {
           a,
           gamma,
           limit,
-          rerank,
-          kev: process.argv.includes('--kev')
-            ? {
-                weight: argNum(['--kw'], 3),
-                top: argNum(['--ktop'], 16),
-                mode: process.argv.includes('--knoul') ? ('noul' as const) : ('choice' as const),
-              }
-            : undefined,
           idfBonus: argNum(['--idf'], 0),
           decK: argNum(['--deck'], 28),
           baseline: process.argv.includes('--baseline')
@@ -223,14 +189,9 @@ async function main(): Promise<void> {
     }
 
     case 'web': {
-      // 網頁測試台：--port N（預設 8787）、--l6 off|bert|kev（預設 bert；--no-rerank＝off）
-      // 網頁上可再切換 L6
+      // 網頁測試台：--port N（預設 8787）
       const { startWeb } = await import('./web.js');
-      const l6At = process.argv.indexOf('--l6');
-      const l6 = (
-        l6At >= 0 ? process.argv[l6At + 1] : process.argv.includes('--no-rerank') ? 'off' : 'bert'
-      ) as import('./web.js').L6Mode;
-      await startWeb(argNum(['--port'], 8787)!, l6, !process.argv.includes('--no-l3'));
+      await startWeb(argNum(['--port'], 8787)!, !process.argv.includes('--no-l3'));
       break;
     }
 

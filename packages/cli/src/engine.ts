@@ -61,25 +61,6 @@ const PUNCT: Record<string, string> = {
 
 export type InputMode = 'zhuyin' | 'english';
 
-/**
- * L6 非同步重排掛鉤（L7：先顯示 L5，重排完成再替換）。
- * 重排完成時若使用者已再打字／送出，結果視為過期丟棄；同時最多一個重排在跑。
- */
-export interface RerankHooks {
-  rerank: (paths: DecodePath[]) => Promise<DecodePath[]>;
-  /** 重排完成、仍對應目前序列、且首選改變時呼叫 */
-  onUpdate?: (state: EngineState) => void;
-  /** 給重排用的 N-best 深度（L5 首選不受影響） */
-  nBest?: number;
-  /**
-   * L7 防閃動：L6 改過的詞（與當時 L5 首選不同者）在本次組字的後續 L5 解碼中
-   * 獲得此 log 加成，避免下一個音節又被 L5 改回去。軟性：新上下文證據夠強仍可推翻。0＝關閉。
-   * 預設 4：全評測集（1500 句）L6→L5 回滾口語 0.82→0.50、書面 1.11→0.70（約 −40%），
-   * 口語句準不變、書面 dev −0.8（6 起口語句準下降）。見 debug-lock.ts。
-   */
-  stickBonus?: number;
-}
-
 interface AlignedWord {
   word: string;
   seq: string[];
@@ -111,13 +92,6 @@ export class ImeEngine {
   private readonly decoder: Decoder;
   private adapter?: UserAdapter;
   private last: DecodePath[] = [];
-  /** 每次序列改變（音節完成／送出）遞增；重排結果世代不符即過期 */
-  private gen = 0;
-  /** this.last 已是目前序列的重排結果 */
-  private reranked = false;
-  private inFlight = false;
-  /** L6 改過的詞，鍵為 `起點:音節數:詞`（本次組字內有效） */
-  private sticky = new Set<string>();
   /** 上次解碼時的已完成音節序列 */
   private lastSeq: string[] = [];
   /** L3 通道模型；設定後解碼會考慮打錯／模糊音的更正 */
@@ -134,7 +108,6 @@ export class ImeEngine {
     legalSyllables: Iterable<string>,
     layout = DACHEN,
     adapter?: UserAdapter,
-    private hooks?: RerankHooks,
   ) {
     this.comp = new CompositionBuffer(layout, legalSyllables);
     this.decoder = decoder;
@@ -145,17 +118,6 @@ export class ImeEngine {
     this.adapter = a;
   }
 
-  /**
-   * 換掉 L6（undefined＝關閉）。進行中的重排結果作廢，防閃動記錄清空：
-   * 舊重排器的判斷不該延續到新重排器。下一次按鍵才用新設定重解碼。
-   */
-  setRerankHooks(h?: RerankHooks): void {
-    this.hooks = h;
-    this.gen++;
-    this.reranked = false;
-    this.sticky.clear();
-  }
-
   get syllableSequence(): string[] {
     return this.comp.sequence;
   }
@@ -163,22 +125,13 @@ export class ImeEngine {
   private decodeWithAdapter(): DecodePath[] {
     const seq = this.comp.sequence;
     const adapt = this.adapter?.enabled ? this.adapter : undefined;
-    const bonus = this.hooks?.stickBonus ?? 4;
-    const sticky = bonus > 0 && this.sticky.size > 0 ? this.sticky : undefined;
-    const modifier =
-      adapt || sticky
-        ? (w: string, pos: number, len: number) =>
-            (adapt ? adapt.modifierFor(seq, w) : 0) +
-            (sticky?.has(`${pos}:${len}:${w}`) ? bonus : 0)
-        : undefined;
     const paths = this.decoder.decode(seq, {
-      modifier,
-      nBest: this.hooks ? (this.hooks.nBest ?? 28) : undefined,
+      modifier: adapt ? (w: string) => adapt.modifierFor(seq, w) : undefined,
       alternatives: this.alternatives(seq),
       fixed: this.fixed,
     });
     // 同樣的字、不同斷詞（我|應該 vs 我應|該）在 N-best 裡是不同路徑：
-    // 候選清單只留分數最高的那條（paths 已依分數排序）。L6 也只看得到不重複的文字。
+    // 候選清單只留分數最高的那條（paths 已依分數排序）。
     const seen = new Set<string>();
     return paths.filter((p) => {
       const text = p.words.join('');
@@ -231,10 +184,7 @@ export class ImeEngine {
   }
 
   private redecode(): void {
-    this.gen++;
-    this.reranked = false;
     this.last = this.comp.sequence.length > 0 ? this.decodeWithAdapter() : [];
-    this.scheduleRerank();
   }
 
   /** 選字視窗開著時的按鍵：數字選字、↓／空白下一頁、↑上一頁、Enter 選第一個、Esc 關閉 */
@@ -264,63 +214,6 @@ export class ImeEngine {
       if (items.length > 0) this.menu = { items, page: 0 };
     } else return null;
     return this.state(true);
-  }
-
-  /** 對最新的 L5 結果啟動重排；已有重排在跑則等它結束後再補跑最新的。 */
-  private scheduleRerank(): void {
-    const hooks = this.hooks;
-    if (!hooks || this.inFlight || this.reranked || this.last.length < 2) return;
-    const gen = this.gen;
-    const shown = this.last[0]!;
-    this.inFlight = true;
-    hooks
-      .rerank(this.unbiased(this.last))
-      .then((out) => {
-        if (gen !== this.gen || out.length === 0) return;
-        this.last = out;
-        this.reranked = true;
-        // 記下 L6 改過的詞：同一起點、畫面上的 L5 首選放的是別的詞（或斷詞不同）
-        const l5At = new Map<number, string>();
-        let at = 0;
-        for (const b of shown.breakdown) {
-          l5At.set(at, b.word);
-          at += b.spanLen;
-        }
-        at = 0;
-        for (const b of out[0]!.breakdown) {
-          if (b.word !== UNK && l5At.get(at) !== b.word)
-            this.sticky.add(`${at}:${b.spanLen}:${b.word}`);
-          at += b.spanLen;
-        }
-        if (out[0]!.words.join('') !== shown.words.join('')) hooks.onUpdate?.(this.state(true));
-      })
-      .catch(() => {
-        /* L6 失敗不影響已顯示的 L5 結果 */
-      })
-      .finally(() => {
-        this.inFlight = false;
-        this.scheduleRerank();
-      });
-  }
-
-  /**
-   * 扣回防閃動加分、依原始分數重排：加分只穩定 L5 畫面，不能帶進 L6 的判斷
-   * （否則早期上下文不足時的決定會一路偏差到最終結果）。
-   */
-  private unbiased(paths: DecodePath[]): DecodePath[] {
-    const bonus = this.hooks?.stickBonus ?? 4;
-    if (bonus <= 0 || this.sticky.size === 0) return paths;
-    return paths
-      .map((p) => {
-        let score = p.score;
-        let at = 0;
-        for (const b of p.breakdown) {
-          if (this.sticky.has(`${at}:${b.spanLen}:${b.word}`)) score -= bonus;
-          at += b.spanLen;
-        }
-        return { ...p, score };
-      })
-      .sort((x, y) => y.score - x.score);
   }
 
   private state(lastLegal: boolean): EngineState {
@@ -389,25 +282,15 @@ export class ImeEngine {
     let candidates: DecodePath[] = [];
     // 已完成音節序列有變就重解碼：完成新音節、插入空格標點、Backspace／Delete 刪掉音節
     if (seq.length !== this.lastSeq.length || seq.some((x, i) => x !== this.lastSeq[i])) {
-      // 選字與防閃動記錄跟著平移；落在被改動範圍內的作廢
+      // 選字跟著平移；落在被改動範圍內的作廢
       const map = remapper(this.lastSeq, seq);
       this.fixed = this.fixed.flatMap((f) => {
         const pos = map(f.pos, f.len);
         return pos === null ? [] : [{ ...f, pos }];
       });
-      this.sticky = new Set(
-        [...this.sticky].flatMap((k) => {
-          const [p, l, w] = k.split(':', 3);
-          const pos = map(Number(p), Number(l));
-          return pos === null ? [] : [`${pos}:${l}:${w}`];
-        }),
-      );
       this.lastSeq = seq;
-      this.gen++;
-      this.reranked = false;
       candidates = seq.length > 0 ? this.decodeWithAdapter() : [];
       this.last = candidates;
-      this.scheduleRerank();
     }
     // 畫面一律由最新解碼結果組成（未完成槽位的按鍵不應讓已解碼文字消失）
     return { ...this.state(outcome.legal), candidates };
@@ -432,8 +315,7 @@ export class ImeEngine {
   commit(k = 0): string {
     const seq = this.comp.sequence.slice();
     if (seq.length === 0) return '';
-    // 已有目前序列的重排結果就用；否則同步取 L5（送出不等 BERT）
-    const candidates = this.reranked ? this.last : this.decodeWithAdapter();
+    const candidates = this.decodeWithAdapter();
     const chosen = candidates[Math.min(k, candidates.length - 1)];
     const text = this.withPending(chosen);
 
@@ -494,10 +376,7 @@ export class ImeEngine {
   /** 清空組字區，不送出、不學習（Esc；送出後也走這裡） */
   clear(): void {
     this.comp.reset();
-    this.gen++;
     this.last = [];
-    this.reranked = false;
-    this.sticky.clear();
     this.lastSeq = [];
     this.fixed = [];
     this.menu = null;

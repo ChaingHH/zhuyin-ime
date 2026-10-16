@@ -23,19 +23,12 @@ export interface LoadedRuntime {
   legalSyllables: Set<string>;
   lm: LanguageModel;
   adapter: UserAdapter;
-  polySingleChars: ReadonlySet<string>;
 }
 
 export type RuntimeOptions = {
   a?: number;
   gamma?: number;
   beamWidth?: number;
-  rerank?: {
-    weight?: number;
-    gapThreshold?: number;
-    maxCandidates?: number;
-    flipMargin?: number;
-  };
   idfBonus?: number;
   baseline?: 'classic' | 'bigram';
 };
@@ -115,7 +108,7 @@ async function buildRuntime(opts: RuntimeOptions): Promise<LoadedRuntime> {
     decoder.addEntry(e);
   }
 
-  return { decoder, legalSyllables, lm, adapter, polySingleChars: decoder.polySingleChars };
+  return { decoder, legalSyllables, lm, adapter };
 }
 
 /**

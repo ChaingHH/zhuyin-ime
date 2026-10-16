@@ -28,8 +28,8 @@
 | L3 | 假設展開（運動／認知通道） | `core/src/l3.ts` `Channel` | 完成，只用合成錯誤評測過 |
 | L4 | 詞格 | `core/src/decode.ts` `spanCands` | 完成 |
 | L5 | 解碼 | `core/src/decode.ts` `Decoder.decode` | 完成 |
-| L6 | 神經重排 | `rerank/src/reranker.ts`、`kev.ts` | 完成（BERT PLL 與 Kev 兩種） |
-| L7 | 呈現遲滯（防閃動） | `cli/src/engine.ts` `stickBonus` | 完成 |
+| L6 | 神經重排 | `rerank/src/reranker.ts`、`kev.ts` | 已封存（tag `archive/l6-l7`） |
+| L7 | 呈現遲滯（防閃動） | `cli/src/engine.ts` `stickBonus` | 已封存（tag `archive/l6-l7`） |
 | X1 | 領域先驗 | — | **未實作** |
 | X2 | 使用者適應 | `core/src/x2.ts` `UserAdapter` | 完成 |
 | X3 | 遙測 | `cli/src/noise.ts` | 只有錯誤注入，沒有真實打字紀錄 |
