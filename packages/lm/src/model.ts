@@ -389,18 +389,17 @@ export class LanguageModel {
     const bt = idx.biTotals.get(c2);
     if (bt) {
       // 剪掉的二元計數（bt − 保留和）併入退回權重，與三元同理
-      const c = idx.bi.get(`${c2} ${w}`);
+      const c = idx.bi.get2(c2, w);
       const types = idx.biTypes.get(c2) ?? 0;
       const kept = idx.biKept.get(c2) ?? 0;
       p = Math.max(c - D, 0) / bt + ((D * types + (bt - kept)) / bt) * p;
     }
-    // 三元 P(w | c1 c2)
-    const ctx = `${c1} ${c2}`;
-    const ctxCount = idx.bi.get(ctx, 0);
+    // 三元 P(w | c1 c2)。查詢用 get2／get3 分段雜湊，不組 "c1 c2" 等字串（解碼熱路徑）
+    const ctxCount = idx.bi.get2(c1, c2, 0);
     if (ctxCount) {
-      const tt = idx.bi.get(ctx, 1);
-      const types = idx.bi.get(ctx, 2);
-      const c = types ? idx.tri.get(`${ctx}\t${w}`) : 0;
+      const tt = idx.bi.get2(c1, c2, 1);
+      const types = idx.bi.get2(c1, c2, 2);
+      const c = types ? idx.tri.get3(c1, c2, w) : 0;
       const total = Math.max(ctxCount, tt);
       p = Math.max(c - D, 0) / total + ((D * types + (total - tt)) / total) * p;
     }
@@ -408,14 +407,13 @@ export class LanguageModel {
   }
 
   private static logProb(idx: NgramIndex, w: string, c1: string, c2: string): number {
-    const ctx = `${c1} ${c2}`;
-    const tt = idx.bi.get(ctx, 1);
+    const tt = idx.bi.get2(c1, c2, 1);
     if (tt) {
-      const cw = idx.tri.get(`${ctx}\t${w}`);
+      const cw = idx.tri.get3(c1, c2, w);
       if (cw) return Math.log(cw / tt);
     }
     // 退回二元：以 c2（最近的詞）為上下文
-    const biCount = idx.bi.get(`${c2} ${w}`);
+    const biCount = idx.bi.get2(c2, w);
     if (biCount) {
       // P(w | c2) = count(c2,w) / count(c2,*)——正規化在「上下文」上，不是詞自身頻率
       const total2 = idx.biTotals.get(c2) ?? 0;

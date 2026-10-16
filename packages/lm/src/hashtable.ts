@@ -16,19 +16,69 @@ function fmix(h: number): number {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
-/** 算出 key 的兩組雜湊到模組變數 h1/h2（避免每次查詢配置 tuple）。 */
-function hashKey(key: string): void {
-  let a = 0x811c9dc5;
-  let b = 0;
-  for (let i = 0; i < key.length; i++) {
-    const c = key.charCodeAt(i);
+// 逐字元累加的雜湊狀態：分段餵入（feed／feedCode）與一次餵整個字串的結果相同，
+// 所以查 "c2 w" 時不必先組出字串（解碼時每鍵上萬次查詢，組字串是主要垃圾來源之一）。
+let fa = 0;
+let fb = 0;
+let flen = 0;
+
+function feed(s: string): void {
+  let a = fa;
+  let b = fb;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
     a = Math.imul(a ^ c, 0x01000193);
     b = (Math.imul(b, 31) + c) | 0;
   }
-  h1 = fmix(a);
-  h2 = fmix(b ^ key.length);
+  fa = a;
+  fb = b;
+  flen += s.length;
+}
+
+function feedCode(c: number): void {
+  fa = Math.imul(fa ^ c, 0x01000193);
+  fb = (Math.imul(fb, 31) + c) | 0;
+  flen++;
+}
+
+/** 收尾：算出兩組雜湊到模組變數 h1/h2（避免每次查詢配置 tuple）。 */
+function finish(): void {
+  h1 = fmix(fa);
+  h2 = fmix(fb ^ flen);
   // k1=0 保留給空槽
   if (h1 === 0) h1 = 1;
+}
+
+function hashKey(key: string): void {
+  fa = 0x811c9dc5;
+  fb = 0;
+  flen = 0;
+  feed(key);
+  finish();
+}
+
+/** 等同 hashKey(`${x} ${y}`)（二元鍵、三元上下文） */
+function hash2(x: string, y: string): void {
+  hash2Raw(x, y);
+  finish();
+}
+
+/** 等同 hashKey(`${x} ${y}\t${z}`)（三元鍵） */
+function hash3(x: string, y: string, z: string): void {
+  hash2Raw(x, y);
+  feedCode(9);
+  feed(z);
+  finish();
+}
+
+/** 餵入 `${x} ${y}`，不收尾 */
+function hash2Raw(x: string, y: string): void {
+  fa = 0x811c9dc5;
+  fb = 0;
+  flen = 0;
+  feed(x);
+  feedCode(32);
+  feed(y);
 }
 
 /**
@@ -87,6 +137,22 @@ export class HashTable implements CountTable {
 
   get(key: string, col = 0): number {
     hashKey(key);
+    return this.found(col);
+  }
+
+  /** 等同 get(`${x} ${y}`)，不組字串 */
+  get2(x: string, y: string, col = 0): number {
+    hash2(x, y);
+    return this.found(col);
+  }
+
+  /** 等同 get(`${x} ${y}\t${z}`)，不組字串 */
+  get3(x: string, y: string, z: string, col = 0): number {
+    hash3(x, y, z);
+    return this.found(col);
+  }
+
+  private found(col: number): number {
     const i = this.slot();
     if (i < 0) return 0;
     const v = this.cols[col]![i]!;
@@ -199,6 +265,8 @@ export interface CountTable {
   readonly size: number;
   readonly bytes: number;
   get(key: string, col?: number): number;
+  get2(x: string, y: string, col?: number): number;
+  get3(x: string, y: string, z: string, col?: number): number;
 }
 
 /** 平均每桶鍵數；位移值 16 bit，所以每鍵約 4 bit */
@@ -240,6 +308,20 @@ export class PerfectTable implements CountTable {
 
   get(key: string, col = 0): number {
     hashKey(key);
+    return this.found(col);
+  }
+
+  get2(x: string, y: string, col = 0): number {
+    hash2(x, y);
+    return this.found(col);
+  }
+
+  get3(x: string, y: string, z: string, col = 0): number {
+    hash3(x, y, z);
+    return this.found(col);
+  }
+
+  private found(col: number): number {
     const b = PerfectTable.bucket(this.seed, this.pilots.length);
     const s = PerfectTable.slot(this.pilots[b]!, this.seed, this.fp.length);
     return this.fp[s] === PerfectTable.tag() ? this.lut[this.cols[col]![s]!]! : 0;

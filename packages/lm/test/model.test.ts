@@ -118,6 +118,25 @@ describe('LanguageModel .bin', () => {
   );
 });
 
+describe('分段雜湊', () => {
+  it('get2／get3 與組好字串的 get 結果相同（兩種表、含空字串）', () => {
+    const t = new HashTable(1);
+    const words = ['', 'a', '我們', '𠀀字', 'b c'];
+    for (const x of words)
+      for (const y of words) {
+        t.add(`${x} ${y}`, 0, x.length + 1);
+        for (const z of words) t.add(`${x} ${y}\t${z}`, 0, z.length + 2);
+      }
+    const p = t.toPerfect(8);
+    for (const tb of [t, p])
+      for (const x of words)
+        for (const y of words) {
+          expect(tb.get2(x, y)).toBe(tb.get(`${x} ${y}`));
+          for (const z of words) expect(tb.get3(x, y, z)).toBe(tb.get(`${x} ${y}\t${z}`));
+        }
+  });
+});
+
 describe('PerfectTable', () => {
   it('每個鍵拿到自己的值、查不到回 0、dump／restore 一致', () => {
     const t = new HashTable(2);

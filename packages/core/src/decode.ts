@@ -139,6 +139,17 @@ export class Decoder {
   private polyMap = new Map<string, number>(); // 詞 → 讀音數
   private polySingle = new Set<string>(); // 破音單字集合（用於重罰）
   private maxSpan = 1;
+  /** decode 內每組每邊分數的暫存（重用，不夠大才放大；decode 不可重入） */
+  private lpwBuf = new Float64Array(64);
+  private lpcBuf = new Float64Array(64);
+  private uBuf = new Float64Array(64);
+
+  private growBufs(n: number): void {
+    const size = Math.max(n, this.lpwBuf.length * 2);
+    this.lpwBuf = new Float64Array(size);
+    this.lpcBuf = new Float64Array(size);
+    this.uBuf = new Float64Array(size);
+  }
 
   constructor(scorer: Scorer, opts: DecoderOptions = {}) {
     this.scorer = scorer;
@@ -287,12 +298,19 @@ export class Decoder {
     buckets[0]!.set('\t', [seed]);
     // (起點, 長度) → 候選詞；與狀態無關，整次解碼共用
     const spanCache = new Map<number, SpanCand[]>();
+    // floors[q]：位置 q 上次全域剪枝的門檻。剪完後該桶有 beam 條分數 ≥ 門檻的路徑，之後只會被
+    // 更高分的換掉，所以分數嚴格低於門檻的新路徑一定會在下次剪枝被刪：直接不建（結果不變）
+    const floors = new Float64Array(n + 1).fill(-Infinity);
+    // counts[q]：位置 q 目前的路徑數；超過 2×beam 就先剪一次，門檻才早點生效
+    // （一個位置的路徑大多來自前一兩個位置的短詞，最後才進來）
+    const counts = new Uint32Array(n + 1);
+    const beam = this.opts.beamWidth;
 
     for (let pos = 0; pos < n; pos++) {
       const stateGroups = buckets[pos]!;
       if (stateGroups.size === 0) continue;
       const maxLen = Math.min(this.maxSpan, n - pos);
-      const touched = new Set<Map<string, PartialPath[]>>();
+      const touched = new Set<number>();
 
       // 同一狀態（前兩詞）的所有路徑共享 LM 查詢結果：
       // 詞級上下文相同、字級尾二字亦由詞序決定而相同 → 每組每邊算一次。
@@ -301,6 +319,7 @@ export class Decoder {
         const [w1, w2] = stateKey.split('\t');
         // 組內字級上下文取代表路徑（同狀態 ⇒ 相同）
         const rep = groupPaths[0]!;
+        const charCtx: readonly [string, string] = [rep.c1, rep.c2];
 
         for (let len = 1; len <= maxLen; len++) {
           const ck = pos * 64 + len;
@@ -323,73 +342,121 @@ export class Decoder {
           if (capped === BLOCKED) continue;
           // 詞邊必須落在「實際結束位置」的桶，不是 pos+1
           const target = buckets[pos + len]!;
-          touched.add(target);
+          let floor = floors[pos + len]!;
+          touched.add(pos + len);
           if (capped.length === 0) {
             if (len === 1) {
               // OOV 音節：以未知詞邊保證格連通
               for (const p of groupPaths) {
-                this.extend(p, UNK_WORD, UNK_PENALTY, 0, 0, 0, 1, [sequence[pos]!], target);
+                counts[pos + 1]! += this.extend(
+                  p,
+                  UNK_WORD,
+                  UNK_PENALTY,
+                  0,
+                  0,
+                  0,
+                  1,
+                  [sequence[pos]!],
+                  target,
+                  nBest,
+                );
               }
             }
             continue;
           }
-          const lpws = new Array<number>(capped.length);
-          for (let i = 0; i < capped.length; i++) {
-            let lp = this.scorer.wordLogProb(capped[i]!.word, w1!, w2!);
-            // 破音字單字重罰：破音字幾乎不以單字存在
+          // 每組每邊的分數放進重用的暫存陣列：這段每鍵跑上萬次，每次新建陣列是主要垃圾來源
+          const m = capped.length;
+          if (m > this.lpwBuf.length) this.growBufs(m);
+          const lpws = this.lpwBuf;
+          const lpcs = this.lpcBuf;
+          const us = this.uBuf;
+          for (let i = 0; i < m; i++) {
             const w = capped[i]!.word;
+            let lp = this.scorer.wordLogProb(w, w1!, w2!);
+            // 破音字單字重罰：破音字幾乎不以單字存在
             if (this.polySingle.has(w) && [...w].length === 1) {
               lp -= this.opts.polyPenalty;
             }
             lpws[i] = lp;
+            lpcs[i] = this.opts.gamma === 0 ? 0 : this.scorer.charSequenceLogProb(w, charCtx);
+            // U(w) 每組只查一次（同狀態共享；修飾器理應與路徑無關）
+            let u = modifier ? modifier(w, pos, len) : 0;
+            // 稀有字 IDF：低頻成字構成的詞獲得加成（對抗高頻同音單字路徑）
+            if (this.opts.idfBonus > 0) {
+              let sum = 0;
+              for (const ch of w) sum += this.opts.charIdf(ch);
+              u += this.opts.idfBonus * sum;
+            }
+            us[i] = u;
           }
-          const lpcs =
-            this.opts.gamma === 0
-              ? null
-              : capped.map((ent) => this.scorer.charSequenceLogProb(ent.word, [rep.c1, rep.c2]));
-          // U(w) 每組只查一次（同狀態共享；修飾器理應與路徑無關）
-          const us = modifier ? capped.map((ent) => modifier(ent.word, pos, len)) : null;
-          // 稀有字 IDF：低頻成字構成的詞獲得加成（對抗高頻同音單字路徑）
-          const idfs =
-            this.opts.idfBonus > 0
-              ? capped.map((ent) => {
-                  let sum = 0;
-                  for (const ch of ent.word) sum += this.opts.charIdf(ch);
-                  return this.opts.idfBonus * sum;
-                })
-              : null;
-          for (let i = 0; i < capped.length; i++) {
+          const a = this.opts.a;
+          const gamma = this.opts.gamma;
+          for (let i = 0; i < m; i++) {
             const ent = capped[i]!;
-            const lpw = lpws[i]!;
-            const lpc = lpcs ? lpcs[i]! : 0;
-            const u = (us ? us[i]! : 0) + (idfs ? idfs[i]! : 0);
+            const word = ent.word;
+            const wordTerm = a * lpws[i]!;
+            const charTerm = gamma * lpcs[i]!;
+            const uTerm = us[i]!;
+            const chTerm = -ent.cost;
+            // 組內路徑依分數由高到低：最高分都低於門檻就整個跳過（連鍵字串都不組）
+            if (groupPaths[0]!.score + wordTerm + charTerm + uTerm + chTerm < floor) continue;
+            // 同組同詞 ⇒ 新狀態（w2, word）與尾兩字都相同：鍵、清單、尾字只算一次。
+            // 先算分數，進不了該狀態前 nBest 的路徑不建物件（每鍵上萬條，大多會被剪掉）
+            const key = `${w2}\t${word}`;
+            let list = target.get(key);
+            let c1 = '';
+            let c2 = '';
             for (const p of groupPaths) {
-              this.extend(p, ent.word, lpw, lpc, u, -ent.cost, len, ent.reading, target);
+              const score = p.score + wordTerm + charTerm + uTerm + chTerm;
+              if (score < floor) break;
+              if (list) {
+                if (!Decoder.admits(list, score, nBest)) continue;
+              } else {
+                list = [];
+                target.set(key, list);
+              }
+              if (c2 === '') {
+                c1 = rep.c1;
+                c2 = rep.c2;
+                for (const ch of word) {
+                  c1 = c2;
+                  c2 = ch;
+                }
+              }
+              const np: PartialPath = {
+                pos: p.pos + len,
+                w1: p.w2,
+                w2: word,
+                c1,
+                c2,
+                score,
+                parent: p,
+                word,
+                wordTerm,
+                charTerm,
+                uTerm,
+                chTerm,
+                spanLen: len,
+                reading: ent.reading,
+              };
+              counts[pos + len]! += Decoder.insert(list, np, nBest);
+              if (counts[pos + len]! > 2 * beam) {
+                floor = floors[pos + len] = Decoder.pruneBeam(target, beam);
+                counts[pos + len] = beam;
+                // 剪枝換掉了各狀態的陣列，重新取
+                list = target.get(key);
+                if (!list) break;
+              }
             }
           }
         }
       }
 
-      // list-Viterbi 剪枝：每狀態 top-K，全域 beam 上限
-      for (const bucket of touched) {
-        const pruned: PartialPath[] = [];
-        for (const [stateKey, paths] of bucket) {
-          if (paths.length > nBest) {
-            paths.sort((x, y) => y.score - x.score);
-            bucket.set(stateKey, paths.slice(0, nBest));
-          }
-          pruned.push(...bucket.get(stateKey)!.slice(0, nBest));
-        }
-        pruned.sort((x, y) => y.score - x.score);
-        if (pruned.length > this.opts.beamWidth) {
-          const keep = new Set(pruned.slice(0, this.opts.beamWidth));
-          for (const [stateKey, paths] of bucket) {
-            bucket.set(
-              stateKey,
-              paths.filter((pp) => keep.has(pp)),
-            );
-          }
-        }
+      // list-Viterbi 剪枝：每狀態 top-K 已在插入時做完（insert），這裡只剩全域 beam 上限
+      for (const q of touched) {
+        if (counts[q]! <= beam) continue;
+        floors[q] = Decoder.pruneBeam(buckets[q]!, beam);
+        counts[q] = beam;
       }
     }
 
@@ -422,7 +489,8 @@ export class Decoder {
     spanLen: number,
     reading: readonly string[],
     target: Map<string, PartialPath[]>,
-  ): void {
+    nBest: number,
+  ): number {
     const wordTerm = this.opts.a * lpw;
     const charTerm = this.opts.gamma * lpc;
     let c1 = p.c1;
@@ -453,7 +521,52 @@ export class Decoder {
       list = [];
       target.set(stateKey, list);
     }
+    return Decoder.admits(list, np.score, nBest) ? Decoder.insert(list, np, nBest) : 0;
+  }
+
+  /** 狀態清單（分數由高到低、最多 nBest 條）收不收這個分數 */
+  private static admits(list: PartialPath[], score: number, nBest: number): boolean {
+    return list.length < nBest || score > list[list.length - 1]!.score;
+  }
+
+  /**
+   * 依分數由高到低插入、超過 nBest 就丟最後一條。同分排在既有路徑之後，
+   * 所以結果等同「全部收進來、穩定排序、取前 nBest」（原本的剪枝），只是被剪的路徑不必先建物件。
+   */
+  private static insert(list: PartialPath[], np: PartialPath, nBest: number): number {
+    let i = list.length;
     list.push(np);
+    while (i > 0 && list[i - 1]!.score < np.score) {
+      list[i] = list[i - 1]!;
+      i--;
+    }
+    list[i] = np;
+    if (list.length <= nBest) return 1;
+    list.pop();
+    return 0;
+  }
+
+  /**
+   * 全域 beam：只留分數前 beam 名，回傳門檻（第 beam 名的分數）。同分依桶的迭代順序保留前面的，
+   * 等同原本「串接各狀態、穩定排序、取前 beam」。呼叫前須確定總數 > beam。
+   */
+  private static pruneBeam(bucket: Map<string, PartialPath[]>, beam: number): number {
+    let total = 0;
+    for (const paths of bucket.values()) total += paths.length;
+    const scores = new Float64Array(total);
+    let k = 0;
+    for (const paths of bucket.values()) for (const pp of paths) scores[k++] = pp.score;
+    scores.sort();
+    const t = scores[total - beam]!;
+    let ties = beam;
+    for (let j = total - beam; j < total; j++) if (scores[j]! > t) ties--;
+    for (const [stateKey, paths] of bucket) {
+      bucket.set(
+        stateKey,
+        paths.filter((pp) => pp.score > t || (pp.score === t && ties-- > 0)),
+      );
+    }
+    return t;
   }
 
   private materialize(p: PartialPath): DecodePath {
