@@ -18,3 +18,6 @@ data/kev/**/*.jsonl
 # 建置快取與 Claude Code 工作樹
 *.tsbuildinfo
 .claude/worktrees/
+
+# Rust 原型
+native/target/
