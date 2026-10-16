@@ -4,7 +4,12 @@
     {
       "name": "web",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["packages/cli/dist/index.js", "web"],
+      "runtimeArgs": [
+        "--max-semi-space-size=4",
+        "--max-old-space-size=128",
+        "packages/cli/dist/index.js",
+        "web"
+      ],
       "port": 8787
     }
   ]
