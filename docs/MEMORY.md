@@ -156,6 +156,33 @@ heap 上限：改動前設 256MB 可把 RSS 壓到約 477MB；改動後再設只
 - 常駐宿主（PIME）啟動 node 時要加這兩個參數；`.claude/launch.json` 的網頁測試台已加上。
 
 
+### Rust 原型（2026-10-17，`native/`）
+
+`native/` 是解碼核心的 Rust 移植：直接讀 `lm.bo.bin` 與 `lexicon.bin`，跑 L4＋L5（a=1、γ=0.5、beam 200、破音罰分、EOS、原樣 token）。沒有 L3、X2、固定段、執行中加詞。
+
+- 結果與 TS **逐位元相同**：1500 句前 4 名共 6000 行，詞與分數字串完全一致（不只在 1e-9 內）。雜湊照 TS 逐 UTF-16 碼元餵；`pick` 用 f64 算（h·n 會超過 2^53，整數算法在進位邊界差一）；`Math.log(1e-7)` 寫死成 JS 的值。
+- 句準確率 76.10／79.40，與 Node 相同。
+- 記憶體（`K32GetProcessMemoryInfo`，模型整個讀進記憶體，沒有 mmap）：
+
+| | Rust | Node |
+|---|---|---|
+| 載入後 | 工作集 63MB、私有 60MB | RSS 115MB |
+| 解碼完 1500 句 | 工作集 64MB、私有 61MB（峰值工作集 69MB，出現在載入時） | 打 300 句約 312MB，閒置 GC 後 136MB |
+| 載入時間 | 22–26ms | 約 1 秒 |
+| 1500 句解碼 | 32.6 秒（每句 21.8ms） | `debug-decode-dump.ts` 全程 62 秒（含 tsx 啟動與載入） |
+| 執行檔 | 342KB（release，含除錯符號表） | Node 本身約 70MB |
+
+- 剩下的 63MB 幾乎全是模型：`lm.bo.bin` 51.5MB，詞典約 8MB。沒有 GC，所以打字中不會漲：每次解碼的路徑放在一個 Vec，解碼完就丟。
+- 再縮的方向：模型改 mmap，51MB 從私有變成檔案映射的共享頁（工作集不會變：已量過雜湊表的頁 10 句內就讀到 91–100%）；或縮模型（§3 的剪枝表）。
+- 重現：
+
+```bash
+cd native && cargo build --release && cd ..
+ZHUYIN_DATA=<data 目錄> native/target/release/zhuyin-native.exe eval
+ZHUYIN_DATA=<data 目錄> native/target/release/zhuyin-native.exe dump rust.txt
+ZHUYIN_NO_USER=1 npx tsx debug-decode-dump.ts node.txt   # 兩個檔應該完全相同
+```
+
 ### 兩個專家的貢獻（句準確率，口語／書面，`debug-expert.ts`）
 
 | 設定 | 口語 | 書面 |
@@ -201,7 +228,7 @@ heap 上限：改動前設 256MB 可把 RSS 壓到約 477MB；改動後再設只
 | 6 | 詞典改成預先編好的二進位（字串表＋索引） | 詞典 | RSS 259 → 220MB，載入 27ms | **已完成**（`lexicon.bin`） |
 | 7 | 熵剪枝 | 大表 | 46MB 時 −0.3／−0.4；25MB 時 −1.3／−3.4 | **已完成**（加權差異版，12M 筆預設） |
 | 8 | 依上下文排序的 trie | 大表 | 有區域性，適合 mmap | 未做，只有要 mmap 時才值得 |
-| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | 未做 |
+| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | **原型完成**（`native/`，私有 60MB，只到 L5，見 §3） |
 
 ## 6. PIME
 
