@@ -5,9 +5,11 @@
 ## 會改到什麼
 
 - `C:\Program Files (x86)\PIME\backends.json` 多一筆 `zhuyin` 後端（先備份成 `backends.json.bak`）。
-- `C:\Program Files (x86)\PIME\zhuyin\`：執行檔與模型，約 60MB。
+- `C:\Program Files (x86)\PIME\zhuyin\`：執行檔與模型，約 60MB。更新時上一版留在 `zhuyin.prev\`（給 `-Rollback` 用）。
 - 重新註冊 PIME 的 `PIMETextService.dll`（x64、x86 各一次）。
 - 學習資料存在 `%APPDATA%\PIME\zhuyin\adapter.json`。從空的開始，不會沿用網頁測試台的 `data\user\adapter.json`。
+
+> **警告：不要停掉 PIMELauncher.exe**（不要執行 `PIMELauncher.exe /quit`，也不要在工作管理員結束它）。PIME 2.0.0-beta 的 `PIMETextService.dll` 連不上啟動器時，會讓每個載入它的程式當掉；Explorer 會一秒當一次，只能重開機。2026-10-18 的當機就是 3bb05bf 版的安裝腳本這樣做造成的（詳見 `docs/MEMORY.md` §6）。現在的腳本不會停 PIME。
 
 > **警告**：`backends.json` 格式錯了，PIME 的**所有**輸入法都會失效。腳本會先備份；萬一出事，把 `backends.json.bak` 改名回 `backends.json` 再重新登入。
 
@@ -38,7 +40,7 @@
    powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Data C:\Users\q2927\Desktop\vscode\type\data
    ```
 
-4. 登出再登入，讓 PIME 重新讀設定。或者在**一般權限**的 PowerShell 執行 `& 'C:\Program Files (x86)\PIME\PIMELauncher.exe'` 重新啟動它（安裝腳本已經先用 `PIMELauncher.exe /quit` 把它停掉）。
+4. 登出再登入，讓 PIME 重新讀 `backends.json`。
 
 5. 到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤 > 新增鍵盤」，加入「注音 (zhuyin-native)」。
 
@@ -48,8 +50,21 @@
 
 1. 在 `native\` 重新 `cargo build --release`。
 2. 系統管理員 PowerShell 再跑一次第 3 步的安裝指令。
+3. 登出再登入。
 
-腳本會先執行 `PIMELauncher.exe /quit` 停掉 PIME：執行中的後端鎖著 `zhuyin-native.exe` 和模型檔，不停掉就複製不進去；只殺後端的話，PIME 1 秒後會再把它開起來。所以更新期間所有 PIME 輸入法都會暫停，裝完要做第 4 步重新啟動 PIME。學習檔和設定檔不受影響。
+- 腳本**不停 PIME**。執行中的後端鎖著 `zhuyin-native.exe` 和映射中的 `lm.bo.bin`，不能覆寫，但可以改名：腳本把被鎖的舊檔改名成 `*.old-<時間>`，再放新檔。舊檔下次更新時刪掉。
+- 新模型在下次載入時生效（閒置卸載後、或切回這個輸入法時）；新執行檔要登出再登入才生效。
+- 更新前，腳本把目前的 `PIME\zhuyin\` 整個複製成 `PIME\zhuyin.prev\`。學習檔和設定檔在 `%APPDATA%`，不受影響。
+
+### 換回上一版
+
+新版有問題時，系統管理員 PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Rollback
+```
+
+再登出登入。它把 `zhuyin.prev\` 的檔案放回 `zhuyin\`（同樣用改名的方式，不停 PIME）。
 
 ## 只留「注音 (zhuyin-native)」
 
@@ -67,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
   powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -RestoreAll
   ```
 
-- 兩者都要重新登入（或重開 `PIMELauncher.exe`）才生效。
+- 兩者都會在 PIME 執行中重新註冊 DLL，跑完請**馬上登出再登入**，不要先開別的程式打字。
 - 在 `-OnlyZhuyin` 狀態下 `-Uninstall` 會拒絕執行，要先 `-RestoreAll`，否則 PIME 會一個輸入法都不剩。
 
 ## 使用
@@ -125,7 +140,11 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 ## 疑難排解
 
 - PIME 2.0 的啟動器平常**不寫 log**（背景模式把 log 丟掉），`%LOCALAPPDATA%\PIME\Log\PIMELauncher.log` 會是空的。
-- 要看 log：一般權限 PowerShell 先執行 `& 'C:\Program Files (x86)\PIME\PIMELauncher.exe' /quit`，再執行 `& 'C:\Program Files (x86)\PIME\PIMELauncher.exe' /console`。會開一個主控台視窗，顯示啟動器的 log；後端寫到 stderr 的訊息（`[pime] 載入引擎` 等）顯示為 `[zhuyin stderr] …`。看完關掉視窗後，再不加參數執行一次 `PIMELauncher.exe`。
+- `PIMELauncher.exe /console` 可以顯示 log，但要先停掉正在跑的啟動器，那會讓所有程式當掉（見上面的警告）。**不要用。**要查後端的行為，在 repo 裡用 `debug-pime.ts` 直接驅動後端（不經 PIME）。
+- 程式當掉時看「事件檢視器 > Windows 記錄 > 應用程式」的事件 1000：
+  - 錯誤模組是 `PIMETextService.dll`、例外 `0xc0000005`：DLL 解參考空指標（例如沒有 edit session 的回應帶 `showMessage`）。
+  - 錯誤模組是 `ucrtbase.dll`、例外 `0xc0000409`，而且是 Explorer 一秒當一次：DLL 連不上 PIMELauncher（啟動器被停掉或掛了）。重開機即可恢復。
+- 2026-10-18 的 Explorer 連續當機：3bb05bf 版的安裝腳本在安裝前執行 `PIMELauncher.exe /quit`，啟動器停著的那段時間，Explorer 一碰到輸入法就當掉。現在的腳本不再停 PIME。
 - 2026-10-17 修掉的閃退：點工作列的「注／英」圖示會讓正在打字的程式當掉。原因是 PIME 的 DLL 處理圖示點擊（`onCommand`）時沒有 edit session，回應裡卻有 `showMessage`，DLL 拿空指標去開組字。現在點圖示只回 `changeButton`。
 
 ## 移除
@@ -136,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Uninstall
 ```
 
-再登出登入。學習檔與設定檔 `%APPDATA%\PIME\zhuyin\` 不會被刪，要的話手動刪。
+再登出登入。後端還在跑時刪不掉 `zhuyin\`，腳本會提示；登出登入後再跑一次 `-Uninstall` 就會刪掉。學習檔與設定檔 `%APPDATA%\PIME\zhuyin\` 不會被刪，要的話手動刪。
 
 ## 授權
 
