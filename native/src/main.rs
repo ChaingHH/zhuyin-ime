@@ -7,6 +7,7 @@
 //!                                           引擎：重播按鍵（ZHUYIN_CLOCK、ZHUYIN_ADAPTER、ZHUYIN_L3）
 //!   zhuyin-native pime                      PIME 後端（stdin/stdout，見 pime.rs）。資料預設在執行檔旁的 data\；
 //!                                           學習存 %APPDATA%\PIME\zhuyin\adapter.json（ZHUYIN_ADAPTER＝路徑或 off）；
+//!                                           設定檔 %APPDATA%\PIME\zhuyin\config.json（ZHUYIN_CONFIG＝路徑或 off，見 pime.rs）；
 //!                                           L3 預設開（ZHUYIN_L3=0 關）；閒置 ZHUYIN_IDLE_SECS 秒（預設 300）卸載模型
 //! 對拍腳本：debug-native-parity.ts。ZHUYIN_A＝詞級權重（預設 1）。
 //! 資料目錄：ZHUYIN_DATA（預設 data），要有 models/lm.bo.bin、processed/lexicon.bin、processed/syllables.json。
@@ -126,7 +127,7 @@ fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
                 let key = f.get(2).filter(|k| !k.is_empty()).copied();
                 let st = eng.on_key(f[1], key);
                 let menu = st.menu.map_or(String::new(), |m| {
-                    format!("{}@{}/{}", m.items.join("|"), m.page, m.pages)
+                    format!("{}@{}/{}#{}", m.items.join("|"), m.page, m.pages, m.cursor)
                 });
                 out.push(format!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
@@ -180,6 +181,13 @@ fn main() {
             l3: std::env::var("ZHUYIN_L3").map_or(true, |v| v != "0"),
             icon_dir: exe_dir.join("input_methods").join("zhuyin"),
             idle: std::time::Duration::from_secs_f64(idle),
+            settings_file: match std::env::var("ZHUYIN_CONFIG") {
+                Ok(f) if f == "off" => None,
+                Ok(f) => Some(std::path::PathBuf::from(f)),
+                Err(_) => std::env::var("APPDATA")
+                    .ok()
+                    .map(|d| std::path::Path::new(&d).join("PIME/zhuyin/config.json")),
+            },
         }));
         return;
     }

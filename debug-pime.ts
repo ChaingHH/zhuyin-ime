@@ -2,12 +2,14 @@
 // 一行一則 `<client>|<json>`，回 `PIME_MSG|<client>|<json>`），量冷啟動、逐鍵來回延遲、準確率、後端記憶體與 CPU。
 // 不經 TSF／視窗，所以不佔鍵盤；數字是「模型＋IPC」，不含 TSF 本身的開銷。
 // npx tsx debug-pime.ts chewing|mcbopomofo|zhuyin [句數上限]
-// zhuyin＝本專案的 Rust 後端（native/target/release/zhuyin-native.exe pime），要設 ZHUYIN_DATA；
+// zhuyin＝本專案的 Rust 後端（native/target/release/zhuyin-native.exe pime，ZHUYIN_EXE 可換），要設 ZHUYIN_DATA；
 // 學習預設關（ZHUYIN_ADAPTER=off，句準才和 `zhuyin-native eval` 可比），ZHUYIN_L3=0 關 L3。
 // zhuyin 會先跑一小段行為檢查（Shift 切換、標點、Esc、選字視窗），不符就丟例外。
 // 注意：新酷音會把打過的詞學進 %APPDATA%\PIME\chewing\chewing.sqlite3。
 import { spawn } from 'node:child_process';
 import { execSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
 import { loadEvalSamples } from './packages/cli/src/runtime.js';
@@ -27,7 +29,7 @@ const BACKENDS = {
     guid: '{5340c1d9-706e-4b6b-b022-2e763fa5f674}',
   },
   zhuyin: {
-    exe: 'native/target/release/zhuyin-native.exe',
+    exe: process.env['ZHUYIN_EXE'] ?? 'native/target/release/zhuyin-native.exe',
     args: ['pime'],
     cwd: '.',
     guid: '{64b60746-4570-4343-a34a-85c12f03a93a}',
@@ -53,6 +55,7 @@ const keyOf = (code: string): [number, number] => {
     Enter: [0x0d, 0x0d],
     Escape: [0x1b, 0x1b],
     ArrowDown: [0x28, 0],
+    ArrowUp: [0x26, 0],
     ShiftLeft: [0x10, 0],
   };
   const v = t[code];
@@ -63,7 +66,14 @@ const keyOf = (code: string): [number, number] => {
 const t0 = performance.now();
 const child = spawn(be.exe, be.args, {
   cwd: be.cwd,
-  env: { ZHUYIN_ADAPTER: 'off', ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  env: {
+    ZHUYIN_ADAPTER: 'off',
+    // 行為檢查會改設定檔（只用左 Shift），不能碰使用者的 %APPDATA%\PIME\zhuyin\config.json
+    ZHUYIN_CONFIG: join(tmpdir(), `zhuyin-config-${process.pid}.json`),
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+  },
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 child.stderr.on('data', () => {});
@@ -78,10 +88,131 @@ lines.on('line', (l) => {
 });
 let seq = 0;
 const call = (msg: Record<string, unknown>): Promise<Record<string, unknown>> =>
-  new Promise((res) => {
-    waiting = res;
-    child.stdin.write(`bench|${JSON.stringify({ ...msg, seqNum: ++seq })}\n`);
+  new Promise((res, rej) => {
+    const seqNum = ++seq;
+    const t0 = performance.now();
+    // PIMETextService.dll 等回應最多 2 秒（PIMEClient.cpp callRpcPipe），逾時就當 RPC 失敗
+    const timer = setTimeout(
+      () => rej(new Error(`${String(msg['method'])} 超過 2 秒沒回應`)),
+      2000,
+    );
+    waiting = (r) => {
+      clearTimeout(timer);
+      if (which === 'zhuyin') checkReply(String(msg['method']), seqNum, r, performance.now() - t0);
+      res(r);
+    };
+    child.stdin.write(`bench|${JSON.stringify({ ...msg, seqNum })}\n`);
   });
+
+/**
+ * 回應格式檢查：照 PIME v2.0.0-beta 的 PIMETextService（PIMEClient.cpp、PIMELangBarButton.cpp）實際怎麼讀。
+ * DLL 用 nlohmann::json，型別不符的 get／value 會丟例外；handleRpcResponse 之後沒有 try，
+ * 例外直接讓宿主程式（Explorer、記事本…）當掉。沒有 edit session 的方法帶 showMessage 會解參考空指標。
+ */
+const KEY_METHODS = new Set([
+  'filterKeyDown',
+  'onKeyDown',
+  'filterKeyUp',
+  'onKeyUp',
+  'onPreservedKey',
+  'onCommand',
+]);
+const WITH_SESSION = new Set(['onKeyDown', 'onKeyUp']);
+function checkReply(method: string, seqNum: number, r: Record<string, unknown>, ms: number): void {
+  const bad = (what: string): never => {
+    throw new Error(`回應格式錯誤（${method}）：${what}\n${JSON.stringify(r)}`);
+  };
+  const isInt = (v: unknown): boolean => Number.isInteger(v);
+  const isUint = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 0;
+  const isStr = (v: unknown): boolean => typeof v === 'string';
+  const isBool = (v: unknown): boolean => typeof v === 'boolean';
+  const opt = (k: string, ok: (v: unknown) => boolean, what: string): void => {
+    if (k in r && !ok(r[k])) bad(`${k} 必須是 ${what}`);
+  };
+  if (ms > 1000) bad(`花了 ${ms.toFixed(0)}ms（DLL 2 秒就放棄）`);
+  // callRpcMethod：seqNum 要對上（get<unsigned int>）；handleRpcResponse：value("success", false)
+  if (r['seqNum'] !== seqNum) bad(`seqNum ${String(r['seqNum'])} ≠ ${seqNum}`);
+  if (!isBool(r['success'])) bad('success 必須是 bool');
+  // value("return", false)：有就必須是 bool；onMenu 的 return 是選單陣列（menuFromJson）
+  if (method === 'onMenu') {
+    const menu = (items: unknown): boolean =>
+      Array.isArray(items) &&
+      items.every(
+        (i) =>
+          typeof i === 'object' &&
+          i !== null &&
+          (!('id' in i) || isUint((i as Record<string, unknown>)['id'])) &&
+          (!('text' in i) || isStr((i as Record<string, unknown>)['text'])) &&
+          (!('checked' in i) || isBool((i as Record<string, unknown>)['checked'])) &&
+          (!('enabled' in i) || isBool((i as Record<string, unknown>)['enabled'])) &&
+          (!('submenu' in i) || menu((i as Record<string, unknown>)['submenu'])),
+      );
+    opt(
+      'return',
+      menu,
+      '選單陣列 [{id: uint, text: string, checked?: bool, enabled?: bool, submenu?: [...]}]',
+    );
+  } else if (KEY_METHODS.has(method)) opt('return', isBool, 'bool');
+  else if ('return' in r) bad('這個方法的 return 不會被讀');
+  // updateMessageWindow 在檢查 session 之前執行：沒有 session 時 showMessage 會讓宿主程式當掉
+  if ('showMessage' in r) {
+    if (!WITH_SESSION.has(method)) bad('showMessage 只能出現在 onKeyDown／onKeyUp 的回應');
+    const m = r['showMessage'] as Record<string, unknown>;
+    if (!isStr(m?.['message']) || !isInt(m?.['duration']))
+      bad('showMessage 要是 {message: string, duration: int}');
+  }
+  opt('hideMessage', isBool, 'bool');
+  opt('setSelKeys', isStr, 'string');
+  opt('compositionString', isStr, 'string');
+  opt('commitString', isStr, 'string');
+  opt('showCandidates', isBool, 'bool');
+  opt('openKeyboard', isBool, 'bool');
+  opt('candidateList', (v) => Array.isArray(v) && v.every(isStr), 'string 陣列（get<string>）');
+  opt('compositionCursor', isUint, '非負整數');
+  if ('compositionCursor' in r && isStr(r['compositionString'])) {
+    // DLL 逐 UTF-16 碼元往前數，超過長度會讀到字串外
+    if ((r['compositionCursor'] as number) > (r['compositionString'] as string).length)
+      bad('compositionCursor 超過組字字串長度（UTF-16）');
+  }
+  opt('candidateCursor', isUint, '非負整數');
+  if ('candidateCursor' in r && Array.isArray(r['candidateList'])) {
+    if ((r['candidateCursor'] as number) >= (r['candidateList'] as unknown[]).length)
+      bad('candidateCursor 超出候選清單');
+  }
+  // PIMELangBarButton::fromJson／updateFromJson；changeButton 的 id 用 get<string>（不是字串會丟例外）
+  const button = (b: unknown): boolean => {
+    if (typeof b !== 'object' || b === null) return false;
+    const o = b as Record<string, unknown>;
+    return (
+      isStr(o['id']) &&
+      (!('icon' in o) || isStr(o['icon'])) &&
+      (!('commandId' in o) || isUint(o['commandId'])) &&
+      (!('text' in o) || isStr(o['text'])) &&
+      (!('tooltip' in o) || isStr(o['tooltip'])) &&
+      (!('type' in o) || ['button', 'toggle', 'menu'].includes(o['type'] as string)) &&
+      (!('enable' in o) || isBool(o['enable'])) &&
+      (!('toggled' in o) || isBool(o['toggled']))
+    );
+  };
+  opt('addButton', (v) => Array.isArray(v) && v.every(button), '按鈕陣列');
+  opt('changeButton', (v) => Array.isArray(v) && v.every(button), '按鈕陣列（每個都要有字串 id）');
+  opt('removeButton', (v) => Array.isArray(v) && v.every(isStr), 'string 陣列');
+  opt(
+    'customizeUI',
+    (v) => {
+      const o = v as Record<string, unknown>;
+      return (
+        typeof v === 'object' &&
+        v !== null &&
+        (!('candFontName' in o) || isStr(o['candFontName'])) &&
+        (!('candFontSize' in o) || isInt(o['candFontSize'])) &&
+        (!('candPerRow' in o) || isInt(o['candPerRow'])) &&
+        (!('candUseCursor' in o) || isBool(o['candUseCursor']))
+      );
+    },
+    '{candFontName?: string, candFontSize?: int, candPerRow?: int, candUseCursor?: bool}',
+  );
+}
 
 const keyStates = new Array<number>(256).fill(0);
 const key = async (code: string): Promise<string> => (await press(code)).out;
@@ -103,8 +234,15 @@ const press = async (
   return { out, last, eaten: !!f['return'] };
 };
 // 單按 Shift：down 放行、up 攔下並在 onKeyUp 切換
-const shiftTap = async (): Promise<Record<string, unknown>> => {
-  const ev = { charCode: 0, keyCode: 0x10, repeatCount: 1, scanCode: 0, isExtended: false };
+// right：右 Shift（掃描碼 0x36）
+const shiftTap = async (right = false): Promise<Record<string, unknown>> => {
+  const ev = {
+    charCode: 0,
+    keyCode: 0x10,
+    repeatCount: 1,
+    scanCode: right ? 0x36 : 0x2a,
+    isExtended: false,
+  };
   keyStates[0x10] = 0x80;
   await call({ method: 'filterKeyDown', ...ev, keyStates });
   keyStates[0x10] = 0;
@@ -115,6 +253,38 @@ const check = (ok: boolean, what: string): void => {
   if (!ok) throw new Error(`行為檢查失敗：${what}`);
 };
 async function smoke(): Promise<void> {
+  // 語言列圖示（左鍵＝onCommand id 1）：PIME 的 DLL 在 onCommand 沒有 edit session，
+  // 回應裡有 showMessage／commitString／compositionString 會讓宿主程式當掉
+  const noSession = (r: Record<string, unknown>, what: string): void =>
+    check(
+      !('showMessage' in r) && !('commitString' in r) && !('compositionString' in r),
+      `${what} 的回應不能有需要 edit session 的欄位：${JSON.stringify(r)}`,
+    );
+  const click = await call({ method: 'onCommand', id: 1, type: 0 });
+  noSession(click, '點圖示');
+  check(!(await press('KeyA')).eaten, '點圖示切到英文');
+  noSession(await call({ method: 'onCommand', id: 1, type: 0 }), '再點圖示');
+  check((await press('KeyA')).eaten, '再點圖示切回注音（組字中）');
+  noSession(await call({ method: 'onCommand', id: 1, type: 0 }), '組字中點圖示');
+  check((await press('KeyA')).eaten, '組字中點圖示不切換');
+  await press('Escape');
+  // 右鍵選單（onMenu 回傳選單陣列；選了之後 onCommand 帶選項 id、type 2）
+  const menuReply = await call({ method: 'onMenu', id: 'windows-mode-icon' });
+  const items = menuReply['return'] as Array<{ id: number; checked?: boolean }>;
+  check(Array.isArray(items) && items.some((i) => i.id === 2), '右鍵選單有「只用左 Shift」');
+  // 只用左 Shift：右 Shift 不切換、左 Shift 照樣切換；再選一次恢復
+  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：只用左 Shift');
+  check(!(await shiftTap(true))['return'], '只用左 Shift 時右 Shift 不切換');
+  check((await press('KeyA')).eaten, '右 Shift 後仍是注音');
+  await press('Escape');
+  await shiftTap();
+  check(!(await press('KeyA')).eaten, '左 Shift 照樣切英文');
+  await shiftTap();
+  await call({ method: 'onCommand', id: 2, type: 2 });
+  await shiftTap(true);
+  check(!(await press('KeyA')).eaten, '恢復後右 Shift 也能切換');
+  await shiftTap();
+
   // 標點：組字區空時直接輸出全形
   check((await press('Comma', '<')).out === '，', 'Shift+, → ，');
   // Esc 取消組字
@@ -144,6 +314,17 @@ async function smoke(): Promise<void> {
   check(!(await press('KeyA')).eaten, '英文模式放行字母');
   await shiftTap();
   check((await press('KeyA')).eaten, '切回注音後攔下注音鍵');
+  await press('Escape');
+
+  // 選字視窗（微軟注音鍵位）：↓ 開、反白在第一個；↓ 移到第二個；Enter 選反白
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  check((await press('ArrowDown')).last['candidateCursor'] === 0, '↓ 開視窗、反白第一個');
+  const down = await press('ArrowDown');
+  check(down.last['candidateCursor'] === 1, '↓ 反白移到第二個');
+  check((await press('ArrowUp')).last['candidateCursor'] === 0, '↑ 反白移回第一個');
+  await press('ArrowDown');
+  const sel = (down.last['candidateList'] as string[])[1]!;
+  check((await press('Enter')).last['compositionString'] === sel, `Enter 選反白的 ${sel}`);
   await press('Escape');
 }
 

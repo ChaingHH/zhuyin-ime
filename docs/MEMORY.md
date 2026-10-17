@@ -278,6 +278,13 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
   - 回應：`PIME_MSG|<client_id>|<JSON>`
   - 方法：`init`、`onActivate`、`filterKeyDown`／`onKeyDown` 等；回應帶 `compositionString`、`commitString`、`candidateList`。
   - 方法與回應欄位的完整清單在 `python\textService.py`（基底類別）。每則回應都要帶 `success`、`seqNum`；按鍵方法另帶 `return`。
+- **哪些回應能動組字**（讀 `PIMETextService/PIMEClient.cpp`，`v2.0.0-beta`）：只有 `onKeyDown`、`onKeyUp` 把 edit session 傳給 `handleRpcResponse`，其他方法（`onCommand`、`onMenu`、`filterKeyDown`、`onActivate`…）都是空指標。`updateStatus` 裡的 `updateMessageWindow` 在檢查 session 之前執行，沒在組字時會呼叫 `session->context()`：**這些方法的回應帶 `showMessage` 會讓宿主程式當掉**。`commitString`／`compositionString`／候選視窗則是沒有 session 就直接忽略。2026-10-17 使用者點「注／英」圖示閃退就是這個原因（舊版在 `onCommand` 回 `showMessage`），`debug-pime.ts` 的行為檢查現在會擋。
+- **RPC 失敗會讓宿主程式當掉**（`PIMETextService/PIMEClient.cpp`，`v2.0.0-beta`）：
+  - `callRpcMethod`（703 行起）只在解析 JSON 與比對 `seqNum` 時有 `try`（717–725 行）。連不上啟動器（`waitForRpcConnection` 試 3 次）、寫入或讀取逾時（`callRpcPipe` 677 行 `timeoutMs = 2000`）、管線斷掉時，回傳 false，`ret` 留在預設的 null。
+  - 呼叫端照樣執行 `handleRpcResponse(ret)`（393、402、414、438、464、478、588、600、611 行等），第 90 行 `msg.value("success", false)` 對 null 呼叫 `value()`。nlohmann 3.12（DLL 裡有 `json_abi_v3_12_0` 與 `cannot use value() with` 字串）在非物件上呼叫 `value()` 會丟 `type_error.306`（`json.hpp` 22282 行）。
+  - 這個例外沒有人接，`std::terminate` → `abort`，在宿主程式裡以 `ucrtbase.dll` 的 `0xc0000409` 結束（SearchHost 先記到 MSVC C++ 例外 `0xe06d7363`）。
+  - 所以**啟動器停掉、後端超過 2 秒沒回、或後端在處理請求時死掉，所有用著 PIME 的程式都會當掉**。Explorer 重開後一碰到輸入法又當，變成一秒一次。
+- **log**：PIMELauncher 背景模式把 log 寫到 sink（`tracing_subscriber` 的 `std::io::sink`），`%LOCALAPPDATA%\PIME\Log\PIMELauncher.log` 是空的。`PIMELauncher.exe /console` 才會顯示 log 和後端的 stderr；`/quit` 會通知所有執行中的啟動器結束。
 - **後端怎麼被找到**（讀 `PIMELauncher.exe`、`PIMETextService.dll` 裡的字串推得）：兩者都讀 `backends.json`，再掃每個後端 `<workingDir>\input_methods\*\ime.json` 的 `guid`。啟動器靠它把 TSF 送來的 GUID 對到後端行程；DLL 在 `regsvr32` 時靠它向 Windows 註冊輸入法。所以加一個輸入法＝放檔案＋改 `backends.json`＋重新 `regsvr32`。
 - **內附執行環境**：
   - Python 3（`python\python3`）：新酷音等
@@ -369,6 +376,32 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 - 「冷快取」是近似值：`robocopy /J` 用不經快取的 I/O 寫副本，但沒有驗證副本一定不在快取裡。真正的冷快取要重開機後量。
 - 閒置 300 秒的預設是猜的。卸載的代價只有下一句第一鍵多約 15ms，所以設短一點（例如 60 秒）也可以。
 
+### 事故：2026-10-18 Explorer 連續當機
+
+| 時間 | 事件（Windows 事件記錄、檔案時間） |
+|---|---|
+| 2026-10-17 23:08:11–23:08:53 | ApplicationFrameHost、Explorer 當掉 3 次：錯誤模組 `PIMETextService.dll`、`0xc0000005`、位移 `0x26d8f`。使用者點「注／英」圖示，`onCommand` 的回應帶 `showMessage`，DLL 解參考空的 edit session。3bb05bf 修掉 |
+| 2026-10-18 00:33:16 | 3bb05bf 版 `install.ps1` 執行：先 `PIMELauncher.exe /quit`（沒停掉就強制結束），再複製新檔 |
+| 00:33:20 | `%APPDATA%\PIME\zhuyin\adapter.json` 寫入：舊後端 stdin 關閉時卸載存檔，表示啟動器已經停了 |
+| 00:34:58–00:35:19 | Explorer 每秒當一次，共 23 次：錯誤模組 `ucrtbase.dll`、`0xc0000409`。接著 ApplicationFrameHost（`0xc0000409`）、SearchHost（`0xe06d7363`） |
+| 00:36:35 | 使用者重開機；啟動器在登入時（00:37:37）重新啟動，之後正常 |
+
+根因（推論，證據如下）：
+
+- **不是新後端的回應格式。** 3bb05bf 與正常運作的 2235772 在 `init`、`onActivate` 的回應逐位元組相同（`git diff 2235772 3bb05bf -- native/src/pime.rs` 只改了按鍵、選單、`onCommand`）。新版的每一則回應都通過 `debug-pime.ts` 的格式檢查，型別都是 DLL 讀得懂的。
+- **是安裝腳本把 PIMELauncher 停掉。** 停掉之後，任何載入了 PIME 的程式一呼叫 DLL，RPC 就失敗，觸發上一節的未捕捉例外。Explorer（工作列、搜尋框都用 TSF）重開後馬上又呼叫、又當，變成一秒一次。舊版腳本不停 PIME，所以第一次安裝沒事。
+- `0xc0000409` 在 `ucrtbase.dll`（`abort` 的 fail-fast），與 23:08 那次在 `PIMETextService.dll` 裡的 `0xc0000005` 不同，是另一個錯誤。
+- 沒有直接證據：PIME 不寫 log，WER 報告要系統管理員權限才能讀，這段時間啟動器是否一直停著是從 adapter.json 的寫入時間與重開機後恢復推得的。
+
+修正（`native/pime/install.ps1`）：
+
+- 不再停 PIME。被鎖住的執行檔與映射中的模型改名成 `*.old-<時間>` 再放新檔：Windows 允許改名執行中的 exe 和有映射的檔案，只是不能覆寫（實測：覆寫失敗訊息與使用者看到的一樣；改名、甚至刪除改名後的映射檔都成功，後端照常回應）。
+- 更新前把 `zhuyin\` 備份成 `zhuyin.prev\`，新增 `-Rollback`。
+- 已經裝過時不再 `regsvr32`（只有第一次安裝、`-OnlyZhuyin`、`-RestoreAll`、`-Uninstall` 才會）。
+- `docs/PIME-INSTALL.md` 拿掉「`/quit` 後用 `/console` 看 log」的建議，加上不要停啟動器的警告。
+
+後端這邊要守的規則（`debug-pime.ts` 會檢查）：每則請求都要在 2 秒內回（檢查器 1 秒就報錯），而且後端不能在處理請求時結束。
+
 ### 本專案的 PIME 後端（2026-10-17，`native/src/pime.rs`）
 
 沒有照原本的計畫包成 Node 輸入法，而是讓 Rust 執行檔自己當一個 PIME 後端：`zhuyin-native.exe pime` 直接講 stdin/stdout 協定。理由是 Node 本身就要約 70MB，Rust 整個行程打字中私有只要 13MB（模型是檔案映射，見下面「記憶體跟著使用走」）。
@@ -379,8 +412,9 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 | `onKeyDown` | 虛擬鍵碼轉成 `KeyboardEvent.code`，`charCode` 當 `KeyboardEvent.key`（標點靠它），交給 `ImeEngine.on_key`。Enter（選字視窗沒開）＝`commit(0)` |
 | 單按 Shift | `filterKeyDown` 記下「按了 Shift、之後沒按別的鍵」，`filterKeyUp` 回 true，`onKeyUp` 切換注音／英文（組字區先送出），並用 `showMessage` 顯示「注」／「英」 |
 | 組字 | `compositionString`＝首選＋游標處的未完成注音；`compositionCursor` 以 UTF-16 計 |
-| 選字視窗 | ↓ 開、數字選、Space／↓↑ 換頁、Esc 關（引擎原本的行為）；`setSelKeys` 設 `123456789`，直排一列 |
-| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`），點它也能切換 |
+| 選字視窗 | 微軟注音鍵位（2026-10-17 改，TS／Rust 同步）：↓ 開、↓↑ 移反白（跨頁、循環）、空白／PageDown 下一頁、PageUp 上一頁、Enter 選反白、數字選、Esc 關。反白送 `candidateCursor`；`setSelKeys` 設 `123456789`，直排一列 |
+| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`）。左鍵＝`onCommand` id 1，只換模式（組字中不換）；右鍵＝`onMenu` 回傳選單（切換中／英、只用左 Shift），選了再送 `onCommand`（type 2） |
+| 設定 | `%APPDATA%\PIME\zhuyin\config.json`：`shiftToggle`（`both`／`left`，右 Shift 用掃描碼 0x36 判斷）、`idleSecs`、`l3`；每次 `onActivate` 重讀 |
 | `onCompositionTerminated` | 清空引擎、不學習。已顯示的組字留在文件裡 |
 | X2 | 每次送出後存 `%APPDATA%\PIME\zhuyin\adapter.json`（先寫暫存檔再改名）。檔案讀不懂時，這次不學習、不覆寫原檔 |
 | 出錯 | 單則訊息 panic 時回 `{"success":false}`、清空組字，後端不結束 |

@@ -38,6 +38,15 @@ describe('選字視窗', () => {
     expect(e.commit()).toBe(st.composition);
   });
 
+  it('微軟注音鍵位：↓↑ 移反白（頭尾循環）、Enter 選反白', () => {
+    const e = setup();
+    expect(key(e, 'ArrowDown').menu?.cursor).toBe(0);
+    expect(key(e, 'ArrowDown').menu?.cursor).toBe(1);
+    expect(key(e, 'ArrowDown').menu?.cursor).toBe(0);
+    expect(key(e, 'ArrowUp').menu?.cursor).toBe(1);
+    expect(key(e, 'Enter').composition.endsWith('燕')).toBe(true);
+  });
+
   it('← 移到字前面：↓ 列出從游標開始的詞（長詞在前）；後面的字照樣重解碼', () => {
     const e = setup();
     expect(key(e, 'ArrowLeft').cursor).toBe(1);
