@@ -456,3 +456,30 @@ C:\Program Files (x86)\PIME\
 6. 移除：系統管理員 PowerShell 執行 `install.ps1 -Uninstall`。順序是先 `regsvr32 /u`（趁後端還在），再刪檔、改 `backends.json`，最後重新 `regsvr32` 其他輸入法。
 
 授權：`lexicon.bin` 來自萌典（要標出處）與 libchewing（LGPL-2.1）。只在本機安裝不算散布；要散布安裝包時，照 CLAUDE.md「Data licensing constraints」附上授權與出處。
+
+## 7. 詞典挖詞與中英混打（2026-10-18）
+
+### 挖詞（Part A，`packages/data-pipeline/scripts/mine-words.ts`）
+
+做法：讀 `lm.tsv` 的詞一元／二元／三元計數（訓練時的斷詞結果），相鄰兩個 token 合成 2–4 字的候選。條件：
+
+- 至少一邊是單字（狀態＋列、推＋文）。兩邊都是多字詞的多半是片語，詞二元本來就涵蓋。
+- 次數 ≥ 100、PMI ≥ 4。
+- 左鄰或右鄰任一個詞佔比 ≤ 0.5（擋掉「柯 文 哲」裡的「文哲」這類碎片）。
+- 不含虛詞、代名詞。
+- 讀音＝各 token 讀音串接。多讀音單字取詞典多字詞裡佔 ≥ 85% 的讀音，否則跳過。
+
+產物：`data/processed/mined.jsonl`（11,822 詞，provenance=mined），`npm run data:lexicon` 會合併進 `lexicon.jsonl`。挖詞以「沒有 mined 詞的詞典」為準，重跑結果不變。
+
+新詞要靠重訓才有詞級機率（`train.ts` 斷詞用詞典，沒重訓的新詞是 OOV，贏不了）。
+
+| 設定 | 收詞 | 口語句準 | 書面句準 | 評測句裡挖到的詞解錯 | lexicon.bin | lm.bo.bin |
+|---|---|---|---|---|---|---|
+| 原詞典（基線） | 0 | 76.10 | 79.40 | 26／524 | 5.87MB | 51.5MB |
+| 寬門檻 50／3／0.6 | 37,968 | 76.20 | 79.40 | 27／524 | 6.78MB | 52.0MB |
+| **嚴門檻 100／4／0.5（採用）** | 11,822 | **76.50** | **79.60** | 25／524 | 6.15MB | 51.7MB |
+
+（`ZHUYIN_NO_USER=1 node packages/cli/dist/index.js eval`，12M 筆退回式模型。解錯清單：`debug-mined-targets.ts`。）
+
+- 寬門檻收進很多雜訊（唯一齣、已失、慢慢地、聚居地），修好 7 處、弄壞 8 處。
+- 狀態欄在語料（PTT＋維基）裡出現 0 次，挖不到；單打 ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ 還是「壯泰蘭」。狀態列（106 次）、工具列、網址列本來就解得對。要救狀態欄只能另外加人工詞表或別的語料。

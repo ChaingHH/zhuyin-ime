@@ -48,6 +48,7 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 - 二元／三元表是 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map：載入 tsv 時用開放定址 `HashTable` 累加，量化時預設轉成最小完美雜湊 `PerfectTable`（每鍵 16-bit 指紋＋8-bit 值＋約 4 bit 位移值，沒有探測）。改回 Map 會讓每次 major GC 掃描數千萬物件（實測每句 +700ms 延遲）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
 - `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。
 - `LM_TOKEN_PENALTY`（預設 14）必須大於高頻單字的 log(freq)，否則訓練斷詞會把詞切成單字。
+- 挖詞：`npx tsx packages/data-pipeline/scripts/mine-words.ts [lm.tsv] [lexicon.jsonl] [mined.jsonl]`（約 3 分鐘）從 lm.tsv 的詞計數挖常用複合詞 → `data/processed/mined.jsonl`（provenance=mined），`npm run data:lexicon` 合併進詞典；之後要重訓 lm.tsv、重建 lm.bo.bin 新詞才有機率。門檻與數字見 docs/MEMORY.md §7。
 - `debug-acc.ts`：一次載入、多組設定的實驗台；dev=偶數句、test=奇數句，另列 N-best oracle。
 - 剪枝／量化（`lmOptionsFromEnv`，預設 `bi>=2 tri>=4 q=8 MPH=1`）：`ZHUYIN_LM_MIN_BI`／`_MIN_TRI`（計數低於此值不存，上下文總量仍含被剪部分）、`_QUANT=0|8|16`（對數碼本）、`_MPH=0|1`（完美雜湊）；`_FP=32|40|48`、`_LOAD` 只在 `MPH=0` 時有用。預設：RSS 約 250MB、大表 109MB、句 76.4／79.8（原始模型 76.7／80.4，要用設 `ZHUYIN_LM_MIN_BI=1 ZHUYIN_LM_MIN_TRI=1 ZHUYIN_LM_QUANT=0`）。實驗台 `debug-prune.ts`（一設定一行程）；`ZHUYIN_NO_USER=1` 不載入 adapter.json。
 - 記憶體分析、微軟注音／PIME 的宿主方式、縮小方案：見 `docs/MEMORY.md`。安裝到 PIME 的教學：`docs/PIME-INSTALL.md`。
