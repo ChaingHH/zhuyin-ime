@@ -89,9 +89,9 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 | 狀態 | 按鍵 | 作用 |
 |---|---|---|
-| 任何時候 | 單按 Shift | 切換注音／英文。組字中按：先送出，再切換。可設成只用左 Shift（見「設定」） |
+| 任何時候 | 單按 Shift | 切換注音／英文。組字中按：先送出，再切換。可設成只用左邊或只用右邊的 Shift（見「設定」） |
 | 任何時候 | 點工作列的「注／英」圖示 | 切換注音／英文。組字中點不切換（先 Enter 送出或 Esc 取消） |
-| 任何時候 | 右鍵點「注／英」圖示 | 選單：切換中／英、只用左 Shift 切換中英（打勾＝開） |
+| 任何時候 | 右鍵點「注／英」圖示 | 選單：切換中／英；「左右 Shift 都切換中英」「只用左 Shift 切換中英」「只用右 Shift 切換中英」三選一（打勾的是目前的設定） |
 | 組字中 | 大千鍵位 | 打注音；空白＝一聲 |
 | 組字中 | ← → Home End | 移游標，改前面的字 |
 | 組字中 | ↓ | 開選字視窗：列出從游標那個字開始的詞（長詞在前）；游標在最後時是最後一個字 |
@@ -117,11 +117,11 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 設定
 
-設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的「只用左 Shift 切換中英」也是寫進這個檔。
+設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的三個 Shift 選項也是寫進這個檔。
 
 ```json
 {
-  "shiftToggle": "left",
+  "shiftToggle": "right",
   "idleSecs": 300,
   "l3": true
 }
@@ -129,7 +129,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 | 項目 | 預設 | 作用 |
 |---|---|---|
-| `shiftToggle` | `"both"` | `"left"`：只有左 Shift 單按會切換中英，右 Shift 單按不做事 |
+| `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊。另一邊單按不做事；其他值當 `"both"` |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
 

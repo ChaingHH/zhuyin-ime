@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
 import { loadEvalSamples } from './packages/cli/src/runtime.js';
@@ -63,13 +64,14 @@ const keyOf = (code: string): [number, number] => {
   return v;
 };
 
+const configFile = join(tmpdir(), `zhuyin-config-${process.pid}.json`);
 const t0 = performance.now();
 const child = spawn(be.exe, be.args, {
   cwd: be.cwd,
   env: {
     ZHUYIN_ADAPTER: 'off',
-    // 行為檢查會改設定檔（只用左 Shift），不能碰使用者的 %APPDATA%\PIME\zhuyin\config.json
-    ZHUYIN_CONFIG: join(tmpdir(), `zhuyin-config-${process.pid}.json`),
+    // 行為檢查會改設定檔（Shift 選項），不能碰使用者的 %APPDATA%\PIME\zhuyin\config.json
+    ZHUYIN_CONFIG: configFile,
     ...process.env,
     PYTHONIOENCODING: 'utf-8',
     PYTHONUTF8: '1',
@@ -152,6 +154,16 @@ function checkReply(method: string, seqNum: number, r: Record<string, unknown>, 
       menu,
       '選單陣列 [{id: uint, text: string, checked?: bool, enabled?: bool, submenu?: [...]}]',
     );
+    // TrackPopupMenu 選到 id 0 會當成取消：id 0 只能是分隔線（空字串）；其他 id 不能重複
+    const flat = (items: unknown): Array<Record<string, unknown>> =>
+      Array.isArray(items)
+        ? items.flatMap((i: Record<string, unknown>) => [i, ...flat(i['submenu'])])
+        : [];
+    const all = flat(r['return']);
+    if (all.some((i) => (i['id'] ?? 0) === 0 && (i['text'] ?? '') !== ''))
+      bad('id 0 的選項只能是分隔線（text 空字串）');
+    const ids = all.map((i) => i['id']).filter((id) => id);
+    if (new Set(ids).size !== ids.length) bad('選單 id 重複');
   } else if (KEY_METHODS.has(method)) opt('return', isBool, 'bool');
   else if ('return' in r) bad('這個方法的 return 不會被讀');
   // updateMessageWindow 在檢查 session 之前執行：沒有 session 時 showMessage 會讓宿主程式當掉
@@ -268,22 +280,45 @@ async function smoke(): Promise<void> {
   noSession(await call({ method: 'onCommand', id: 1, type: 0 }), '組字中點圖示');
   check((await press('KeyA')).eaten, '組字中點圖示不切換');
   await press('Escape');
-  // 右鍵選單（onMenu 回傳選單陣列；選了之後 onCommand 帶選項 id、type 2）
-  const menuReply = await call({ method: 'onMenu', id: 'windows-mode-icon' });
-  const items = menuReply['return'] as Array<{ id: number; checked?: boolean }>;
-  check(Array.isArray(items) && items.some((i) => i.id === 2), '右鍵選單有「只用左 Shift」');
-  // 只用左 Shift：右 Shift 不切換、左 Shift 照樣切換；再選一次恢復
-  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：只用左 Shift');
-  check(!(await shiftTap(true))['return'], '只用左 Shift 時右 Shift 不切換');
-  check((await press('KeyA')).eaten, '右 Shift 後仍是注音');
+  // 右鍵選單（onMenu 回傳選單陣列；選了之後 onCommand 帶選項 id、type 2）。
+  // Shift 三選一：4＝左右都切換、2＝只用左、3＝只用右；DLL 沒有單選格式，用 checked 標目前那個
+  const shiftMenu = async (): Promise<number[]> => {
+    const items = (await call({ method: 'onMenu', id: 'windows-mode-icon' }))['return'] as Array<{
+      id: number;
+      checked?: boolean;
+    }>;
+    check(
+      Array.isArray(items) && [2, 3, 4].every((id) => items.some((i) => i.id === id)),
+      '右鍵選單有三個 Shift 選項',
+    );
+    return items.filter((i) => [2, 3, 4].includes(i.id) && i.checked).map((i) => i.id);
+  };
+  const toggles = async (right: boolean): Promise<boolean> => {
+    const r = !!(await shiftTap(right))['return'];
+    if (r) await shiftTap(right); // 切回來，保持注音
+    return r;
+  };
+  check((await shiftMenu()).join() === '4', '預設勾「左右 Shift 都切換」');
+  check((await toggles(false)) && (await toggles(true)), '預設左右 Shift 都切換');
+  // 只用右 Shift
+  noSession(await call({ method: 'onCommand', id: 3, type: 2 }), '選單：只用右 Shift');
+  check((await shiftMenu()).join() === '3', '選單改勾「只用右 Shift」');
+  check(readFileSync(configFile, 'utf8').includes('"right"'), 'config.json 寫入 "right"');
+  check(!(await toggles(false)), '只用右 Shift 時左 Shift 不切換');
+  check((await press('KeyA')).eaten, '左 Shift 後仍是注音');
   await press('Escape');
-  await shiftTap();
-  check(!(await press('KeyA')).eaten, '左 Shift 照樣切英文');
-  await shiftTap();
-  await call({ method: 'onCommand', id: 2, type: 2 });
-  await shiftTap(true);
-  check(!(await press('KeyA')).eaten, '恢復後右 Shift 也能切換');
-  await shiftTap();
+  check(await toggles(true), '只用右 Shift 時右 Shift 切換');
+  // 只用左 Shift
+  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：只用左 Shift');
+  check(!(await toggles(true)), '只用左 Shift 時右 Shift 不切換');
+  check(await toggles(false), '只用左 Shift 時左 Shift 切換');
+  // 舊版設定檔的 "left" 照樣有效：onActivate 時重讀
+  writeFileSync(configFile, '{"shiftToggle": "left"}');
+  await call({ method: 'onActivate', isKeyboardOpen: true });
+  check((await shiftMenu()).join() === '2', '設定檔 "left" 讀進來');
+  // 恢復左右都切換
+  noSession(await call({ method: 'onCommand', id: 4, type: 2 }), '選單：左右都切換');
+  check((await toggles(false)) && (await toggles(true)), '恢復後左右 Shift 都切換');
 
   // 標點：組字區空時直接輸出全形
   check((await press('Comma', '<')).out === '，', 'Shift+, → ，');

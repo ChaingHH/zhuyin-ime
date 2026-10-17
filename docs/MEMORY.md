@@ -413,8 +413,8 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 | 單按 Shift | `filterKeyDown` 記下「按了 Shift、之後沒按別的鍵」，`filterKeyUp` 回 true，`onKeyUp` 切換注音／英文（組字區先送出），並用 `showMessage` 顯示「注」／「英」 |
 | 組字 | `compositionString`＝首選＋游標處的未完成注音；`compositionCursor` 以 UTF-16 計 |
 | 選字視窗 | 微軟注音鍵位（2026-10-17 改，TS／Rust 同步）：↓ 開、↓↑ 移反白（跨頁、循環）、空白／PageDown 下一頁、PageUp 上一頁、Enter 選反白、數字選、Esc 關。反白送 `candidateCursor`；`setSelKeys` 設 `123456789`，直排一列 |
-| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`）。左鍵＝`onCommand` id 1，只換模式（組字中不換）；右鍵＝`onMenu` 回傳選單（切換中／英、只用左 Shift），選了再送 `onCommand`（type 2） |
-| 設定 | `%APPDATA%\PIME\zhuyin\config.json`：`shiftToggle`（`both`／`left`，右 Shift 用掃描碼 0x36 判斷）、`idleSecs`、`l3`；每次 `onActivate` 重讀 |
+| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`）。左鍵＝`onCommand` id 1，只換模式（組字中不換）；右鍵＝`onMenu` 回傳選單（切換中／英；Shift 三選一：id 4 兩邊、2 只用左、3 只用右。`menuFromJson` 沒有單選格式，用 `checked` 標目前那個），選了再送 `onCommand`（type 2） |
+| 設定 | `%APPDATA%\PIME\zhuyin\config.json`：`shiftToggle`（`both`／`left`／`right`，右 Shift 用掃描碼 0x36 或 `keyStates[VK_RSHIFT]` 判斷）、`idleSecs`、`l3`；每次 `onActivate` 重讀 |
 | `onCompositionTerminated` | 清空引擎、不學習。已顯示的組字留在文件裡 |
 | X2 | 每次送出後存 `%APPDATA%\PIME\zhuyin\adapter.json`（先寫暫存檔再改名）。檔案讀不懂時，這次不學習、不覆寫原檔 |
 | 出錯 | 單則訊息 panic 時回 `{"success":false}`、清空組字，後端不結束 |

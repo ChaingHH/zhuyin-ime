@@ -31,8 +31,10 @@ const VK_CONTROL: usize = 0x11;
 const VK_MENU: usize = 0x12;
 const MODE_BUTTON: &str = "windows-mode-icon";
 const ID_MODE: i64 = 1;
-/// 右鍵選單「只用左 Shift 切換中英」
-const ID_LEFT_SHIFT: i64 = 2;
+/// 右鍵選單：哪一邊的 Shift 切換中英（id 2 沿用舊版的「只用左 Shift」）
+const ID_SHIFT_LEFT: i64 = 2;
+const ID_SHIFT_RIGHT: i64 = 3;
+const ID_SHIFT_BOTH: i64 = 4;
 const VK_RSHIFT: usize = 0xa1;
 /// 右 Shift 的掃描碼
 const SCAN_RSHIFT: u64 = 0x36;
@@ -184,8 +186,8 @@ pub struct Backend {
     owner: String,
     /// 單按 Shift：按下 Shift 後到放開前沒有按別的鍵
     shift_alone: bool,
-    /// 只有左 Shift 切換中英（config.json 的 "shiftToggle": "left"）
-    left_shift_only: bool,
+    /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"
+    shift_toggle: &'static str,
 }
 
 impl Backend {
@@ -201,7 +203,7 @@ impl Backend {
             win8: true,
             owner: String::new(),
             shift_alone: false,
-            left_shift_only: false,
+            shift_toggle: "both",
         }
         .with_settings()
     }
@@ -221,11 +223,15 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"，其他值當 both）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
-        self.left_shift_only = s.get("shiftToggle").and_then(Value::as_str) == Some("left");
+        self.shift_toggle = match s.get("shiftToggle").and_then(Value::as_str) {
+            Some("left") => "left",
+            Some("right") => "right",
+            _ => "both",
+        };
         if let Some(secs) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = Duration::from_secs_f64(secs.max(1.0));
         }
@@ -425,7 +431,12 @@ impl Backend {
 
     fn filter_key_down(&mut self, k: &Key) -> bool {
         if k.vk as usize == VK_SHIFT {
-            self.shift_alone = !k.ctrl_alt && !(self.left_shift_only && k.right_shift);
+            let side_ok = match self.shift_toggle {
+                "left" => !k.right_shift,
+                "right" => k.right_shift,
+                _ => true,
+            };
+            self.shift_alone = !k.ctrl_alt && side_ok;
             return false;
         }
         self.shift_alone = false;
@@ -540,23 +551,29 @@ impl Backend {
             "onCommand" => {
                 match msg["id"].as_i64() {
                     Some(ID_MODE) if !self.composing() => self.flip_mode(&mut r),
-                    Some(ID_LEFT_SHIFT) => {
-                        self.left_shift_only = !self.left_shift_only;
-                        let v = if self.left_shift_only { "left" } else { "both" };
-                        self.write_setting("shiftToggle", json!(v));
+                    Some(id @ (ID_SHIFT_LEFT | ID_SHIFT_RIGHT | ID_SHIFT_BOTH)) => {
+                        self.shift_toggle = match id {
+                            ID_SHIFT_LEFT => "left",
+                            ID_SHIFT_RIGHT => "right",
+                            _ => "both",
+                        };
+                        self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     _ => {}
                 }
                 None
             }
-            // 右鍵點語言列圖示：回傳選單（PIME 的 menuFromJson 格式；id 0＋空字串＝分隔線）
+            // 右鍵點語言列圖示：回傳選單（PIME 的 menuFromJson 只讀 id／text／checked／enabled／submenu；
+            // id 0＋空字串＝分隔線。沒有單選格式，三個 Shift 選項用 checked 標目前那個）
             "onMenu" => {
                 r.insert(
                     "return".into(),
                     json!([
                         {"id": ID_MODE, "text": "切換中／英"},
                         {"id": 0, "text": ""},
-                        {"id": ID_LEFT_SHIFT, "text": "只用左 Shift 切換中英", "checked": self.left_shift_only},
+                        {"id": ID_SHIFT_BOTH, "text": "左右 Shift 都切換中英", "checked": self.shift_toggle == "both"},
+                        {"id": ID_SHIFT_LEFT, "text": "只用左 Shift 切換中英", "checked": self.shift_toggle == "left"},
+                        {"id": ID_SHIFT_RIGHT, "text": "只用右 Shift 切換中英", "checked": self.shift_toggle == "right"},
                     ]),
                 );
                 None
