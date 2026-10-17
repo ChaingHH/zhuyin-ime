@@ -31,6 +31,11 @@ const VK_CONTROL: usize = 0x11;
 const VK_MENU: usize = 0x12;
 const MODE_BUTTON: &str = "windows-mode-icon";
 const ID_MODE: i64 = 1;
+/// 右鍵選單「只用左 Shift 切換中英」
+const ID_LEFT_SHIFT: i64 = 2;
+const VK_RSHIFT: usize = 0xa1;
+/// 右 Shift 的掃描碼
+const SCAN_RSHIFT: u64 = 0x36;
 
 /// Windows 虛擬鍵碼 → KeyboardEvent.code（美式鍵盤實體鍵位）
 fn code_of(vk: u32) -> Option<String> {
@@ -49,6 +54,8 @@ fn code_of(vk: u32) -> Option<String> {
         0x27 => "ArrowRight",
         0x28 => "ArrowDown",
         0x2e => "Delete",
+        0x21 => "PageUp",
+        0x22 => "PageDown",
         0xba => "Semicolon",
         0xbb => "Equal",
         0xbc => "Comma",
@@ -91,6 +98,8 @@ struct Key {
     key: Option<String>,
     vk: u32,
     ctrl_alt: bool,
+    /// 這個 Shift 是右邊那顆
+    right_shift: bool,
 }
 
 fn key_of(msg: &Value) -> Key {
@@ -109,6 +118,7 @@ fn key_of(msg: &Value) -> Key {
             .flatten(),
         vk,
         ctrl_alt: down(VK_CONTROL) || down(VK_MENU),
+        right_shift: msg["scanCode"].as_u64() == Some(SCAN_RSHIFT) || down(VK_RSHIFT),
     }
 }
 
@@ -122,6 +132,8 @@ pub struct Config {
     pub icon_dir: PathBuf,
     /// 多久沒按鍵就卸載引擎
     pub idle: Duration,
+    /// 使用者設定檔 config.json（環境變數不一定傳得到後端）；None＝不讀不寫
+    pub settings_file: Option<PathBuf>,
 }
 
 /// 載入引擎。回傳值第二項：學習檔可不可以寫（讀不懂就不寫，免得蓋掉使用者的學習資料）
@@ -172,6 +184,8 @@ pub struct Backend {
     owner: String,
     /// 單按 Shift：按下 Shift 後到放開前沒有按別的鍵
     shift_alone: bool,
+    /// 只有左 Shift 切換中英（config.json 的 "shiftToggle": "left"）
+    left_shift_only: bool,
 }
 
 impl Backend {
@@ -187,6 +201,53 @@ impl Backend {
             win8: true,
             owner: String::new(),
             shift_alone: false,
+            left_shift_only: false,
+        }
+        .with_settings()
+    }
+
+    fn with_settings(mut self) -> Self {
+        self.read_settings();
+        self
+    }
+
+    fn settings(&self) -> Map<String, Value> {
+        self.cfg
+            .settings_file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    }
+
+    /// 讀 config.json：shiftToggle（"both"｜"left"）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
+    fn read_settings(&mut self) {
+        let s = self.settings();
+        self.left_shift_only = s.get("shiftToggle").and_then(Value::as_str) == Some("left");
+        if let Some(secs) = s.get("idleSecs").and_then(Value::as_f64) {
+            self.cfg.idle = Duration::from_secs_f64(secs.max(1.0));
+        }
+        if let Some(l3) = s.get("l3").and_then(Value::as_bool) {
+            self.cfg.l3 = l3;
+        }
+    }
+
+    /// 改一項設定並存檔（保留檔案裡其他項目；先寫暫存檔再改名）
+    fn write_setting(&self, key: &str, v: Value) {
+        let Some(f) = &self.cfg.settings_file else {
+            return;
+        };
+        let mut s = self.settings();
+        s.insert(key.into(), v);
+        let tmp = f.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(&Value::Object(s)).unwrap();
+        let ok = f.parent().map_or(Ok(()), std::fs::create_dir_all).is_ok()
+            && std::fs::write(&tmp, text).is_ok()
+            && std::fs::rename(&tmp, f).is_ok();
+        if !ok {
+            eprintln!("[pime] 無法寫入 {}", f.display());
         }
     }
 
@@ -288,7 +349,7 @@ impl Backend {
         match &st.menu {
             Some(m) => {
                 r.insert("candidateList".into(), json!(m.items));
-                r.insert("candidateCursor".into(), json!(0));
+                r.insert("candidateCursor".into(), json!(m.cursor));
                 r.insert("showCandidates".into(), json!(true));
             }
             None => {
@@ -316,6 +377,25 @@ impl Backend {
         r.insert("showCandidates".into(), json!(false));
     }
 
+    /// 只換模式、更新語言列圖示。沒有 edit session 的回應（onCommand）只能用這個：
+    /// PIME 的 DLL 在沒有 session 時收到 showMessage 會解參考空指標，宿主程式直接當掉
+    fn flip_mode(&mut self, r: &mut Map<String, Value>) {
+        if let Some(e) = self.eng.as_mut() {
+            e.mode = if self.mode == Mode::Zhuyin {
+                Mode::English
+            } else {
+                Mode::Zhuyin
+            };
+        }
+        self.mode = if self.mode == Mode::Zhuyin {
+            Mode::English
+        } else {
+            Mode::Zhuyin
+        };
+        self.mode_button(r, "changeButton");
+    }
+
+    /// 單按 Shift（onKeyUp，有 edit session）：先送出組字區，再換模式，並提示「注」／「英」
     fn toggle(&mut self, r: &mut Map<String, Value>) {
         // 引擎沒載入就沒有組字，只換模式
         let text = self
@@ -345,7 +425,7 @@ impl Backend {
 
     fn filter_key_down(&mut self, k: &Key) -> bool {
         if k.vk as usize == VK_SHIFT {
-            self.shift_alone = !k.ctrl_alt;
+            self.shift_alone = !k.ctrl_alt && !(self.left_shift_only && k.right_shift);
             return false;
         }
         self.shift_alone = false;
@@ -426,6 +506,7 @@ impl Backend {
             }
             "onActivate" => {
                 self.active.insert(client.to_string());
+                self.read_settings();
                 r.insert("setSelKeys".into(), json!("123456789"));
                 r.insert(
                     "customizeUI".into(),
@@ -454,10 +535,30 @@ impl Backend {
                 self.toggle(&mut r);
                 Some(true)
             }
+            // 語言列圖示：左鍵＝id 1，右鍵選單選項＝選單的 id。這裡沒有 edit session：
+            // 不能送 showMessage／commitString／compositionString。組字中按圖示不切換（組字會沒地方送出）
             "onCommand" => {
-                if msg["id"].as_i64() == Some(ID_MODE) {
-                    self.toggle(&mut r);
+                match msg["id"].as_i64() {
+                    Some(ID_MODE) if !self.composing() => self.flip_mode(&mut r),
+                    Some(ID_LEFT_SHIFT) => {
+                        self.left_shift_only = !self.left_shift_only;
+                        let v = if self.left_shift_only { "left" } else { "both" };
+                        self.write_setting("shiftToggle", json!(v));
+                    }
+                    _ => {}
                 }
+                None
+            }
+            // 右鍵點語言列圖示：回傳選單（PIME 的 menuFromJson 格式；id 0＋空字串＝分隔線）
+            "onMenu" => {
+                r.insert(
+                    "return".into(),
+                    json!([
+                        {"id": ID_MODE, "text": "切換中／英"},
+                        {"id": 0, "text": ""},
+                        {"id": ID_LEFT_SHIFT, "text": "只用左 Shift 切換中英", "checked": self.left_shift_only},
+                    ]),
+                );
                 None
             }
             "onKeyboardStatusChanged" => {
@@ -480,7 +581,7 @@ impl Backend {
                 None
             }
             "onPreservedKey" => Some(false),
-            "onMenu" | "onCompartmentChanged" => None,
+            "onCompartmentChanged" => None,
             _ => {
                 r.insert("success".into(), json!(false));
                 None

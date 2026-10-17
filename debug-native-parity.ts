@@ -136,11 +136,20 @@ if (mode === 'keys') {
         if (r() < 0.3) key('ArrowLeft');
         key('ArrowDown');
         const x = r();
-        if (x < 0.4) key(`Digit${1 + Math.floor(r() * 3)}`);
-        else if (x < 0.6) {
-          key('ArrowDown');
+        if (x < 0.3) key(`Digit${1 + Math.floor(r() * 3)}`);
+        else if (x < 0.45) {
+          key('Space');
           key('Digit2');
-        } else if (x < 0.8) key('Enter');
+        } else if (x < 0.6) {
+          // 反白往下（可能跨頁）、往上，再選反白
+          for (let d = Math.floor(r() * 12); d > 0; d--) key('ArrowDown');
+          if (r() < 0.5) key('ArrowUp');
+          key('Enter');
+        } else if (x < 0.7) {
+          key('ArrowUp'); // 從第一個往上＝循環到最後一個
+          key('PageUp');
+          key('Enter');
+        } else if (x < 0.85) key('Enter');
         else key('Escape');
         key('End');
       }
@@ -174,7 +183,9 @@ if (mode === 'keys') {
     const f = line.split('\t');
     if (f[0] === 'k') {
       const st = eng.onKey({ code: f[1]!, key: f[2] || undefined, timestampMs: 0 });
-      const m = st.menu ? `${st.menu.items.join('|')}@${st.menu.page}/${st.menu.pages}` : '';
+      const m = st.menu
+        ? `${st.menu.items.join('|')}@${st.menu.page}/${st.menu.pages}#${st.menu.cursor}`
+        : '';
       out.push(
         `${st.composition}\t${st.lastLegal}\t${st.cursor}\t${st.pending ?? ''}\t${m}\t${st.text ?? ''}`,
       );

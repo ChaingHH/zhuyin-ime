@@ -278,6 +278,8 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
   - 回應：`PIME_MSG|<client_id>|<JSON>`
   - 方法：`init`、`onActivate`、`filterKeyDown`／`onKeyDown` 等；回應帶 `compositionString`、`commitString`、`candidateList`。
   - 方法與回應欄位的完整清單在 `python\textService.py`（基底類別）。每則回應都要帶 `success`、`seqNum`；按鍵方法另帶 `return`。
+- **哪些回應能動組字**（讀 `PIMETextService/PIMEClient.cpp`，`v2.0.0-beta`）：只有 `onKeyDown`、`onKeyUp` 把 edit session 傳給 `handleRpcResponse`，其他方法（`onCommand`、`onMenu`、`filterKeyDown`、`onActivate`…）都是空指標。`updateStatus` 裡的 `updateMessageWindow` 在檢查 session 之前執行，沒在組字時會呼叫 `session->context()`：**這些方法的回應帶 `showMessage` 會讓宿主程式當掉**。`commitString`／`compositionString`／候選視窗則是沒有 session 就直接忽略。2026-10-17 使用者點「注／英」圖示閃退就是這個原因（舊版在 `onCommand` 回 `showMessage`），`debug-pime.ts` 的行為檢查現在會擋。
+- **log**：PIMELauncher 背景模式把 log 寫到 sink（`tracing_subscriber` 的 `std::io::sink`），`%LOCALAPPDATA%\PIME\Log\PIMELauncher.log` 是空的。`PIMELauncher.exe /console` 才會顯示 log 和後端的 stderr；`/quit` 會通知所有執行中的啟動器結束。
 - **後端怎麼被找到**（讀 `PIMELauncher.exe`、`PIMETextService.dll` 裡的字串推得）：兩者都讀 `backends.json`，再掃每個後端 `<workingDir>\input_methods\*\ime.json` 的 `guid`。啟動器靠它把 TSF 送來的 GUID 對到後端行程；DLL 在 `regsvr32` 時靠它向 Windows 註冊輸入法。所以加一個輸入法＝放檔案＋改 `backends.json`＋重新 `regsvr32`。
 - **內附執行環境**：
   - Python 3（`python\python3`）：新酷音等
@@ -379,8 +381,9 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 | `onKeyDown` | 虛擬鍵碼轉成 `KeyboardEvent.code`，`charCode` 當 `KeyboardEvent.key`（標點靠它），交給 `ImeEngine.on_key`。Enter（選字視窗沒開）＝`commit(0)` |
 | 單按 Shift | `filterKeyDown` 記下「按了 Shift、之後沒按別的鍵」，`filterKeyUp` 回 true，`onKeyUp` 切換注音／英文（組字區先送出），並用 `showMessage` 顯示「注」／「英」 |
 | 組字 | `compositionString`＝首選＋游標處的未完成注音；`compositionCursor` 以 UTF-16 計 |
-| 選字視窗 | ↓ 開、數字選、Space／↓↑ 換頁、Esc 關（引擎原本的行為）；`setSelKeys` 設 `123456789`，直排一列 |
-| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`），點它也能切換 |
+| 選字視窗 | 微軟注音鍵位（2026-10-17 改，TS／Rust 同步）：↓ 開、↓↑ 移反白（跨頁、循環）、空白／PageDown 下一頁、PageUp 上一頁、Enter 選反白、數字選、Esc 關。反白送 `candidateCursor`；`setSelKeys` 設 `123456789`，直排一列 |
+| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`）。左鍵＝`onCommand` id 1，只換模式（組字中不換）；右鍵＝`onMenu` 回傳選單（切換中／英、只用左 Shift），選了再送 `onCommand`（type 2） |
+| 設定 | `%APPDATA%\PIME\zhuyin\config.json`：`shiftToggle`（`both`／`left`，右 Shift 用掃描碼 0x36 判斷）、`idleSecs`、`l3`；每次 `onActivate` 重讀 |
 | `onCompositionTerminated` | 清空引擎、不學習。已顯示的組字留在文件裡 |
 | X2 | 每次送出後存 `%APPDATA%\PIME\zhuyin\adapter.json`（先寫暫存檔再改名）。檔案讀不懂時，這次不學習、不覆寫原檔 |
 | 出錯 | 單則訊息 panic 時回 `{"success":false}`、清空組字，後端不結束 |

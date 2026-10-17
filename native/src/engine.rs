@@ -31,6 +31,8 @@ pub struct MenuView {
     pub items: Vec<String>,
     pub page: usize,
     pub pages: usize,
+    /// 反白的候選在本頁的位置（Enter 選它）
+    pub cursor: usize,
 }
 
 pub struct EngineState {
@@ -52,6 +54,8 @@ pub enum Mode {
 struct Menu {
     items: Vec<FixedSpan>,
     page: usize,
+    /// 反白的候選（整份清單的索引）
+    sel: usize,
 }
 
 /// 序列從 a 改成 b：前後相同的部分不動。回傳 a 的詞段在 b 的起點；碰到被換掉的範圍回 None
@@ -206,9 +210,12 @@ impl ImeEngine {
         };
     }
 
+    /// 選字視窗開著時的按鍵（微軟注音）：↓↑ 移反白（跨頁、頭尾循環）、空白／PageDown 下一頁、
+    /// PageUp 上一頁（反白移到該頁第一個）、Enter 選反白、數字選本頁第 n 個、Esc／Backspace 關閉
     fn on_menu_key(&mut self, code: &str) -> EngineState {
         let m = self.menu.as_mut().unwrap();
-        let pages = m.items.len().div_ceil(MENU_PAGE);
+        let n = m.items.len();
+        let pages = n.div_ceil(MENU_PAGE);
         let lo = m.page * MENU_PAGE;
         let page_items = &m.items[lo..(lo + MENU_PAGE).min(m.items.len())];
         let digit = code
@@ -218,13 +225,19 @@ impl ImeEngine {
         if let Some(f) = digit.and_then(|d| page_items.get(d - 1)) {
             let f = f.clone();
             self.select(f);
-        } else if code == "Enter" && !page_items.is_empty() {
-            let f = page_items[0].clone();
+        } else if code == "Enter" {
+            let f = m.items[m.sel].clone();
             self.select(f);
-        } else if code == "ArrowDown" || code == "Space" {
-            m.page = (m.page + 1) % pages;
-        } else if code == "ArrowUp" {
-            m.page = (m.page + pages - 1) % pages;
+        } else if code == "ArrowDown" || code == "ArrowUp" {
+            m.sel = (m.sel + if code == "ArrowDown" { 1 } else { n - 1 }) % n;
+            m.page = m.sel / MENU_PAGE;
+        } else if code == "Space" || code == "PageDown" || code == "PageUp" {
+            m.page = if code == "PageUp" {
+                (m.page + pages - 1) % pages
+            } else {
+                (m.page + 1) % pages
+            };
+            m.sel = m.page * MENU_PAGE;
         } else if code == "Escape" || code == "Backspace" {
             self.menu = None;
         }
@@ -244,7 +257,11 @@ impl ImeEngine {
             "ArrowDown" => {
                 let items = self.menu_items();
                 if !items.is_empty() {
-                    self.menu = Some(Menu { items, page: 0 });
+                    self.menu = Some(Menu {
+                        items,
+                        page: 0,
+                        sel: 0,
+                    });
                 }
             }
             _ => return None,
@@ -270,6 +287,7 @@ impl ImeEngine {
                     .collect(),
                 page: m.page,
                 pages: m.items.len().div_ceil(MENU_PAGE),
+                cursor: m.sel - m.page * MENU_PAGE,
             }),
         }
     }

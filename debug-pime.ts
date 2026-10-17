@@ -8,6 +8,8 @@
 // 注意：新酷音會把打過的詞學進 %APPDATA%\PIME\chewing\chewing.sqlite3。
 import { spawn } from 'node:child_process';
 import { execSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
 import { loadEvalSamples } from './packages/cli/src/runtime.js';
@@ -53,6 +55,7 @@ const keyOf = (code: string): [number, number] => {
     Enter: [0x0d, 0x0d],
     Escape: [0x1b, 0x1b],
     ArrowDown: [0x28, 0],
+    ArrowUp: [0x26, 0],
     ShiftLeft: [0x10, 0],
   };
   const v = t[code];
@@ -63,7 +66,14 @@ const keyOf = (code: string): [number, number] => {
 const t0 = performance.now();
 const child = spawn(be.exe, be.args, {
   cwd: be.cwd,
-  env: { ZHUYIN_ADAPTER: 'off', ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  env: {
+    ZHUYIN_ADAPTER: 'off',
+    // 行為檢查會改設定檔（只用左 Shift），不能碰使用者的 %APPDATA%\PIME\zhuyin\config.json
+    ZHUYIN_CONFIG: join(tmpdir(), `zhuyin-config-${process.pid}.json`),
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+  },
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 child.stderr.on('data', () => {});
@@ -103,8 +113,15 @@ const press = async (
   return { out, last, eaten: !!f['return'] };
 };
 // 單按 Shift：down 放行、up 攔下並在 onKeyUp 切換
-const shiftTap = async (): Promise<Record<string, unknown>> => {
-  const ev = { charCode: 0, keyCode: 0x10, repeatCount: 1, scanCode: 0, isExtended: false };
+// right：右 Shift（掃描碼 0x36）
+const shiftTap = async (right = false): Promise<Record<string, unknown>> => {
+  const ev = {
+    charCode: 0,
+    keyCode: 0x10,
+    repeatCount: 1,
+    scanCode: right ? 0x36 : 0x2a,
+    isExtended: false,
+  };
   keyStates[0x10] = 0x80;
   await call({ method: 'filterKeyDown', ...ev, keyStates });
   keyStates[0x10] = 0;
@@ -145,6 +162,49 @@ async function smoke(): Promise<void> {
   await shiftTap();
   check((await press('KeyA')).eaten, '切回注音後攔下注音鍵');
   await press('Escape');
+
+  // 選字視窗（微軟注音鍵位）：↓ 開、反白在第一個；↓ 移到第二個；Enter 選反白
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  check((await press('ArrowDown')).last['candidateCursor'] === 0, '↓ 開視窗、反白第一個');
+  const down = await press('ArrowDown');
+  check(down.last['candidateCursor'] === 1, '↓ 反白移到第二個');
+  check((await press('ArrowUp')).last['candidateCursor'] === 0, '↑ 反白移回第一個');
+  await press('ArrowDown');
+  const sel = (down.last['candidateList'] as string[])[1]!;
+  check((await press('Enter')).last['compositionString'] === sel, `Enter 選反白的 ${sel}`);
+  await press('Escape');
+
+  // 語言列圖示（左鍵＝onCommand id 1）：PIME 的 DLL 在 onCommand 沒有 edit session，
+  // 回應裡有 showMessage／commitString／compositionString 會讓宿主程式當掉
+  const noSession = (r: Record<string, unknown>, what: string): void =>
+    check(
+      !('showMessage' in r) && !('commitString' in r) && !('compositionString' in r),
+      `${what} 的回應不能有需要 edit session 的欄位：${JSON.stringify(r)}`,
+    );
+  const click = await call({ method: 'onCommand', id: 1, type: 0 });
+  noSession(click, '點圖示');
+  check(!(await press('KeyA')).eaten, '點圖示切到英文');
+  noSession(await call({ method: 'onCommand', id: 1, type: 0 }), '再點圖示');
+  check((await press('KeyA')).eaten, '再點圖示切回注音（組字中）');
+  noSession(await call({ method: 'onCommand', id: 1, type: 0 }), '組字中點圖示');
+  check((await press('KeyA')).eaten, '組字中點圖示不切換');
+  await press('Escape');
+  // 右鍵選單（onMenu 回傳選單陣列；選了之後 onCommand 帶選項 id、type 2）
+  const menuReply = await call({ method: 'onMenu', id: 'windows-mode-icon' });
+  const items = menuReply['return'] as Array<{ id: number; checked?: boolean }>;
+  check(Array.isArray(items) && items.some((i) => i.id === 2), '右鍵選單有「只用左 Shift」');
+  // 只用左 Shift：右 Shift 不切換、左 Shift 照樣切換；再選一次恢復
+  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：只用左 Shift');
+  check(!(await shiftTap(true))['return'], '只用左 Shift 時右 Shift 不切換');
+  check((await press('KeyA')).eaten, '右 Shift 後仍是注音');
+  await press('Escape');
+  await shiftTap();
+  check(!(await press('KeyA')).eaten, '左 Shift 照樣切英文');
+  await shiftTap();
+  await call({ method: 'onCommand', id: 2, type: 2 });
+  await shiftTap(true);
+  check(!(await press('KeyA')).eaten, '恢復後右 Shift 也能切換');
+  await shiftTap();
 }
 
 const init = await call({

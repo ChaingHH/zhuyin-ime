@@ -33,6 +33,8 @@ export interface MenuView {
   items: string[];
   page: number;
   pages: number;
+  /** 反白的候選在本頁的位置（Enter 選它） */
+  cursor: number;
 }
 
 /** 選字視窗每頁幾個（數字鍵 1–9） */
@@ -101,7 +103,8 @@ export class ImeEngine {
   /** 使用者選字固定的詞段（本次組字內有效；解碼硬性遵守） */
   private fixed: FixedSpan[] = [];
   /** 選字視窗：候選與目前頁 */
-  private menu: { items: FixedSpan[]; page: number } | null = null;
+  /** sel：反白的候選（整份清單的索引） */
+  private menu: { items: FixedSpan[]; page: number; sel: number } | null = null;
 
   constructor(
     decoder: Decoder,
@@ -187,16 +190,28 @@ export class ImeEngine {
     this.last = this.comp.sequence.length > 0 ? this.decodeWithAdapter() : [];
   }
 
-  /** 選字視窗開著時的按鍵：數字選字、↓／空白下一頁、↑上一頁、Enter 選第一個、Esc 關閉 */
+  /**
+   * 選字視窗開著時的按鍵（微軟注音，support.microsoft.com/help/5001290）：↓↑ 移反白（跨頁、頭尾循環）、
+   * 空白／PageDown 下一頁、PageUp 上一頁（翻頁時反白移到該頁第一個）、Enter 選反白、數字選本頁第 n 個、
+   * Esc／Backspace 關閉
+   */
   private onMenuKey(code: string): EngineState {
     const m = this.menu!;
-    const pages = Math.ceil(m.items.length / MENU_PAGE);
+    const n = m.items.length;
+    const pages = Math.ceil(n / MENU_PAGE);
     const pageItems = m.items.slice(m.page * MENU_PAGE, (m.page + 1) * MENU_PAGE);
     const digit = /^Digit([1-9])$/.exec(code);
+    const turn = (page: number): void => {
+      m.page = page;
+      m.sel = page * MENU_PAGE;
+    };
     if (digit && pageItems[Number(digit[1]) - 1]) this.select(pageItems[Number(digit[1]) - 1]!);
-    else if (code === 'Enter' && pageItems[0]) this.select(pageItems[0]);
-    else if (code === 'ArrowDown' || code === 'Space') m.page = (m.page + 1) % pages;
-    else if (code === 'ArrowUp') m.page = (m.page + pages - 1) % pages;
+    else if (code === 'Enter') this.select(m.items[m.sel]!);
+    else if (code === 'ArrowDown' || code === 'ArrowUp') {
+      m.sel = (m.sel + (code === 'ArrowDown' ? 1 : n - 1)) % n;
+      m.page = Math.floor(m.sel / MENU_PAGE);
+    } else if (code === 'Space' || code === 'PageDown') turn((m.page + 1) % pages);
+    else if (code === 'PageUp') turn((m.page + pages - 1) % pages);
     else if (code === 'Escape' || code === 'Backspace') this.menu = null;
     return this.state(true);
   }
@@ -211,7 +226,7 @@ export class ImeEngine {
     else if (code === 'End') this.comp.setCursor(n);
     else if (code === 'ArrowDown') {
       const items = this.menuItems();
-      if (items.length > 0) this.menu = { items, page: 0 };
+      if (items.length > 0) this.menu = { items, page: 0, sel: 0 };
     } else return null;
     return this.state(true);
   }
@@ -230,6 +245,7 @@ export class ImeEngine {
             items: m.items.slice(m.page * MENU_PAGE, (m.page + 1) * MENU_PAGE).map((f) => f.word),
             page: m.page,
             pages: Math.ceil(m.items.length / MENU_PAGE),
+            cursor: m.sel - m.page * MENU_PAGE,
           }
         : undefined,
     };
