@@ -23,6 +23,11 @@ export interface Scorer {
 export const BOS = '\u0002';
 /** 與訓練時一致的句尾符。 */
 export const EOS = '\u0003';
+/**
+ * 英文類別符號（私用區字元）：訓練語料（build-big-corpus.ts CORPUS_EN=1）把一串英文詞換成它，
+ * 解碼器把組字區裡的英文原樣 token 當成它來查 LM（詞、字兩個專家都是）。
+ */
+export const EN_CLASS = '';
 
 export interface DecoderOptions {
   /** 詞級權重 */
@@ -128,6 +133,9 @@ const UNK_PENALTY = Math.log(1e-7);
  * 解碼時原樣輸出、自成一詞，詞不能跨過它。
  */
 export const isLiteralToken = (t: string): boolean => !/[ㄅ-ㄯ]/u.test(t);
+/** LM 看到的詞：含拉丁字母的原樣 token（英文）換成 EN_CLASS，其他不變 */
+export const lmToken = (w: string): string =>
+  /[A-Za-z]/.test(w) && isLiteralToken(w) ? EN_CLASS : w;
 
 /** spanCache 標記：此 span 被固定段擋住（不同於「查無詞」，不補 UNK） */
 const BLOCKED: SpanCand[] = [];
@@ -347,7 +355,7 @@ export class Decoder {
           const lpcs = this.lpcBuf;
           const us = this.uBuf;
           for (let i = 0; i < m; i++) {
-            const w = capped[i]!.word;
+            const w = lmToken(capped[i]!.word);
             let lp = this.scorer.wordLogProb(w, w1!, w2!);
             // 破音字單字重罰：破音字幾乎不以單字存在
             if (this.lex.polySingle.has(w) && [...w].length === 1) {
@@ -370,6 +378,8 @@ export class Decoder {
           for (let i = 0; i < m; i++) {
             const ent = capped[i]!;
             const word = ent.word;
+            // LM 上下文（狀態鍵、w2、尾兩字）用 LM 看到的詞；輸出用原字
+            const lw = lmToken(word);
             const wordTerm = a * lpws[i]!;
             const charTerm = gamma * lpcs[i]!;
             const uTerm = us[i]!;
@@ -378,7 +388,7 @@ export class Decoder {
             if (groupPaths[0]!.score + wordTerm + charTerm + uTerm + chTerm < floor) continue;
             // 同組同詞 ⇒ 新狀態（w2, word）與尾兩字都相同：鍵、清單、尾字只算一次。
             // 先算分數，進不了該狀態前 nBest 的路徑不建物件（每鍵上萬條，大多會被剪掉）
-            const key = `${w2}\t${word}`;
+            const key = `${w2}\t${lw}`;
             let list = target.get(key);
             let c1 = '';
             let c2 = '';
@@ -394,7 +404,7 @@ export class Decoder {
               if (c2 === '') {
                 c1 = rep.c1;
                 c2 = rep.c2;
-                for (const ch of word) {
+                for (const ch of lw) {
                   c1 = c2;
                   c2 = ch;
                 }
@@ -402,7 +412,7 @@ export class Decoder {
               const np: PartialPath = {
                 pos: p.pos + len,
                 w1: p.w2,
-                w2: word,
+                w2: lw,
                 c1,
                 c2,
                 score,

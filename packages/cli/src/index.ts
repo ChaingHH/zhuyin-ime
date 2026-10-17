@@ -163,7 +163,9 @@ async function main(): Promise<void> {
       const a = argNum(['-a']);
       const gamma = argNum(['-g']);
       await cmdEval(
-        [path.join(REPO, 'eval', 'colloquial.jsonl'), path.join(REPO, 'eval', 'written.jsonl')],
+        process.argv.includes('--mixed')
+          ? [path.join(REPO, 'eval', 'mixed.jsonl')]
+          : [path.join(REPO, 'eval', 'colloquial.jsonl'), path.join(REPO, 'eval', 'written.jsonl')],
         {
           a,
           gamma,

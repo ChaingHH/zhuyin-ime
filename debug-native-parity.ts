@@ -64,7 +64,8 @@ if (mode === 'keys') {
   const nBest = Number(args[1] ?? 4);
   const ch = args[2] === 'l3' ? new Channel(legal) : undefined;
   const out: string[] = [];
-  for (const s of samples)
+  // 加上中英評測集：原樣英文 token 也要對拍
+  for (const s of [...samples, ...(await loadEvalSamples('eval/mixed.jsonl'))])
     for (const p of dec.decode(s.syllables, {
       nBest,
       alternatives: ch ? s.syllables.map((x) => ch.expand(x)) : undefined,

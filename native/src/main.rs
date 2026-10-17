@@ -200,7 +200,7 @@ fn main() {
     };
     match args.get(1).map(String::as_str) {
         Some("eval") => {
-            for f in ["eval/colloquial.jsonl", "eval/written.jsonl"] {
+            for f in ["eval/colloquial.jsonl", "eval/written.jsonl", "eval/mixed.jsonl"] {
                 let samples = load_samples(f);
                 let ok = samples
                     .iter()
@@ -224,7 +224,8 @@ fn main() {
             let ch = (args.get(4).map(String::as_str) == Some("l3"))
                 .then(|| l3::Channel::new(legal.clone(), Default::default()));
             let mut lines = vec![];
-            for s in eval_samples() {
+            // 加上中英評測集：原樣英文 token 也要對拍
+            for s in eval_samples().into_iter().chain(load_samples("eval/mixed.jsonl")) {
                 let alts: Option<Vec<_>> = ch
                     .as_ref()
                     .map(|c| s.syllables.iter().map(|x| c.expand(x)).collect());
