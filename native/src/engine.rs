@@ -43,7 +43,7 @@ pub struct EngineState {
     pub menu: Option<MenuView>,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum Mode {
     Zhuyin,
     English,

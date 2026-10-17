@@ -1,6 +1,46 @@
 //! 退回式語言模型 lm.bo.bin 的唯讀移植：packages/lm/src/backoff.ts（BackoffLM）
 //! 與 hashtable.ts（雜湊、PerfectTable）。雜湊逐 UTF-16 碼元餵入（JS charCodeAt），結果與 TS 逐位元相同。
 use serde_json::Value;
+use std::os::windows::io::AsRawHandle;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateFileMappingW(f: isize, sa: usize, prot: u32, hi: u32, lo: u32, name: usize) -> isize;
+    fn MapViewOfFile(m: isize, access: u32, hi: u32, lo: u32, n: usize) -> *const u8;
+    fn UnmapViewOfFile(p: *const u8) -> i32;
+    fn CloseHandle(h: isize) -> i32;
+}
+
+/// 唯讀映射整個檔案：頁面算檔案映射（可共用、閒置時 Windows 可以修剪），不算私有記憶體。
+/// drop 時解除映射
+struct Mapping(*const u8);
+
+impl Mapping {
+    fn open(path: &str) -> Result<(Mapping, usize), String> {
+        let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let len = f.metadata().map_err(|e| e.to_string())?.len() as usize;
+        const PAGE_READONLY: u32 = 2;
+        const FILE_MAP_READ: u32 = 4;
+        unsafe {
+            let m = CreateFileMappingW(f.as_raw_handle() as isize, 0, PAGE_READONLY, 0, 0, 0);
+            if m == 0 {
+                return Err(format!("{path}: CreateFileMapping 失敗"));
+            }
+            let p = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
+            CloseHandle(m); // 映射本身由 view 撐著
+            if p.is_null() {
+                return Err(format!("{path}: MapViewOfFile 失敗"));
+            }
+            Ok((Mapping(p), len))
+        }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        unsafe { UnmapViewOfFile(self.0) };
+    }
+}
 
 fn fmix(mut h: u32) -> u32 {
     h ^= h >> 16;
@@ -95,7 +135,8 @@ enum Col {
     U16(&'static [u16]),
 }
 
-/// 最小完美雜湊表（hashtable.ts PerfectTable），陣列直接指進模型檔的 buffer
+/// 最小完美雜湊表（hashtable.ts PerfectTable），陣列直接指進模型檔的映射。
+/// 'static 是假的：只在擁有映射的 BackoffLm 活著時有效，不能拿出 BackoffLm 外
 struct Table {
     seed: u32,
     pilots: &'static [u16],
@@ -156,6 +197,8 @@ impl Expert {
 pub struct BackoffLm {
     word: Expert,
     char: Expert,
+    /// 欄位依宣告順序 drop：表先、映射最後
+    _map: Mapping,
 }
 
 impl BackoffLm {
@@ -174,23 +217,16 @@ impl BackoffLm {
     }
 
     /// BackoffLM.save 的格式：magic、u32 標頭長度、JSON 標頭，之後是 8 位元組對齊的陣列。
-    // ponytail: 整個檔案讀進記憶體後 leak（常駐程序只載入一次）；要省私有記憶體再改 mmap
     pub fn load(path: &str) -> Result<BackoffLm, String> {
-        use std::io::Read;
-        let mut f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-        let len = f.metadata().map_err(|e| e.to_string())?.len() as usize;
-        // 直接讀進 u64 陣列：保證 8 位元組對齊，typed view 才能指進去，也不多一份暫存
-        let words = vec![0u64; len.div_ceil(8)].leak();
-        let buf: &'static mut [u8] =
-            unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, len) };
-        f.read_exact(buf).map_err(|e| e.to_string())?;
+        let (map, len) = Mapping::open(path)?;
+        // 映射起點按頁對齊，檔內陣列 8 位元組對齊，typed view 可以直接指進去
+        let buf: &'static [u8] = unsafe { std::slice::from_raw_parts(map.0, len) };
         if &buf[..8] != b"ZYLMBO01" {
             return Err(format!("{path} 不是退回式模型"));
         }
         let hlen = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
         let h: Value = serde_json::from_slice(&buf[12..12 + hlen]).map_err(|e| e.to_string())?;
         let base = (12 + hlen).div_ceil(8) * 8;
-        let buf: &'static [u8] = buf;
         let view = |b: &Value| -> (*const u8, usize) {
             let off = b[0].as_u64().unwrap() as usize;
             let n = b[1].as_u64().unwrap() as usize;
@@ -238,6 +274,7 @@ impl BackoffLm {
         Ok(BackoffLm {
             word: expert(&h["word"]),
             char: expert(&h["char"]),
+            _map: map,
         })
     }
 }
