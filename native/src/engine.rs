@@ -155,6 +155,11 @@ impl ImeEngine {
             .collect()
     }
 
+    /// 組字區有東西（含打到一半的注音）或選字視窗開著
+    pub fn is_composing(&self) -> bool {
+        !self.comp.is_empty() || self.menu.is_some()
+    }
+
     fn cursor(&self) -> usize {
         self.comp.cursor()
     }

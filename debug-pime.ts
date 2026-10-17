@@ -1,7 +1,10 @@
 // 直接驅動 PIME 後端（模擬 PIMETextService：init → onActivate → 每鍵 filterKeyDown／onKeyDown，
 // 一行一則 `<client>|<json>`，回 `PIME_MSG|<client>|<json>`），量冷啟動、逐鍵來回延遲、準確率、後端記憶體與 CPU。
 // 不經 TSF／視窗，所以不佔鍵盤；數字是「模型＋IPC」，不含 TSF 本身的開銷。
-// npx tsx debug-pime.ts chewing|mcbopomofo [句數上限]
+// npx tsx debug-pime.ts chewing|mcbopomofo|zhuyin [句數上限]
+// zhuyin＝本專案的 Rust 後端（native/target/release/zhuyin-native.exe pime），要設 ZHUYIN_DATA；
+// 學習預設關（ZHUYIN_ADAPTER=off，句準才和 `zhuyin-native eval` 可比），ZHUYIN_L3=0 關 L3。
+// zhuyin 會先跑一小段行為檢查（Shift 切換、標點、Esc、選字視窗），不符就丟例外。
 // 注意：新酷音會把打過的詞學進 %APPDATA%\PIME\chewing\chewing.sqlite3。
 import { spawn } from 'node:child_process';
 import { execSync } from 'node:child_process';
@@ -23,11 +26,17 @@ const BACKENDS = {
     cwd: `${PIME}\\node`,
     guid: '{5340c1d9-706e-4b6b-b022-2e763fa5f674}',
   },
+  zhuyin: {
+    exe: 'native/target/release/zhuyin-native.exe',
+    args: ['pime'],
+    cwd: '.',
+    guid: '{64b60746-4570-4343-a34a-85c12f03a93a}',
+  },
 } as const;
 
 const which = process.argv[2] as keyof typeof BACKENDS;
 const be = BACKENDS[which];
-if (!be) throw new Error('用法：debug-pime.ts chewing|mcbopomofo [句數]');
+if (!be) throw new Error('用法：debug-pime.ts chewing|mcbopomofo|zhuyin [句數]');
 const limit = Number(process.argv[3] ?? Infinity);
 
 // KeyboardEvent.code → [VK, 字元碼]
@@ -42,6 +51,9 @@ const keyOf = (code: string): [number, number] => {
     Period: [0xbe, 0x2e],
     Slash: [0xbf, 0x2f],
     Enter: [0x0d, 0x0d],
+    Escape: [0x1b, 0x1b],
+    ArrowDown: [0x28, 0],
+    ShiftLeft: [0x10, 0],
   };
   const v = t[code];
   if (!v) throw new Error(`無對應鍵：${code}`);
@@ -51,7 +63,7 @@ const keyOf = (code: string): [number, number] => {
 const t0 = performance.now();
 const child = spawn(be.exe, be.args, {
   cwd: be.cwd,
-  env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+  env: { ZHUYIN_ADAPTER: 'off', ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 child.stderr.on('data', () => {});
@@ -72,17 +84,68 @@ const call = (msg: Record<string, unknown>): Promise<Record<string, unknown>> =>
   });
 
 const keyStates = new Array<number>(256).fill(0);
-const key = async (code: string): Promise<string> => {
-  const [keyCode, charCode] = keyOf(code);
+const key = async (code: string): Promise<string> => (await press(code)).out;
+// 一次按鍵（down＋必要時 onKeyDown）；char 覆寫字元碼（Shift+, → '<'）
+const press = async (
+  code: string,
+  char?: string,
+): Promise<{ out: string; last: Record<string, unknown>; eaten: boolean }> => {
+  const [keyCode, cc] = keyOf(code);
+  const charCode = char ? char.charCodeAt(0) : cc;
   const ev = { charCode, keyCode, repeatCount: 1, scanCode: 0, isExtended: false, keyStates };
   const f = await call({ method: 'filterKeyDown', ...ev });
   let out = (f['commitString'] as string | undefined) ?? '';
+  let last = f;
   if (f['return']) {
-    const r = await call({ method: 'onKeyDown', ...ev });
-    out += (r['commitString'] as string | undefined) ?? '';
+    last = await call({ method: 'onKeyDown', ...ev });
+    out += (last['commitString'] as string | undefined) ?? '';
   }
-  return out;
+  return { out, last, eaten: !!f['return'] };
 };
+// 單按 Shift：down 放行、up 攔下並在 onKeyUp 切換
+const shiftTap = async (): Promise<Record<string, unknown>> => {
+  const ev = { charCode: 0, keyCode: 0x10, repeatCount: 1, scanCode: 0, isExtended: false };
+  keyStates[0x10] = 0x80;
+  await call({ method: 'filterKeyDown', ...ev, keyStates });
+  keyStates[0x10] = 0;
+  const f = await call({ method: 'filterKeyUp', ...ev, keyStates });
+  return f['return'] ? call({ method: 'onKeyUp', ...ev, keyStates }) : f;
+};
+const check = (ok: boolean, what: string): void => {
+  if (!ok) throw new Error(`行為檢查失敗：${what}`);
+};
+async function smoke(): Promise<void> {
+  // 標點：組字區空時直接輸出全形
+  check((await press('Comma', '<')).out === '，', 'Shift+, → ，');
+  // Esc 取消組字
+  await press('Digit1');
+  check((await press('Escape')).last['compositionString'] === '', 'Esc 清空組字區');
+  // ↓ 開選字視窗、1 選字、Enter 送出
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c); // ㄋㄧˇ
+  const menu = await press('ArrowDown');
+  check(
+    menu.last['showCandidates'] === true && (menu.last['candidateList'] as string[]).length > 0,
+    '↓ 開選字視窗',
+  );
+  const pick = await press('Digit2');
+  const want = (menu.last['candidateList'] as string[])[1]!;
+  check(
+    pick.last['showCandidates'] === false && pick.last['compositionString'] === want,
+    `2 選第二候選 ${want}`,
+  );
+  check((await press('Enter')).out === want, 'Enter 送出選的字');
+  // 組字中單按 Shift：先送出，再切英文；英文模式放行字母
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  const sw = await shiftTap();
+  check(
+    typeof sw['commitString'] === 'string' && (sw['commitString'] as string).length === 1,
+    'Shift 先送出組字',
+  );
+  check(!(await press('KeyA')).eaten, '英文模式放行字母');
+  await shiftTap();
+  check((await press('KeyA')).eaten, '切回注音後攔下注音鍵');
+  await press('Escape');
+}
 
 const init = await call({
   method: 'init',
@@ -94,6 +157,10 @@ const init = await call({
 });
 await call({ method: 'onActivate', isKeyboardOpen: true });
 const coldMs = performance.now() - t0;
+if (which === 'zhuyin') {
+  await smoke();
+  console.log('[zhuyin] 行為檢查通過');
+}
 
 const samples = [
   ...(await loadEvalSamples('eval/colloquial.jsonl')).map((s) => ({ ...s, set: 'colloquial' })),
@@ -133,7 +200,8 @@ const after = proc();
 child.kill();
 
 const sorted = [...lat].sort((x, y) => x - y);
-const pct = (p: number): string => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!.toFixed(2);
+const pct = (p: number): string =>
+  sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!.toFixed(2);
 const acc = (k: string): string => ((ok[k]![0] / Math.max(1, ok[k]![1])) * 100).toFixed(1);
 console.log(`[${which}] init=${JSON.stringify(init).slice(0, 80)}`);
 console.log(

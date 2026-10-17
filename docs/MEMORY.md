@@ -23,6 +23,7 @@
   - 記憶體（私有）：本專案載入後約 250MB、打字中約 430MB，新酷音 7MB，小麥注音 119MB。
   - 延遲：本專案每鍵 p95／p99 為 14／23ms，新酷音 35／54ms，小麥注音不到 1ms。
 - PIME 的行程模型和本專案規劃的「一個常駐引擎服務所有程式」一致。它的 Node 後端是 v22.14.0，但是 **32 位元**。
+- 2026-10-17：Rust 引擎直接當 PIME 後端（`zhuyin-native pime`）。透過協定打 1500 句，句準確率 76.1／79.4（與引擎本身相同），每鍵 p95 11ms，私有記憶體 61MB。安裝檔已備好、尚未安裝（§6）。
 
 ## 2. 微軟注音怎麼載入（實測）
 
@@ -158,7 +159,7 @@ heap 上限：改動前設 256MB 可把 RSS 壓到約 477MB；改動後再設只
 
 ### Rust 引擎（2026-10-17，`native/`）
 
-`native/` 是引擎的 Rust 移植，涵蓋輸入法行程需要的全部層（PIME 協定除外）：
+`native/` 是引擎的 Rust 移植，涵蓋輸入法行程需要的全部層，加上 PIME 後端協定（`pime.rs`，見 §6）：
 
 | 檔案 | 移植自 | 內容 |
 |---|---|---|
@@ -262,7 +263,7 @@ ZHUYIN_DATA=<data 目錄> ZHUYIN_L3=1 ZHUYIN_CLOCK=1792200000000 ZHUYIN_ADAPTER=
 | 6 | 詞典改成預先編好的二進位（字串表＋索引） | 詞典 | RSS 259 → 220MB，載入 27ms | **已完成**（`lexicon.bin`） |
 | 7 | 熵剪枝 | 大表 | 46MB 時 −0.3／−0.4；25MB 時 −1.3／−3.4 | **已完成**（加權差異版，12M 筆預設） |
 | 8 | 依上下文排序的 trie | 大表 | 有區域性，適合 mmap | 未做，只有要 mmap 時才值得 |
-| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | **引擎完成**（`native/`，私有 60MB，L1–L5＋X2＋引擎，與 TS 逐位元相同；PIME 協定未接，見 §3） |
+| 9 | 引擎改用 Rust 等原生語言 | Node 本身 | 70 → 約 5MB | **完成**（`native/`，私有 61MB，L1–L5＋X2＋引擎，與 TS 逐位元相同；PIME 後端已接，見 §6） |
 
 ## 6. PIME
 
@@ -276,6 +277,8 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
   - 請求：`<client_id>|<JSON>`
   - 回應：`PIME_MSG|<client_id>|<JSON>`
   - 方法：`init`、`onActivate`、`filterKeyDown`／`onKeyDown` 等；回應帶 `compositionString`、`commitString`、`candidateList`。
+  - 方法與回應欄位的完整清單在 `python\textService.py`（基底類別）。每則回應都要帶 `success`、`seqNum`；按鍵方法另帶 `return`。
+- **後端怎麼被找到**（讀 `PIMELauncher.exe`、`PIMETextService.dll` 裡的字串推得）：兩者都讀 `backends.json`，再掃每個後端 `<workingDir>\input_methods\*\ime.json` 的 `guid`。啟動器靠它把 TSF 送來的 GUID 對到後端行程；DLL 在 `regsvr32` 時靠它向 Windows 註冊輸入法。所以加一個輸入法＝放檔案＋改 `backends.json`＋重新 `regsvr32`。
 - **內附執行環境**：
   - Python 3（`python\python3`）：新酷音等
   - Node **v22.14.0 ia32**（32 位元）：小麥注音、小麥族語、小麥他命
@@ -307,9 +310,87 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 - 評測集和本專案的訓練語料同領域（PTT＋維基），本專案的準確率有領域優勢。
 - 評測集裡有少數錯字句（例如「毛盾」），其他輸入法打出正確的「矛盾」反而算錯。
 
-### 接上 PIME 要注意的事
+### 本專案的 PIME 後端（2026-10-17，`native/src/pime.rs`）
 
-1. 照小麥注音的做法，在 `node/input_methods/` 底下加一個輸入法，包裝 `ImeEngine`。
-2. PIME 內附的 Node 是 32 位元，位址空間 2–4GB。本專案載入後約 250MB、打字中約 430–500MB，放得下；閒置 GC 仍建議做，讓常駐時回到約 250MB。
-3. 本專案用到 Node 20 以上的語法（ESM 等）；Node v22.14.0 符合。
-4. 冷啟動約 1 秒，第一次打字前會有這個延遲。之後後端常駐，切換程式不會重新載入。
+沒有照原本的計畫包成 Node 輸入法，而是讓 Rust 執行檔自己當一個 PIME 後端：`zhuyin-native.exe pime` 直接講 stdin/stdout 協定。理由是 Node 本身就要約 70MB，Rust 整個行程只要 61MB。
+
+| 協定 | 做法 |
+|---|---|
+| `filterKeyDown` | 組字中（含選字視窗）全部攔下。沒在組字時只攔注音／聲調／標點鍵（網頁測試台的 `SEND` 去掉編輯鍵）；Ctrl／Alt 組合鍵、空白、Enter、方向鍵交給應用程式。英文模式全部放行 |
+| `onKeyDown` | 虛擬鍵碼轉成 `KeyboardEvent.code`，`charCode` 當 `KeyboardEvent.key`（標點靠它），交給 `ImeEngine.on_key`。Enter（選字視窗沒開）＝`commit(0)` |
+| 單按 Shift | `filterKeyDown` 記下「按了 Shift、之後沒按別的鍵」，`filterKeyUp` 回 true，`onKeyUp` 切換注音／英文（組字區先送出），並用 `showMessage` 顯示「注」／「英」 |
+| 組字 | `compositionString`＝首選＋游標處的未完成注音；`compositionCursor` 以 UTF-16 計 |
+| 選字視窗 | ↓ 開、數字選、Space／↓↑ 換頁、Esc 關（引擎原本的行為）；`setSelKeys` 設 `123456789`，直排一列 |
+| 語言列 | Win8 以上加 `windows-mode-icon` 按鈕（`zh.ico`／`en.ico`），點它也能切換 |
+| `onCompositionTerminated` | 清空引擎、不學習。已顯示的組字留在文件裡 |
+| X2 | 每次送出後存 `%APPDATA%\PIME\zhuyin\adapter.json`（先寫暫存檔再改名）。檔案讀不懂時，這次不學習、不覆寫原檔 |
+| 出錯 | 單則訊息 panic 時回 `{"success":false}`、清空組字，後端不結束 |
+
+限制：
+
+- 所有 client 共用一份組字狀態和中英模式（`pime.rs` 的 `ponytail:` 註記）。別的 client 送按鍵時，前一個 client 未送出的組字會被丟掉。
+- 沒有全形／半形、Caps Lock；Shift+字母照網頁測試台當注音鍵，不是大寫英文。
+- 協定沒有在真的 TSF 下跑過，只用 `debug-pime.ts` 模擬 DLL。裝上後要手動確認：候選視窗、語言列圖示、Shift 切換、`onCommand`、`showMessage`。
+
+#### 協定實測（`debug-pime.ts zhuyin`，1500 句、59,095 鍵）
+
+先跑行為檢查，通過後才打評測句。檢查項目：Shift+, → ，、Esc 清空、↓ 開選字視窗、2 選第二候選、Enter 送出、組字中單按 Shift 先送出再切英文、英文模式放行字母、切回注音。
+
+| 設定 | 句 口語／書面 | 每鍵 p50／p95／p99／max | Enter | 每鍵 CPU | 結束時 WS／私有 | 峰值 WS |
+|---|---|---|---|---|---|---|
+| L3 關、不學習 | **76.1／79.4** | 0.09／10.9／19.8／62ms | 9.1ms | 2.1ms | 64／61MB | 68MB |
+| L3 開、不學習 | 74.9／78.4 | 0.09／15.8／29.1／87ms | 13.2ms | 2.9ms | 65／61MB | 69MB |
+| L3 開、從空的學習檔開始學（安裝後的預設） | 75.1／78.2 | 0.10／16.7／30.1／126ms | 20.0ms | 3.3ms | 81／78MB | 83MB |
+
+- L3 關的句準確率和 `zhuyin-native eval` 完全相同（761／1000、397／500）。協定這一層沒有改變結果。
+- L3 開在乾淨輸入上少 1.0～1.2 點。這是 L3 的代價，它只在打錯字時有用。
+- 學習版的 Enter 較慢：每次送出都寫一次 adapter.json（跑完是 567KB）。私有記憶體多 17MB，是學到的詞與計數。
+- 冷啟動 37–41ms（開行程到 `onActivate` 回來）。
+
+#### 與 PIME 內建、微軟注音比較
+
+| | 本專案（Rust 後端） | PIME 新酷音 | PIME 小麥注音 | 微軟注音 |
+|---|---|---|---|---|
+| 句準確率 口語／書面 | **76.1／79.4**（L3 開 74.9／78.4） | 34.8／45.0 | 44.4／48.4 | 50.9／57.2 |
+| 每鍵延遲 p50／p95／p99 | 0.09／10.9／19.8ms（L3 開 0.09／15.8／29.1） | 5.7／35／54ms | 0.08／0.19／0.29ms | 未測 |
+| 每鍵 CPU | 2.1ms（L3 開 2.9） | 10.2ms | 0.09ms | 未測 |
+| 冷啟動 | 41ms | 81ms | 303ms | 登入時已載入 |
+| 記憶體（私有） | 61MB（WS 64MB）；學習 1500 句後 78MB | 7MB（WS 21MB） | 119MB（WS 102MB） | `ctfmon` 10MB（WS 78MB） |
+
+PIME 三欄的量法相同：直接驅動後端，不含 TSF 開銷。
+
+#### 安裝本專案的後端（**尚未執行**，等使用者核准）
+
+檔案在 `native/pime/`：
+
+| 檔案 | 內容 |
+|---|---|
+| `ime.json` | 名稱「注音 (zhuyin-native)」、GUID `{64b60746-4570-4343-a34a-85c12f03a93a}`、zh-Hant-TW |
+| `icon.ico`、`zh.ico`、`en.ico` | 輸入法圖示、注音／英文模式圖示（16／32／48px） |
+| `install.ps1` | 組資料夾、改 `backends.json`、重新註冊 DLL；`-Stage` 只組資料夾，`-Uninstall` 移除 |
+
+安裝後 PIME 目錄多出這些（`-Stage` 實測過）：
+
+```
+C:\Program Files (x86)\PIME\
+  backends.json        多一筆 {"name":"zhuyin","command":"zhuyin\\zhuyin-native.exe","workingDir":"zhuyin","params":"pime"}
+  zhuyin\zhuyin-native.exe
+  zhuyin\data\models\lm.bo.bin            51.5MB
+  zhuyin\data\processed\lexicon.bin
+  zhuyin\data\processed\syllables.json
+  zhuyin\input_methods\zhuyin\ime.json、icon.ico、zh.ico、en.ico
+```
+
+警告：第 3 步會改 PIME 的 `backends.json`，格式錯了 PIME 的所有輸入法都會失效。腳本會先備份成 `backends.json.bak`；輸出格式已在副本上驗證過。
+
+1. 建置：`cd native && cargo build --release`。
+2. （可選）先組出來看：`powershell -ExecutionPolicy Bypass -File native\pime\install.ps1 -Stage <暫存目錄> -Data <data 目錄>`。
+3. 用**系統管理員**的 PowerShell 執行：`powershell -ExecutionPolicy Bypass -File native\pime\install.ps1 -Data C:\Users\q2927\Desktop\vscode\type\data`。腳本會：
+   - 備份 `backends.json`，再加一筆 `zhuyin`（不含 BOM 的 UTF-8）。
+   - 把上面的檔案複製到 `PIME\zhuyin\`。
+   - 對 x64、x86 的 `PIMETextService.dll` 執行 `regsvr32 /s`。
+4. 登出再登入，或結束 `PIMELauncher.exe` 後用**一般權限**重新啟動它。啟動器應該只在啟動時讀 `backends.json`（推論，沒查證）。
+5. 到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」加入「注音 (zhuyin-native)」。
+6. 移除：系統管理員 PowerShell 執行 `install.ps1 -Uninstall`。順序是先 `regsvr32 /u`（趁後端還在），再刪檔、改 `backends.json`，最後重新 `regsvr32` 其他輸入法。
+
+授權：`lexicon.bin` 來自萌典（要標出處）與 libchewing（LGPL-2.1）。只在本機安裝不算散布；要散布安裝包時，照 CLAUDE.md「Data licensing constraints」附上授權與出處。
