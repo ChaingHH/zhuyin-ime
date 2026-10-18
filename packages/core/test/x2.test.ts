@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { UserAdapter } from '../src/index.js';
+import { UserAdapter, X2_LIMITS } from '../src/index.js';
 
 const T0 = 1_700_000_000_000;
 
@@ -67,8 +67,30 @@ describe('X2 UserAdapter', () => {
     const a = new UserAdapter();
     a.recordSelection(['ㄉㄜ˙'], '的', T0);
     a.setUserPhrase('本機', ['ㄅㄣˇ', 'ㄐㄧ']);
-    const b = UserAdapter.fromJSON(JSON.parse(JSON.stringify(a.toJSON())));
+    const b = UserAdapter.fromJSON(JSON.parse(JSON.stringify(a.toJSON())), undefined, T0);
     expect(b.modifierFor(['ㄉㄜ˙'], '的', T0)).toBe(a.modifierFor(['ㄉㄜ˙'], '的', T0));
     expect(b.phrases.get('本機')?.manual).toBe(true);
+  });
+
+  it('有上限：衰減完的刪掉、超過上限刪最弱的、手動造詞不因衰減消失', () => {
+    const a = new UserAdapter();
+    const day = 86_400_000;
+    a.recordSelection(['ㄅㄚ'], '巴', T0);
+    for (let i = 0; i < 5; i++) a.recordSelection(['ㄇㄚ'], '媽', T0 + 90 * day);
+    a.setUserPhrase('本機', ['ㄅㄣˇ', 'ㄐㄧ']);
+    a.mineWord('降息', ['ㄐㄧㄤˋ', 'ㄒㄧˊ'], T0);
+    a.compact(T0 + 100 * day);
+    // 巴：次數 1、100 天 → 衰減到 0.007，刪；媽：5 次、10 天前 → 留；挖詞 100 天前 1 次 → 刪
+    expect(a.modifierFor(['ㄅㄚ'], '巴', T0 + 100 * day)).toBe(0);
+    expect(a.modifierFor(['ㄇㄚ'], '媽', T0 + 100 * day)).toBeGreaterThan(0);
+    expect(a.phrases.has('降息')).toBe(false);
+    expect(a.phrases.get('本機')?.manual).toBe(true);
+    // 超過上限：只留最強的 maxSeq 筆
+    const b = new UserAdapter();
+    for (let i = 0; i <= X2_LIMITS.maxSeq; i++) b.recordSelection([`k${i}`], 'w', T0 + i);
+    b.compact(T0 + X2_LIMITS.maxSeq);
+    const seqs = Object.keys(b.toJSON().bySeq);
+    expect(seqs.length).toBe(X2_LIMITS.maxSeq);
+    expect(seqs[0]).toBe('k1');
   });
 });

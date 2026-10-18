@@ -1,5 +1,5 @@
 // Rust 引擎（native/）與 TS 的對拍：同樣輸入、輸出格式與 native/src/main.rs 相同，兩邊的檔案應完全相同。
-// 資料目錄：ZHUYIN_DATA（同 Rust）；ZHUYIN_A＝詞級權重（預設 1）。
+// 資料目錄：ZHUYIN_DATA（同 Rust）；ZHUYIN_A＝詞級權重（預設 1）。core 直接用 src（engine.ts 的 @zhuyin/core 走 dist，只用到不常改的 L1/L2）。
 //   npx tsx debug-native-parity.ts keys <out>                    L1/L2：評測句按鍵 → 音節序列
 //   npx tsx debug-native-parity.ts dump <out> [nBest] [l3]       L4/L5（＋L3）N-best
 //   npx tsx debug-native-parity.ts l3 <noisy.txt> <out> <s>      L3：同 debug-l3.ts 的乾淨＋有錯輸入，印句準
@@ -16,7 +16,7 @@ import {
   UserAdapter,
   syllableToKeyCodes,
   type UserAdapterData,
-} from '@zhuyin/core';
+} from './packages/core/src/index.js';
 import { BackoffLM } from '@zhuyin/lm';
 import { ImeEngine } from './packages/cli/src/engine.js';
 import { injectNoise, rng } from './packages/cli/src/noise.js';
@@ -191,7 +191,17 @@ if (mode === 'keys') {
       );
     } else if (f[0] === 'c') out.push(`C\t${eng.commit(Number(f[1]))}`);
     else if (f[0] === 'm') out.push(`M\t${eng.toggleMode()}`);
-    else throw new Error(`事件格式錯誤：${line}`);
+    else if (f[0] === 't') Date.now = () => Number(f[1]);
+    else if (f[0] === 's') {
+      // 學習檔大小與項目數（同 zhuyin-native replay 的 `s`）
+      const d = adapter.toJSON();
+      const seq = Object.values(d.bySeq).reduce((n, m) => n + Object.keys(m).length, 0);
+      const manual = d.phrases.filter((p) => p.manual === true).length;
+      const bytes = Buffer.byteLength(JSON.stringify(d));
+      out.push(
+        `S\t${bytes}\t${seq}\t${Object.keys(d.global).length}\t${manual}\t${d.phrases.length - manual}`,
+      );
+    } else throw new Error(`事件格式錯誤：${line}`);
   }
   writeFileSync(args[1]!, out.join('\n'));
   if (args[2]) writeFileSync(args[2], JSON.stringify(adapter.toJSON()));

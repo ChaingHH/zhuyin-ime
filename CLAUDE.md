@@ -91,7 +91,7 @@ Key design points (from comments in `decode.ts`):
 - N-best uses list-Viterbi (K partial paths per two-word state), not "last two words differ".
 - `core` depends on the LM only through the structural `Scorer` interface; baselines in `runtime.ts` swap in alternate `Scorer`s.
 - L3 (`core/src/l3.ts` `Channel`): expands each observed syllable into legal intended syllables with a cost (adjacent key, extra/missed key, adjacent tone key, fuzzy pairs ㄣㄥ/ㄓㄗ/…, wrong tone; ㄣ/ㄥ has its own lower cost `nasal` = 3.5 so ㄧㄣ ㄍㄞ → 應該, other fuzzy pairs 7.5); one edit per syllable, at most one corrected syllable per word. Decoder adds `chTerm` = −cost and records `reading`. Single-syllable corrections only apply when the observed syllable has no lexicon entries (`altSingleOnlyIfEmpty`): enabling them recovers ~7 more points on noisy input but makes decoding 5–8× slower. Evaluated only on synthetic errors (`cli/src/noise.ts`, shares the adjacency/fuzzy tables with L3 → optimistic); there is no real typing log. X2 learns from `breakdown.reading`, not the observed (typo) syllables.
-- `UserAdapter` (X2) state persists to `data/user/adapter.json`; user phrases are also added live via `decoder.addEntry`.
+- `UserAdapter` (X2) state persists to `data/user/adapter.json`; user phrases are also added live via `decoder.addEntry`. Bounded by `X2_LIMITS` (10k seq records, 10k global, 5k mined, 20k manual hard cap; decayed count < 0.025 is dropped; `compact` on load and every 2,000 new entries): the file plateaus near 2MB, ~17ms per save (docs/MEMORY.md「X2 學習資料的成長」, `debug-x2-growth.ts`). `x2.rs` must stay byte-identical (`debug-native-parity.ts replay`).
 
 ## Data licensing constraints
 

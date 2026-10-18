@@ -18,6 +18,9 @@ pub struct Lexicon {
     pub poly_set: HashSet<String>,
     /// 疊加層：基本詞典沒有的詞（編號接在基本詞後面）
     added: Vec<String>,
+    /// 加詞時查詞編號用：基本詞依字串排序的編號（第一次加詞才建，約 1MB）、疊加層的詞 → 編號
+    by_text: Vec<u32>,
+    added_id: HashMap<String, u32>,
     /// 已有讀音的新詞（鍵編號 → 詞編號）、全新讀音（音節編號 → 詞編號）
     extra_by_key: HashMap<usize, Vec<u32>>,
     extra_new: HashMap<Vec<u16>, Vec<u32>>,
@@ -110,6 +113,8 @@ impl Lexicon {
             poly,
             poly_set,
             added: vec![],
+            by_text: vec![],
+            added_id: HashMap::new(),
             extra_by_key: HashMap::new(),
             extra_new: HashMap::new(),
         })
@@ -207,10 +212,17 @@ impl Lexicon {
         found
     }
 
-    /// 詞字串的編號（基本詞典或疊加層）
-    // ponytail: 線性掃描約 1ms，只在加詞時用；加詞變頻繁再建字串索引
-    fn find_word(&self, word: &str) -> Option<u32> {
-        (0..self.word_count() as u32).find(|&i| self.word(i) == word)
+    /// 詞字串的編號（基本詞典或疊加層）。線性掃描每次約 1ms，載入幾千個使用者詞要好幾秒，所以建排序索引
+    fn find_word(&mut self, word: &str) -> Option<u32> {
+        if self.by_text.is_empty() {
+            let mut ids: Vec<u32> = (0..self.base_count() as u32).collect();
+            ids.sort_unstable_by(|&a, &b| self.word(a).cmp(self.word(b)));
+            self.by_text = ids;
+        }
+        match self.by_text.binary_search_by(|&i| self.word(i).cmp(word)) {
+            Ok(k) => Some(self.by_text[k]),
+            Err(_) => self.added_id.get(word).copied(),
+        }
     }
 
     /// 執行中新增一個詞（接在該讀音清單最後）。已存在就不動
@@ -226,7 +238,9 @@ impl Lexicon {
         }
         let w = self.find_word(word).unwrap_or_else(|| {
             self.added.push(word.to_string());
-            self.word_count() as u32 - 1
+            let id = self.word_count() as u32 - 1;
+            self.added_id.insert(word.to_string(), id);
+            id
         });
         let ids = self.to_ids(reading).unwrap();
         match self.find_key(&ids) {

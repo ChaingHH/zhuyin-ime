@@ -116,16 +116,27 @@ fn scaled(s: f64) -> l3::ChannelOptions {
     }
 }
 
-/// 重播事件檔：`k\t<code>\t<key>`（按鍵）、`c\t<k>`（送出第 k 候選）、`m`（切換模式）。
+/// 重播事件檔：`k\t<code>\t<key>`（按鍵）、`c\t<k>`（送出第 k 候選）、`m`（切換模式）、
+/// `t\t<ms>`（時鐘）、`s`（量學習檔：大小與項目數；耗時印到 stderr。debug-x2-growth.ts 產生）。
 /// 每個事件輸出一行，格式同 debug-native-parity.ts
 fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
     let mut out = vec![];
-    for line in events.lines() {
+    // `s` 事件之間的每鍵與送出耗時（ms）
+    let (mut keys, mut commits): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let quiet = std::env::var("ZHUYIN_QUIET").is_ok();
+    for line in events.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();
         match f[0] {
             "k" => {
                 let key = f.get(2).filter(|k| !k.is_empty()).copied();
+                let t = Instant::now();
                 let st = eng.on_key(f[1], key);
+                keys.push(ms(t));
+                // ZHUYIN_QUIET：不留每鍵的輸出（長時間模擬量記憶體時，輸出本身會佔上百 MB）
+                if quiet {
+                    continue;
+                }
                 let menu = st.menu.map_or(String::new(), |m| {
                     format!("{}@{}/{}#{}", m.items.join("|"), m.page, m.pages, m.cursor)
                 });
@@ -139,7 +150,45 @@ fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
                     st.text.unwrap_or_default()
                 ));
             }
-            "c" => out.push(format!("C\t{}", eng.commit(f[1].parse().unwrap()))),
+            "c" => {
+                let t = Instant::now();
+                let text = eng.commit(f[1].parse().unwrap());
+                commits.push(ms(t));
+                out.push(format!("C\t{text}"));
+            }
+            // 時鐘（毫秒）
+            "t" => eng.clock = Some(f[1].parse().unwrap()),
+            // 量學習檔：大小與項目數進輸出（對拍），耗時、記憶體印到 stderr
+            "s" => {
+                let a = eng.adapter.as_ref().unwrap();
+                let t = Instant::now();
+                let json = a.to_json();
+                let ser = ms(t);
+                // 同 pime.rs save_adapter：寫暫存檔再改名
+                let tmp = std::env::temp_dir().join("zhuyin-x2-growth.tmp");
+                let t = Instant::now();
+                std::fs::write(&tmp, &json).unwrap();
+                std::fs::rename(&tmp, tmp.with_extension("json")).unwrap();
+                let write = ms(t);
+                let (seq, global, manual, mined) = a.stats();
+                out.push(format!(
+                    "S\t{}\t{seq}\t{global}\t{manual}\t{mined}",
+                    json.len()
+                ));
+                keys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let pct = |p: f64| keys[((keys.len() as f64 * p) as usize).min(keys.len() - 1)];
+                let avg = commits.iter().sum::<f64>() / commits.len().max(1) as f64;
+                eprintln!(
+                    "[x2] {}KB bySeq {seq} global {global} 使用者詞 {manual} 挖詞 {mined} | 序列化 {ser:.1}ms 寫檔 {write:.1}ms | 每鍵 p50 {:.2} p95 {:.2} max {:.1}ms | 送出平均 {avg:.1}ms",
+                    json.len() / 1024,
+                    pct(0.5),
+                    pct(0.95),
+                    keys.last().unwrap()
+                );
+                mem("checkpoint");
+                keys.clear();
+                commits.clear();
+            }
             "m" => out.push(format!("M\t{}", eng.toggle_mode())),
             _ => panic!("事件格式錯誤：{line}"),
         }
@@ -291,21 +340,30 @@ fn main() {
             std::fs::write(&args[3], lines.join("\n")).unwrap();
         }
         Some("replay") => {
+            let clock: Option<f64> = std::env::var("ZHUYIN_CLOCK")
+                .ok()
+                .map(|s| s.parse().unwrap());
             let mut adapter = match std::env::var("ZHUYIN_ADAPTER") {
-                Ok(f) => x2::UserAdapter::from_json(&std::fs::read_to_string(&f).unwrap()).unwrap(),
+                Ok(f) => {
+                    let s = std::fs::read_to_string(&f).unwrap();
+                    match clock {
+                        Some(at) => x2::UserAdapter::from_json_at(&s, at),
+                        None => x2::UserAdapter::from_json(&s),
+                    }
+                    .unwrap()
+                }
                 Err(_) => x2::UserAdapter::new(),
             };
             // 使用者詞條（手動造詞＋歷史挖詞）注入解碼格，同 runtime.ts
             for e in adapter.drain_pending() {
                 dec.add_entry(&e.word, &e.readings);
             }
+            mem("讀學習檔後");
             let mut eng = engine::ImeEngine::new(dec, legal.clone(), Some(adapter));
             if std::env::var("ZHUYIN_L3").is_ok() {
                 eng.channel = Some(l3::Channel::new(legal.clone(), Default::default()));
             }
-            eng.clock = std::env::var("ZHUYIN_CLOCK")
-                .ok()
-                .map(|s| s.parse().unwrap());
+            eng.clock = clock;
             let events = std::fs::read_to_string(&args[2]).unwrap();
             let lines = replay(&mut eng, &events);
             done = lines.len();
