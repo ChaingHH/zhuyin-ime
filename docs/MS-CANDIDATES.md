@@ -26,7 +26,7 @@
 |---|---|---|
 | ↓ 開哪一段 | 游標**後面**那個字開始；游標在組字區最後時是最後一個字 | 相同（`menuStart`＝`min(cursor, n−1)`） |
 | 視窗開著時 ← → | → 和 Tab 把清單展開成多欄表格，← 收回成一欄。**不是**改變選字範圍 | 已做（`pime.rs`，見第 3 節） |
-| 選字後游標 | 游標移到選定那段**後面的下一個字或詞的開頭** | **不同**：游標留在原地，也就是選定那段的前面（`engine.ts`／`engine.rs` 的 `select` 只加固定段、不動游標）。游標在最後時兩者一樣 |
+| 選字後游標 | 游標移到選定那段**後面的下一個字或詞的開頭** | 相同（2026-10-18 改：`select` 之後把游標設到 `pos + len`）。改之前游標留在選定那段的前面 |
 
 仍未確認：PageUp／PageDown（本專案自訂為上一頁／下一頁）、視窗外 Home、End、Backspace、Delete 的細節。
 
@@ -47,12 +47,14 @@
 
 `candPerRow` 的時機：`updateStatus` 最後才套用 `customizeUI`，而 `candPerRow` 要到下一次 `updateCandidates` 才會用上（`PIMETextService.cpp:269`）。所以和 `candidateList` 放在同一則回應時，新欄數要晚一個鍵才看得到。做法：在同一個鍵的 `filterKeyDown` 回應先送 `candPerRow`，`onKeyDown` 回應再帶候選清單。`filterKeyDown` 沒有 edit session，但 `updateUI` 不碰 session，所以安全。`debug-pime.ts` 的格式檢查會擋「`candPerRow` 和 `candidateList` 同一則」。
 
-## 4. 還沒做的（都在引擎裡）
+## 4. 引擎裡的三項（2026-10-18 完成）
 
-`packages/cli/src/engine.ts` 與 `native/src/engine.rs`（`ImeEngine`）要同時改，並用 `debug-native-parity.ts` 對拍。依指示要等 `claude/lexicon-english-cb5560` 併進 master 之後才改：
+`packages/cli/src/engine.ts` 與 `native/src/engine.rs`（`ImeEngine`）同時改，`debug-native-parity.ts` 對拍逐位元組相同。
 
-1. **選字後游標**：`select` 之後把游標設到選定那段的結尾（`pos + len`），也就是下一個字或詞的開頭。
-2. **讀音放在候選清單最後一項**：清單最後加上這段的注音（例如 `ㄋㄧˇ`）。選它時，組字區改成顯示注音本身。這要決定送出時怎麼輸出、X2 怎麼學。
-3. **視窗外 ↑ 直接換字**：不開視窗，把游標後那個字換成下一個候選。
-
-做完後，`debug-pime.ts` 的行為檢查要補這三項。
+1. **選字後游標**：`select` 之後游標設到選定那段的結尾（`pos + len`），也就是下一個字或詞的開頭。
+2. **注音本身是清單最後一項**：清單最後加上游標後那個音節的注音（例如 `ㄧㄢˋ`；原樣字元沒有注音，不加）。
+   - 選了它，那個音節就照打的注音輸出，送出也是注音。
+   - 解碼器（`decode.ts`／`decode.rs` 的固定段處理）：長度 1、詞等於該音節的固定段，照原樣 token 的方式輸出，不查詞典。
+   - 學習：這種段落和原樣字元一樣不學、當詞界（`opaque`），注音不會變成使用者詞，也不記選字。
+3. **視窗外 ↑**：不開視窗，把從游標開始的那個詞換成清單裡的下一個候選。游標不動，連按就在同一處輪換，輪到最後回到第一個。注音本身不參加輪換（微軟注音是否包含它沒有確認）。
+   - 換字的依據是首選路徑在游標處的那個詞。例如「經驗」按一次 ↑ 變成「經|驗」（字一樣，斷詞換了），再按一次變成「晶驗」。

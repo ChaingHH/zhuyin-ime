@@ -495,6 +495,14 @@ impl Decoder {
             out = self.cands(seq, pos, len, alts, usize::MAX, words);
             out.retain(|c| words.name(c.word) == f.word);
         }
+        // 選字清單最後一項「注音本身」：照原樣輸出那個音節（同原樣 token），不查詞典
+        if out.is_empty() && len == 1 && f.word == seq[pos] {
+            out.push(Cand {
+                word: words.intern(&seq[pos]),
+                fix: None,
+                cost: 0.0,
+            });
+        }
         (!out.is_empty()).then_some(out)
     }
 

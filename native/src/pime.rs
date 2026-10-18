@@ -40,6 +40,17 @@ const TABLE_COLS: i64 = 3;
 /// 候選字型：微軟注音用的微軟正黑體（LOGFONT 字型名最多 31 字元，PIMETextService.cpp:258）
 const CAND_FONT: &str = "Microsoft JhengHei UI";
 const CAND_FONT_SIZE: i64 = 14;
+/// 送出後多久沒按鍵才寫 adapter.json（ZHUYIN_SAVE_SECS 可改）。每次 Enter 都整檔重寫要約 17ms
+/// （docs/MEMORY.md「X2 學習資料的成長」），所以只標記有改動，停手後才寫；卸載、結束時一定寫。
+/// ponytail: 後端被直接殺掉（例如登出）會少存最後這幾秒的學習
+fn save_delay() -> Duration {
+    Duration::from_secs_f64(
+        std::env::var("ZHUYIN_SAVE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30.0),
+    )
+}
 const VK_RSHIFT: usize = 0xa1;
 /// 右 Shift 的掃描碼
 const SCAN_RSHIFT: u64 = 0x36;
@@ -199,6 +210,9 @@ pub struct Backend {
     sent_cols: i64,
     /// 候選字型與字級（config.json 的 candFontName／candFontSize）
     font: (String, i64),
+    /// 學習資料有改動、還沒寫檔
+    dirty: bool,
+    save_delay: Duration,
 }
 
 impl Backend {
@@ -218,6 +232,8 @@ impl Backend {
             table: false,
             sent_cols: 1,
             font: (CAND_FONT.into(), CAND_FONT_SIZE),
+            dirty: false,
+            save_delay: save_delay(),
         }
         .with_settings()
     }
@@ -339,7 +355,7 @@ impl Backend {
         if self.eng.is_none() {
             return;
         }
-        self.save_adapter();
+        self.flush();
         self.eng = None;
         unsafe {
             HeapCompact(GetProcessHeap(), 0);
@@ -350,6 +366,14 @@ impl Backend {
 
     fn composing(&self) -> bool {
         self.eng.as_ref().is_some_and(|e| e.is_composing())
+    }
+
+    /// 有改動才寫 adapter.json
+    fn flush(&mut self) {
+        if self.dirty {
+            self.save_adapter();
+            self.dirty = false;
+        }
     }
 
     fn save_adapter(&self) {
@@ -508,16 +532,16 @@ impl Backend {
         };
         if code == "Enter" && eng.state(true).menu.is_none() {
             let text = eng.commit(0);
-            self.save_adapter();
+            self.dirty = true;
             Self::commit_text(r, &text);
             self.clear(r);
             return true;
         }
         let was = eng.is_composing();
         let st = eng.on_key(code, k.key.as_deref());
-        // 英文模式下打空白／標點會整段送出（有學習）→ 存檔
+        // 英文模式下打空白／標點會整段送出（有學習）
         if was && st.text.is_some() {
-            self.save_adapter();
+            self.dirty = true;
         }
         if let Some(t) = &st.text {
             Self::commit_text(r, t);
@@ -534,11 +558,28 @@ impl Backend {
         }
     }
 
-    /// 還要等多久才算閒置；引擎沒載入就不用等
-    fn idle_wait(&self) -> Option<Duration> {
-        self.eng
+    /// 還要等多久才有事做（寫學習檔、閒置卸載）；都沒有就一直等訊息
+    fn next_wait(&self) -> Option<Duration> {
+        let since = self.last_key.elapsed();
+        let save = self.dirty.then(|| self.save_delay.saturating_sub(since));
+        let idle = self
+            .eng
             .as_ref()
-            .map(|_| self.cfg.idle.saturating_sub(self.last_key.elapsed()))
+            .map(|_| self.cfg.idle.saturating_sub(since));
+        match (save, idle) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn on_timeout(&mut self) {
+        let since = self.last_key.elapsed();
+        if since >= self.save_delay {
+            self.flush();
+        }
+        if self.eng.is_some() && since >= self.cfg.idle {
+            self.idle_timeout();
+        }
     }
 
     fn idle_timeout(&mut self) {
@@ -687,14 +728,14 @@ pub fn serve(mut be: Backend) {
     });
     let mut out = std::io::stdout().lock();
     loop {
-        let got = match be.idle_wait() {
+        let got = match be.next_wait() {
             Some(d) => rx.recv_timeout(d),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         let line = match got {
             Ok(l) => l,
             Err(RecvTimeoutError::Timeout) => {
-                be.idle_timeout();
+                be.on_timeout();
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => break,

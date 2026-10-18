@@ -171,7 +171,8 @@ impl ImeEngine {
         self.comp.cursor()
     }
 
-    fn menu_items(&self) -> Vec<FixedSpan> {
+    /// 從游標開始的所有候選詞。with_reading：清單最後加上游標後那個音節的注音本身（微軟注音，同 TS）
+    fn menu_items(&self, with_reading: bool) -> Vec<FixedSpan> {
         let seq = self.comp.sequence();
         let start = self.cursor().min(seq.len() - 1);
         let alts = self.alternatives(seq);
@@ -194,15 +195,53 @@ impl ImeEngine {
         // 照打讀音的詞先列（長詞在前、同長度依詞頻）；L3 更正讀音的詞依代價排在最後
         corrected.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
         exact.extend(corrected.into_iter().map(|(f, _)| f));
+        let syl = &seq[start];
+        if with_reading && !is_literal(syl) {
+            exact.push(FixedSpan {
+                pos: start,
+                len: 1,
+                word: syl.clone(),
+            });
+        }
         exact
     }
 
-    fn select(&mut self, f: FixedSpan) {
+    /// 選定候選並重解碼；move_caret：游標移到這段後面（下一個字或詞的開頭，同微軟注音）
+    fn select(&mut self, f: FixedSpan, move_caret: bool) {
         self.fixed
             .retain(|x| x.pos + x.len <= f.pos || f.pos + f.len <= x.pos);
+        let end = f.pos + f.len;
         self.fixed.push(f);
         self.menu = None;
         self.redecode();
+        if move_caret {
+            self.comp.set_cursor(end);
+        }
+    }
+
+    /// 視窗外按 ↑：不開視窗，把從游標開始的那個詞換成清單裡的下一個候選；游標不動、注音本身不參加（同 TS）
+    fn cycle_candidate(&mut self) {
+        let items = self.menu_items(false);
+        if items.is_empty() {
+            return;
+        }
+        let start = self.cursor().min(self.comp.sequence().len() - 1);
+        let mut cur = None;
+        let mut at = 0;
+        for b in self.last.first().map_or(&[][..], |p| &p.breakdown[..]) {
+            if at == start {
+                cur = Some((at, b.reading.len(), b.word.as_str()));
+                break;
+            }
+            at += b.reading.len();
+        }
+        let i = cur.and_then(|(p, l, w)| {
+            items
+                .iter()
+                .position(|x| x.pos == p && x.len == l && x.word == w)
+        });
+        let next = items[i.map_or(0, |i| (i + 1) % items.len())].clone();
+        self.select(next, false);
     }
 
     fn redecode(&mut self) {
@@ -227,10 +266,10 @@ impl ImeEngine {
             .filter(|d| (1..=9).contains(d));
         if let Some(f) = digit.and_then(|d| page_items.get(d - 1)) {
             let f = f.clone();
-            self.select(f);
+            self.select(f, true);
         } else if code == "Enter" {
             let f = m.items[m.sel].clone();
-            self.select(f);
+            self.select(f, true);
         } else if code == "ArrowDown" || code == "ArrowUp" {
             m.sel = (m.sel + if code == "ArrowDown" { 1 } else { n - 1 }) % n;
             m.page = m.sel / MENU_PAGE;
@@ -257,8 +296,9 @@ impl ImeEngine {
             "ArrowRight" => self.comp.set_cursor(self.cursor() + 1),
             "Home" => self.comp.set_cursor(0),
             "End" => self.comp.set_cursor(n),
+            "ArrowUp" => self.cycle_candidate(),
             "ArrowDown" => {
-                let items = self.menu_items();
+                let items = self.menu_items(true);
                 if !items.is_empty() {
                     self.menu = Some(Menu {
                         items,
@@ -418,9 +458,15 @@ impl ImeEngine {
         let at = self.now();
         if let (Some(adapter), Some(chosen)) = (self.adapter.as_mut().filter(|a| a.enabled), chosen)
         {
+            // 選了注音本身（清單最後一項）的段落：和原樣字元一樣不學，免得注音變成使用者詞（同 TS）
+            let opaque = |b: &crate::decode::WordBreakdown| {
+                b.word == UNK
+                    || is_literal(&b.reading[0])
+                    || (b.reading.len() == 1 && b.word == b.reading[0])
+            };
             // 1) 選字覆寫學習
             for b in &chosen.breakdown {
-                if b.word != UNK && !is_literal(&b.reading[0]) {
+                if !opaque(b) {
                     adapter.record_selection(&b.reading, &b.word, at);
                 }
             }
@@ -448,9 +494,9 @@ impl ImeEngine {
                 let is_picked = picked.contains(&(at_pos, b.word.as_str()));
                 picked_at.push(is_picked);
                 // 空格等原樣字元是詞界：不併進造詞
-                if b.word == UNK || b.word.chars().count() != 1 || is_literal(&b.reading[0]) {
+                if opaque(b) || b.word.chars().count() != 1 {
                     flush(&mut ops, &mut chars, &mut rd, &mut any);
-                    if is_picked && b.word.chars().count() > 1 {
+                    if is_picked && b.word.chars().count() > 1 && !opaque(b) {
                         ops.push((true, b.word.clone(), b.reading.clone()));
                     }
                 } else {
@@ -466,10 +512,7 @@ impl ImeEngine {
             //    左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □（同 TS）
             let bd = &chosen.breakdown;
             let len = |i: usize| bd[i].word.chars().count();
-            let real = |i: Option<usize>| {
-                i.filter(|&i| i < bd.len())
-                    .filter(|&i| bd[i].word != UNK && !is_literal(&bd[i].reading[0]))
-            };
+            let real = |i: Option<usize>| i.filter(|&i| i < bd.len()).filter(|&i| !opaque(&bd[i]));
             let host = |i: Option<usize>| real(i).filter(|&i| len(i) >= 2 && len(i) + 1 <= 4);
             for i in 0..bd.len() {
                 if !picked_at[i]

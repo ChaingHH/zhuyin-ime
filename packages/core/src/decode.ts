@@ -321,6 +321,9 @@ export class Decoder {
                 const all = this.spanCands(sequence, pos, len, callOpts.alternatives, Infinity);
                 capped = all.filter((c) => c.word === f.word);
               }
+              // 選字清單最後一項「注音本身」：照原樣輸出那個音節（同原樣 token），不查詞典
+              if (exact && capped.length === 0 && len === 1 && f.word === sequence[pos])
+                capped = [{ word: f.word, reading: [f.word], cost: 0 }];
               if (capped.length === 0) capped = BLOCKED;
             }
             spanCache.set(ck, capped);

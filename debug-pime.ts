@@ -60,6 +60,8 @@ const keyOf = (code: string): [number, number] => {
     ArrowLeft: [0x25, 0],
     ArrowRight: [0x27, 0],
     Tab: [0x09, 0x09],
+    Home: [0x24, 0],
+    PageUp: [0x21, 0],
     ShiftLeft: [0x10, 0],
   };
   const v = t[code];
@@ -383,6 +385,40 @@ async function smoke(): Promise<void> {
   await press('ArrowDown');
   const sel = (down.last['candidateList'] as string[])[1]!;
   check((await press('Enter')).last['compositionString'] === sel, `Enter 選反白的 ${sel}`);
+  await press('Escape');
+
+  // 清單最後一項是注音本身：從第一頁 PageUp 循環到最後一頁，最後一個就是 ㄋㄧˇ
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  const lastPage = (await press('PageUp')).last['candidateList'] as string[];
+  check(lastPage.at(-1) === 'ㄋㄧˇ', `清單最後一項是注音本身（${lastPage.at(-1)}）`);
+  await press('Escape');
+  await press('Escape');
+  // 選字後游標跳到選定那段後面：ㄋㄧˇ ㄏㄠˇ，Home，↓，1（最長的詞）
+  const niHao = ['KeyS', 'KeyU', 'Digit3', 'KeyC', 'KeyL', 'Digit3'];
+  for (const c of niHao) await press(c);
+  await press('Home');
+  const open = await press('ArrowDown');
+  const first = (open.last['candidateList'] as string[])[0]!;
+  const picked = await press('Digit1');
+  check(
+    picked.last['compositionCursor'] === first.length,
+    `選字後游標在選定那段後面（${String(picked.last['compositionCursor'])} ≠ ${first.length}）`,
+  );
+  await press('Escape');
+  // 視窗外 ↑：不開視窗、游標不動，連按會換掉游標處的詞
+  for (const c of niHao) await press(c);
+  const before = (await press('Home')).last['compositionString'];
+  let changed = false;
+  for (let i = 0; i < 3; i++) {
+    const up = await press('ArrowUp');
+    check(
+      up.last['showCandidates'] === false && up.last['compositionCursor'] === 0,
+      '↑ 不開視窗、游標不動',
+    );
+    changed ||= up.last['compositionString'] !== before;
+  }
+  check(changed, '連按 ↑ 會換掉游標處的詞');
   await press('Escape');
 
   // 表格（微軟注音：→／Tab 展開成表格，← 收回）：filterKeyDown 先送 candPerRow，onKeyDown 再帶清單

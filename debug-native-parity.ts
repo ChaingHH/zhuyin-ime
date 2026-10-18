@@ -161,12 +161,21 @@ if (mode === 'keys') {
           for (let d = Math.floor(r() * 12); d > 0; d--) key('ArrowDown');
           if (r() < 0.5) key('ArrowUp');
           key('Enter');
+        } else if (x < 0.65) {
+          key('ArrowUp'); // 最後一項：注音本身
+          key('Enter');
         } else if (x < 0.7) {
           key('ArrowUp'); // 從第一個往上＝循環到最後一個
           key('PageUp');
           key('Enter');
         } else if (x < 0.85) key('Enter');
         else key('Escape');
+        key('End');
+      }
+      if (r() < 0.03) {
+        // 視窗外 ↑：直接把游標處的詞換成下一個候選（連按輪換）
+        for (let d = Math.floor(r() * 3); d > 0; d--) key('ArrowLeft');
+        for (let d = 1 + Math.floor(r() * 3); d > 0; d--) key('ArrowUp');
         key('End');
       }
       if (j > 0 && r() < 0.02) {

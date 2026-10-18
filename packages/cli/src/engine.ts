@@ -168,9 +168,11 @@ export class ImeEngine {
   }
 
   /**
-   * 從游標開始的所有候選詞（微軟注音的選字視窗）。
+   * 從游標開始的所有候選詞（微軟注音的選字視窗）。withReading：清單最後加上游標後那個音節的注音本身
+   * （微軟注音："IME suggests the Bopomofo reading of what is typed at the last candidate"，
+   * support.microsoft.com/help/5001290；原樣 token 沒有注音，不加）
    */
-  private menuItems(): FixedSpan[] {
+  private menuItems(withReading = true): FixedSpan[] {
     const seq = this.comp.sequence;
     const start = this.menuStart;
     const alts = this.alternatives(seq);
@@ -185,15 +187,46 @@ export class ImeEngine {
     }
     // 照打讀音的詞先列（長詞在前、同長度依詞頻）；L3 更正讀音的詞依代價排在最後
     corrected.sort((x, y) => x.cost - y.cost);
-    return [...exact, ...corrected.map(({ pos, len, word }) => ({ pos, len, word }))];
+    const items = [...exact, ...corrected.map(({ pos, len, word }) => ({ pos, len, word }))];
+    const syl = seq[start]!;
+    if (withReading && !isLiteralToken(syl)) items.push({ pos: start, len: 1, word: syl });
+    return items;
   }
 
-  /** 選定候選：固定該詞段（擠掉與它重疊的舊選擇），重解碼 */
-  private select(f: FixedSpan): void {
+  /**
+   * 選定候選：固定該詞段（擠掉與它重疊的舊選擇），重解碼。
+   * moveCaret：游標移到這段後面，也就是下一個字或詞的開頭（微軟注音，使用者確認 2026-10-18）
+   */
+  private select(f: FixedSpan, moveCaret = true): void {
     this.fixed = this.fixed.filter((x) => x.pos + x.len <= f.pos || f.pos + f.len <= x.pos);
     this.fixed.push(f);
     this.menu = null;
     this.redecode();
+    if (moveCaret) this.comp.setCursor(f.pos + f.len);
+  }
+
+  /**
+   * 視窗外按 ↑：不開視窗，把從游標開始的那個詞換成清單裡的下一個候選（微軟注音："Change to another
+   * candidate without opening the candidate window"）。游標不動，連按就在同一處輪換；注音本身不參加輪換
+   */
+  private cycleCandidate(): void {
+    const items = this.menuItems(false);
+    if (items.length === 0) return;
+    const start = this.menuStart;
+    let cur: FixedSpan | undefined;
+    let at = 0;
+    for (const w of this.last[0] ? alignWords(this.last[0]) : []) {
+      if (at === start) {
+        cur = { pos: at, len: w.seq.length, word: w.word };
+        break;
+      }
+      at += w.seq.length;
+    }
+    const c = cur;
+    const i = c
+      ? items.findIndex((x) => x.pos === c.pos && x.len === c.len && x.word === c.word)
+      : -1;
+    this.select(items[(i + 1) % items.length]!, false);
   }
 
   private redecode(): void {
@@ -226,7 +259,7 @@ export class ImeEngine {
     return this.state(true);
   }
 
-  /** 游標與開視窗：←→ Home End 移游標（以字為單位）、↓ 開選字視窗（從游標後面那個字開始的詞） */
+  /** 游標與開視窗：←→ Home End 移游標（以字為單位）、↓ 開選字視窗（從游標後面那個字開始的詞）、↑ 直接換字 */
   private onNavKey(code: string): EngineState | null {
     const n = this.comp.sequence.length;
     if (n === 0 || this.comp.pendingDisplay !== '') return null;
@@ -237,7 +270,8 @@ export class ImeEngine {
     else if (code === 'ArrowDown') {
       const items = this.menuItems();
       if (items.length > 0) this.menu = { items, page: 0, sel: 0 };
-    } else return null;
+    } else if (code === 'ArrowUp') this.cycleCandidate();
+    else return null;
     return this.state(true);
   }
 
@@ -375,8 +409,11 @@ export class ImeEngine {
       const aligned = alignWords(chosen);
 
       // 1) 選字覆寫學習（含非 top-1 的明示選擇——這是最強的使用者訊號）
+      // 選了注音本身（清單最後一項）的段落：和原樣字元一樣不學，免得注音變成使用者詞
+      const opaque = (w: AlignedWord): boolean =>
+        w.word === UNK || isLiteralToken(w.seq[0]!) || (w.seq.length === 1 && w.word === w.seq[0]);
       for (const w of aligned) {
-        if (w.word !== UNK && !isLiteralToken(w.seq[0]!)) adapter.recordSelection(w.seq, w.word);
+        if (!opaque(w)) adapter.recordSelection(w.seq, w.word);
       }
 
       // 2) 造詞挖掘：連續 ≥2 個單字詞且組合尚未存在 → 合併為新詞
@@ -409,9 +446,9 @@ export class ImeEngine {
         const isPicked = picked.has(`${at}:${w.word}`);
         pickedAt.push(isPicked);
         // 空格等原樣字元是詞界：不併進造詞
-        if (w.word === UNK || [...w.word].length !== 1 || isLiteralToken(w.seq[0]!)) {
+        if (opaque(w) || [...w.word].length !== 1) {
           flush();
-          if (isPicked && [...w.word].length > 1) addUser(w.word, w.seq);
+          if (isPicked && [...w.word].length > 1 && !opaque(w)) addUser(w.word, w.seq);
         } else {
           bufChars += w.word;
           bufSeq.push(...w.seq);
@@ -424,11 +461,7 @@ export class ImeEngine {
       // 4) 選過的單字左右都是多字詞（狀態|欄 把蘭改成欄）：單字自己成不了詞，上面的規則存不到；
       //    併進相鄰的詞存成使用者詞，左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □
       const len = (i: number): number => [...aligned[i]!.word].length;
-      const real = (i: number): boolean =>
-        i >= 0 &&
-        i < aligned.length &&
-        aligned[i]!.word !== UNK &&
-        !isLiteralToken(aligned[i]!.seq[0]!);
+      const real = (i: number): boolean => i >= 0 && i < aligned.length && !opaque(aligned[i]!);
       const host = (i: number): boolean => real(i) && len(i) >= 2 && len(i) + 1 <= 4;
       aligned.forEach((w, i) => {
         if (!pickedAt[i] || !real(i) || len(i) !== 1 || STANDALONE.has(w.word)) return;

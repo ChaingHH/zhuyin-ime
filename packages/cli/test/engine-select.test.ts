@@ -29,9 +29,9 @@ function setup(adapter?: UserAdapter): ImeEngine {
 const key = (e: ImeEngine, code: string) => e.onKey({ code, timestampMs: 0 });
 
 describe('選字視窗', () => {
-  it('游標在最後：↓ 列出最後一個字的候選，數字鍵選定後該詞固定', () => {
+  it('游標在最後：↓ 列出最後一個字的候選（最後一項是注音本身），數字鍵選定後該詞固定', () => {
     const e = setup();
-    expect(key(e, 'ArrowDown').menu?.items).toEqual(['驗', '燕']);
+    expect(key(e, 'ArrowDown').menu?.items).toEqual(['驗', '燕', 'ㄧㄢˋ']);
     const st = key(e, 'Digit2');
     expect(st.menu).toBeUndefined();
     expect(st.composition.endsWith('燕')).toBe(true);
@@ -42,7 +42,9 @@ describe('選字視窗', () => {
     const e = setup();
     expect(key(e, 'ArrowDown').menu?.cursor).toBe(0);
     expect(key(e, 'ArrowDown').menu?.cursor).toBe(1);
+    expect(key(e, 'ArrowDown').menu?.cursor).toBe(2);
     expect(key(e, 'ArrowDown').menu?.cursor).toBe(0);
+    expect(key(e, 'ArrowUp').menu?.cursor).toBe(2);
     expect(key(e, 'ArrowUp').menu?.cursor).toBe(1);
     expect(key(e, 'Enter').composition.endsWith('燕')).toBe(true);
   });
@@ -51,8 +53,47 @@ describe('選字視窗', () => {
     const e = setup();
     expect(key(e, 'ArrowLeft').cursor).toBe(1);
     expect(key(e, 'ArrowLeft').cursor).toBe(0);
-    expect(key(e, 'ArrowDown').menu?.items).toEqual(['經驗', '經', '晶']);
+    expect(key(e, 'ArrowDown').menu?.items).toEqual(['經驗', '經', '晶', 'ㄐㄧㄥ']);
     expect(key(e, 'Digit3').composition.startsWith('晶')).toBe(true);
+  });
+
+  it('游標在中間選字：游標移到選定那段後面（下一個字的開頭），同微軟注音', () => {
+    const e = setup();
+    key(e, 'Home');
+    key(e, 'ArrowDown');
+    const st = key(e, 'Digit3'); // 晶（1 個字）
+    expect(st.composition).toBe('晶驗');
+    expect(st.cursor).toBe(1);
+    key(e, 'Home');
+    key(e, 'ArrowDown');
+    expect(key(e, 'Digit1').cursor).toBe(2); // 經驗（2 個字）→ 游標到最後
+  });
+
+  it('清單最後一項是注音本身：選了就照打的注音輸出，不學成使用者詞', () => {
+    const adapter = new UserAdapter();
+    const e = setup(adapter);
+    key(e, 'ArrowDown');
+    const st = key(e, 'Digit3');
+    expect(st.composition).toBe('經ㄧㄢˋ');
+    expect(e.commit()).toBe('經ㄧㄢˋ');
+    expect([...adapter.phrases.keys()]).toEqual([]);
+    expect(Object.keys(adapter.toJSON().bySeq)).not.toContain('ㄧㄢˋ');
+    typeIn(e);
+    expect(e.getCandidates()[0]!.words.join('')).toBe('經驗');
+  });
+
+  it('視窗外按 ↑：不開視窗，把游標處的詞換成下一個候選；游標不動，連按輪換（不含注音本身）', () => {
+    const e = setup();
+    key(e, 'Home');
+    // 經驗 → 經|驗（字一樣，斷詞換成下一個候選「經」）→ 晶|驗 → 輪回 經驗
+    const a = key(e, 'ArrowUp');
+    expect(a.menu).toBeUndefined();
+    expect(a.cursor).toBe(0);
+    expect(a.composition).toBe('經驗');
+    expect(key(e, 'ArrowUp').composition).toBe('晶驗');
+    const c = key(e, 'ArrowUp');
+    expect(c.composition).toBe('經驗');
+    expect(c.cursor).toBe(0);
   });
 
   it('Esc 關閉不改字；退格退掉固定段所在的音節後，固定段作廢', () => {
@@ -226,7 +267,7 @@ describe('狀態欄：選過的單字黏在多字詞旁', () => {
     const adapter = new UserAdapter();
     const e = make(adapter);
     expect(typeIt(e)).toBe('狀態蘭');
-    expect(key(e, 'ArrowDown').menu?.items).toEqual(['蘭', '欄']);
+    expect(key(e, 'ArrowDown').menu?.items).toEqual(['蘭', '欄', 'ㄌㄢˊ']);
     key(e, 'Digit2');
     expect(e.commit()).toBe('狀態欄');
     expect(adapter.phrases.get('狀態欄')?.readings).toEqual([['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ']]);

@@ -4,7 +4,7 @@
 // ZHUYIN_DATA=<data> npx tsx debug-pime-idle.ts [句數=300] [cold]
 // cold：先用 robocopy /J（不經檔案快取）把模型複製到暫存目錄再跑，近似冷快取的第一次載入。
 import { execSync, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -33,8 +33,18 @@ if (cold) {
 }
 
 const IDLE = 2;
+// 學習檔：送出後停手 1 秒才寫（ZHUYIN_SAVE_SECS），連續打字時不寫
+const adapterFile = join(tmpdir(), `zhuyin-idle-adapter-${process.pid}.json`);
+rmSync(adapterFile, { force: true });
 const child = spawn('native/target/release/zhuyin-native.exe', ['pime'], {
-  env: { ...process.env, ZHUYIN_DATA: data, ZHUYIN_ADAPTER: 'off', ZHUYIN_IDLE_SECS: String(IDLE) },
+  env: {
+    ...process.env,
+    ZHUYIN_DATA: data,
+    ZHUYIN_ADAPTER: adapterFile,
+    ZHUYIN_CONFIG: 'off',
+    ZHUYIN_IDLE_SECS: String(IDLE),
+    ZHUYIN_SAVE_SECS: '1',
+  },
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 const log: string[] = [];
@@ -116,11 +126,13 @@ await call({ method: 'onActivate', isKeyboardOpen: true });
 await sleep(200);
 console.log(`啟用後（還沒載入）：${mem()}`);
 const first = await sentence(0);
+if (existsSync(adapterFile)) throw new Error('Enter 之後馬上寫了學習檔（應該等停手）');
 console.log(`載入：${first}；打完 1 句：${mem()}`);
 for (let i = 1; i < n; i++) await sentence(i);
 console.log(`打完 ${n} 句：${mem()}`);
 await sleep(IDLE * 1000 + 500);
-console.log(`閒置 ${IDLE} 秒卸載後：${mem()}`);
+if (!existsSync(adapterFile)) throw new Error('停手之後沒有寫學習檔');
+console.log(`閒置 ${IDLE} 秒卸載後：${mem()}（學習檔已寫）`);
 const again = await sentence(0);
 console.log(`重新載入（檔案快取熱）：${again}；打完 1 句：${mem()}`);
 const t = performance.now();
@@ -129,3 +141,4 @@ console.log(`停用（最後一個 client）${(performance.now() - t).toFixed(1)
 console.log(log.filter((l) => l.includes('[pime]')).join('\n'));
 child.kill();
 if (tmp) rmSync(tmp, { recursive: true, force: true });
+rmSync(adapterFile, { force: true });
