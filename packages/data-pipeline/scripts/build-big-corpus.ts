@@ -97,8 +97,10 @@ async function collect(
   let chars = 0;
   let leaked = 0;
   let heldout = 0;
-  const held = WITH_EN && name === 'colloquial'
-    ? createWriteStream(path.join(OUT_DIR, 'mixed-heldout.txt'), 'utf8') : null;
+  const held =
+    WITH_EN && name === 'colloquial'
+      ? createWriteStream(path.join(OUT_DIR, 'mixed-heldout.txt'), 'utf8')
+      : null;
   for await (const text of texts) {
     if (++docs % 100000 === 0) console.log(`[${name}] ${docs} 篇 ${(chars / 1e6).toFixed(0)}M 字`);
     const pieces: [string, string][] = WITH_EN

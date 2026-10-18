@@ -517,3 +517,28 @@ C:\Program Files (x86)\PIME\
 
 - 寬門檻收進很多雜訊（唯一齣、已失、慢慢地、聚居地），修好 7 處、弄壞 8 處。
 - 狀態欄在語料（PTT＋維基）裡出現 0 次，挖不到；單打 ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ 還是「壯泰蘭」。狀態列（106 次）、工具列、網址列本來就解得對。要救狀態欄只能另外加人工詞表或別的語料。
+
+### 中英混打（Part B）
+
+做法：
+
+- 語料：`CORPUS_EN=1 build-big-corpus.ts`（只重建 PTT，維基 written.txt 沿用）把一串英文詞換成類別符號 `EN_CLASS`（``），中英之間的空白不算斷句。含英文的片段約每 200 個留一個不進訓練（`mixed-heldout.txt`，12,124 個）。產物 `data/processed/corpus-en/`。
+- LM：`train.ts` 的字級也算 ``；`lm.en.tsv` → `lm.en.bo.bin`（12M 筆，大表 47.3MB），詞典用 Part A 的挖詞版。
+- 解碼器：含拉丁字母的原樣 token 用 `EN_CLASS` 查詞、字兩個專家，LM 上下文也記 `EN_CLASS`，輸出照原字（`decode.ts lmToken`／`decode.rs is_english`）。
+- 評測集 `eval/mixed.jsonl`：從留測片段取 1,000 句（`build-mixed-eval.ts`），一段英文是一個原樣 token。`eval --mixed` 計分。
+- 引擎（TS＋Rust）：切英文不再送出組字區。組字中打的字母、數字併進游標前的英文 token，前面的中文跟著重解碼；英文模式下打空白、標點才整段送出（再輸出該字元）；退格一次退一個字母。`EngineState.cursor` 改成字數（英文 token 照長度算）。
+
+| 模型（同一份挖詞詞典，除基線） | 口語 | 書面 | 中英 |
+|---|---|---|---|
+| 原預設（lm.bo.bin，原詞典） | 76.10 | 79.40 | 76.60 |
+| Part A（lm.mined2.bo.bin） | 76.50 | 79.60 | 76.80 |
+| **Part B（lm.en.bo.bin）** | 76.40 | 79.20 | **80.20** |
+
+（TS `eval`，nBest 28；Rust `zhuyin-native eval` 數字相同，Part A 中英 76.70 是 nBest 4。）
+
+- 原評測集對 Part A：口語 −1 句、書面 −2 句（B 錯 6、B 對 3，多是人名與「的／地」），符號檢定不顯著。中英集淨 +35 句。
+- 任務裡的例子 開心的＋session 還是「開心的session」：語料裡「開心的<英文>」126 次（多是「開心的 XD」）、「開新的<英文>」2 次，單一英文類別學到的就是這樣。要翻過來得讓常見英文詞有自己的 token（詞彙表或雜湊分桶），不在這次範圍。
+- 「打開 Chrome 的設定」這類一般句型兩個模型都對。
+- 記憶體（Rust，`zhuyin-native eval`）：私有 11.2 → 11.4MB、工作集 62.6 → 63.1MB。lm.bo.bin 檔 51.5 → 51.7MB，lexicon.bin 5.87 → 6.15MB。
+- PIME 協定（`debug-pime.ts zhuyin`，預設開 L3）：行為檢查通過（含新的「Shift 不送出、英文併進組字區、空白送出」），1500 句 75.1／78.0，每鍵 p95 21.7ms，private 14MB。
+- 對拍：`lm.en` 下 N-best dump（含中英句）、引擎重播（含切模式＋英文事件）、L3 重播，TS 與 Rust 逐位元組相同。修了一個既有的不一致：模型檔標頭的 `unseen` 由 serde_json 解析時末位和 JS 不同（只有查到 LM 沒有的詞時才會出現），開 `float_roundtrip` 解決。

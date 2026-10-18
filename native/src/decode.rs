@@ -344,7 +344,11 @@ impl Decoder {
                             continue;
                         }
                         // LM 上下文（狀態鍵、w2、尾兩字）用 LM 看到的詞；輸出用原字
-                        let lw = if is_english(words.name(word)) { en } else { word };
+                        let lw = if is_english(words.name(word)) {
+                            en
+                        } else {
+                            word
+                        };
                         let k = key(w2, lw);
                         let mut li = target.index.get(&k).copied();
                         let mut cc: Option<(char, char)> = None;

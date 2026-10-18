@@ -119,6 +119,15 @@ if (mode === 'keys') {
     s.syllables.forEach((syl, j) => {
       if (j > 0 && r() < 0.04) key('Space'); // 組字中的空格（原樣 token）
       if (j > 0 && r() < 0.03) key('Comma', '<'); // 全形標點
+      if (j > 0 && r() < 0.04) {
+        // 中英混打：切英文打一個字（偶爾退一格、偶爾按空白整段送出），切回注音接著打
+        ev.push('m');
+        const word = ['session', 'iPhone', 'OK', 'app', 'line', 'G4'][Math.floor(r() * 6)]!;
+        for (const ch of word) key(/\d/.test(ch) ? `Digit${ch}` : `Key${ch.toUpperCase()}`, ch);
+        if (r() < 0.3) key('Backspace');
+        if (r() < 0.2) key('Space', ' ');
+        ev.push('m');
+      }
       const left = j > 1 && r() < 0.05 ? 1 + Math.floor(r() * 2) : 0;
       for (let i = 0; i < left; i++) key('ArrowLeft'); // 回頭在中間插音節
       if (r() < 0.04) {
@@ -191,8 +200,10 @@ if (mode === 'keys') {
         `${st.composition}\t${st.lastLegal}\t${st.cursor}\t${st.pending ?? ''}\t${m}\t${st.text ?? ''}`,
       );
     } else if (f[0] === 'c') out.push(`C\t${eng.commit(Number(f[1]))}`);
-    else if (f[0] === 'm') out.push(`M\t${eng.toggleMode()}`);
-    else throw new Error(`事件格式錯誤：${line}`);
+    else if (f[0] === 'm') {
+      eng.toggleMode();
+      out.push(`M\t${eng.mode}`);
+    } else throw new Error(`事件格式錯誤：${line}`);
   }
   writeFileSync(args[1]!, out.join('\n'));
   if (args[2]) writeFileSync(args[2], JSON.stringify(adapter.toJSON()));

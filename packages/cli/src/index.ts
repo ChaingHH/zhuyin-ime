@@ -91,9 +91,13 @@ async function main(): Promise<void> {
         for (const token of trimmed.split(/\s+/).filter(Boolean)) {
           if (token === 'ShiftLeft' || token === 'ShiftRight') {
             // 行模式沒有「按住」，單獨一個 Shift 鍵碼就是單按
-            committed += engine.toggleMode();
-            console.log(`  切換為${engine.mode === 'english' ? '英文' : '注音'}：${committed}`);
-          } else if (engine.mode === 'english' && token === 'Backspace') {
+            engine.toggleMode();
+            console.log(`  切換為${engine.mode === 'english' ? '英文' : '注音'}`);
+          } else if (
+            engine.mode === 'english' &&
+            token === 'Backspace' &&
+            engine.syllableSequence.length === 0
+          ) {
             committed = [...committed].slice(0, -1).join('');
             console.log(`  ${token.padEnd(10)} => ${committed}`);
           } else if (token === 'Enter') {

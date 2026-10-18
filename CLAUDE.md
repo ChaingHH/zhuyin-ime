@@ -46,7 +46,8 @@ NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/pr
 - 詞典索引：`core/src/lexicon.ts` `LexiconIndex`（音節編號＋typed array），runtime 快取成 `data/processed/lexicon.bin`（比 lexicon.jsonl 舊就重建），載入 27ms、不解析 JSONL。解碼結果與舊 Map 索引逐位元相同。有設任何 `ZHUYIN_LM_*` 剪枝／量化變數（`LM_ENV_KEYS`）時跳過 `.bin`。
 - `lm.bin`：`npx tsx packages/lm/src/pack.ts [lm.tsv] [lm.bin]`（約 40–70 秒，吃同樣的環境變數，`lmOptionsFromEnv`）把剪枝量化後的模型存成二進位（約 125MB）。載入約 1 秒；表陣列直接 view 到檔案 buffer。重新訓練 lm.tsv 或改預設後要重新打包。
 - 二元／三元表是 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map：載入 tsv 時用開放定址 `HashTable` 累加，量化時預設轉成最小完美雜湊 `PerfectTable`（每鍵 16-bit 指紋＋8-bit 值＋約 4 bit 位移值，沒有探測）。改回 Map 會讓每次 major GC 掃描數千萬物件（實測每句 +700ms 延遲）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
-- `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。
+- `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。`CORPUS_EN=1`：英文詞換成類別符號 `EN_CLASS`（``，`core/src/decode.ts`）、中英之間的空白不斷句，含英文的片段每 200 個留一個到 `mixed-heldout.txt`（不訓練）；第二個參數 0＝只建 PTT。中英評測集 `eval/mixed.jsonl`（`scripts/build-mixed-eval.ts`，`eval --mixed`）。解碼器把含拉丁字母的原樣 token 當 `EN_CLASS` 查 LM（`lmToken`／Rust `is_english`），輸出原字。數字見 docs/MEMORY.md §7。
+- 英文模式（TS `ImeEngine`、Rust `engine.rs`）：切換不送出組字區；組字中打的字母、數字併進游標前的英文 token（`CompositionBuffer.appendEnglish`），前面的中文跟著重解碼；英文模式下空白、標點才整段送出；退格一次退一個字母。`EngineState.cursor` 是字數（英文 token 照長度）。
 - `LM_TOKEN_PENALTY`（預設 14）必須大於高頻單字的 log(freq)，否則訓練斷詞會把詞切成單字。
 - 挖詞：`npx tsx packages/data-pipeline/scripts/mine-words.ts [lm.tsv] [lexicon.jsonl] [mined.jsonl]`（約 3 分鐘）從 lm.tsv 的詞計數挖常用複合詞 → `data/processed/mined.jsonl`（provenance=mined），`npm run data:lexicon` 合併進詞典；之後要重訓 lm.tsv、重建 lm.bo.bin 新詞才有機率。門檻與數字見 docs/MEMORY.md §7。
 - `debug-acc.ts`：一次載入、多組設定的實驗台；dev=偶數句、test=奇數句，另列 N-best oracle。

@@ -275,7 +275,7 @@ impl ImeEngine {
             composition: self.with_pending(self.last.first()),
             last_legal,
             text: None,
-            cursor: self.cursor(),
+            cursor: self.cursor_chars(),
             pending: (!pending.is_empty()).then_some(pending),
             menu: self.menu.as_ref().map(|m| MenuView {
                 items: m
@@ -292,26 +292,36 @@ impl ImeEngine {
         }
     }
 
-    /// 首選文字，打到一半的注音插在游標處（字的索引＝音節索引）
+    /// 游標前的字數：音節一個字，原樣 token（英文）照它的長度
+    fn cursor_chars(&self) -> usize {
+        self.comp.sequence()[..self.cursor()]
+            .iter()
+            .map(|t| if is_literal(t) { t.chars().count() } else { 1 })
+            .sum()
+    }
+
+    /// 首選文字，打到一半的注音插在游標處
     fn with_pending(&self, path: Option<&DecodePath>) -> String {
         let mut chars: Vec<String> = path
             .map_or(String::new(), |p| p.text())
             .chars()
             .map(String::from)
             .collect();
-        chars.insert(self.cursor().min(chars.len()), self.comp.pending_display());
+        chars.insert(
+            self.cursor_chars().min(chars.len()),
+            self.comp.pending_display(),
+        );
         chars.concat()
     }
 
-    /// 切換注音／英文；組字區未送出的內容先送出
-    pub fn toggle_mode(&mut self) -> String {
-        let text = self.commit(0);
+    /// 切換注音／英文。組字區不送出：接著打的英文併進組字區（on_key），後打的字還能改前面的中文；
+    /// 整段在 Enter、或英文模式下打空白／標點時送出
+    pub fn toggle_mode(&mut self) {
         self.mode = if self.mode == Mode::Zhuyin {
             Mode::English
         } else {
             Mode::Zhuyin
         };
-        text
     }
 
     fn direct(text: Option<String>) -> EngineState {
@@ -327,11 +337,28 @@ impl ImeEngine {
 
     /// 一次按鍵。code＝KeyboardEvent.code，key＝KeyboardEvent.key（標點、英文模式用）
     pub fn on_key(&mut self, code: &str, key: Option<&str>) -> EngineState {
-        if self.mode == Mode::English {
-            return Self::direct(key.filter(|k| k.chars().count() == 1).map(String::from));
-        }
         if self.menu.is_some() {
             return self.on_menu_key(code);
+        }
+        if self.mode == Mode::English {
+            let ch = key.filter(|k| k.chars().count() == 1);
+            if self.comp.is_empty() {
+                return Self::direct(ch.map(String::from));
+            }
+            // 組字中打英文：字母、數字併進組字區的英文 token（LM 當 EN_CLASS 看），
+            // 前面的中文跟著重解碼；有打到一半的注音時不收
+            match ch {
+                Some(c) if c.chars().all(|x| x.is_ascii_alphanumeric()) => {
+                    if !self.comp.append_english(c) {
+                        return self.state(true);
+                    }
+                    return self.after_edit(true);
+                }
+                // 空白、標點等其他字元：整段送出，再輸出這個字元
+                Some(c) => return Self::direct(Some(self.commit(0) + c)),
+                // 其他鍵（退格、Delete、方向鍵、↓ 選字、Esc）照注音模式處理
+                None => {}
+            }
         }
         if code == "Escape" {
             self.clear();
@@ -358,6 +385,11 @@ impl ImeEngine {
         } else {
             self.comp.on_key(code)
         };
+        self.after_edit(legal)
+    }
+
+    /// 組字區改過之後：已完成音節序列有變就平移選字、重解碼
+    fn after_edit(&mut self, legal: bool) -> EngineState {
         let seq = self.comp.sequence().to_vec();
         if seq != self.last_seq {
             // 選字跟著平移；落在被改動範圍內的作廢

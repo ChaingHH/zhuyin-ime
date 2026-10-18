@@ -15,7 +15,9 @@ if (!src) throw new Error('用法: build-mixed-eval.ts <mixed-heldout.txt> [N]')
 const N = Number(nArg);
 
 const lexicon = new Map<string, LexiconEntry>();
-for (const line of (await readFile(path.join(PATHS.processed, 'lexicon.jsonl'), 'utf8')).split('\n')) {
+for (const line of (await readFile(path.join(PATHS.processed, 'lexicon.jsonl'), 'utf8')).split(
+  '\n',
+)) {
   if (!line) continue;
   const e = JSON.parse(line) as LexiconEntry;
   // 評測讀音只用原詞典（不含挖出來的詞），和 colloquial/written 一致
