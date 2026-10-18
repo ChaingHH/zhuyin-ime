@@ -2,6 +2,39 @@
 
 把本專案的 Rust 引擎裝成 PIME 的一個輸入法。技術細節與量測見 `docs/MEMORY.md` §6。
 
+## 最簡單：雙擊 install.cmd
+
+1. 在檔案總管打開 `C:\Users\q2927\Desktop\vscode\type\native\pime\`。
+2. 雙擊 **`install.cmd`**。
+   - 它會先建置執行檔（要有 Rust；一般權限）。
+   - 接著 Windows 跳出「使用者帳戶控制」視窗，按「是」。只有安裝這一步用系統管理員權限。
+   - 最後視窗顯示結果，按 Enter 關閉。
+3. **登出再登入。**
+4. 第一次安裝：到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」加入「注音 (zhuyin-native)」。之後更新不用再加。
+
+同一個資料夾的另外兩個：
+
+| 檔案 | 作用 |
+|---|---|
+| `uninstall.cmd` | 移除（用過「只留注音」的話，要先還原，見後面） |
+| `rollback.cmd` | 換回上一版（每次更新前會自動備份上一版） |
+
+它們做的事和下面「步驟」一節的指令完全相同，安全規則也一樣：不停 PIME、被鎖的檔案改名不覆寫、保留上一版。按「否」拒絕權限時，什麼都不會改。
+
+建議同時把 PIME 升到 **v2.0.0-beta3 以上**：上游已修掉「啟動器停掉時讓所有程式當掉」的錯誤（`docs/MS-CANDIDATES.md` §5.4）。
+
+## 給沒有 repo 的人：Setup.exe
+
+要給別人安裝（對方不需要 repo、Rust）時，做一個 `zhuyin-native-setup.exe`：
+
+1. 安裝 [Inno Setup 6](https://jrsoftware.org/isdl.php)。它的安裝程式能不能不用系統管理員權限、只裝給自己，沒有查證；編譯本身（`ISCC.exe`）不需要系統管理員權限。
+2. 雙擊 `native\pime\build-setup.cmd`：建置 → 組出 `native\pime\dist\zhuyin\` → 編出 `native\pime\dist\zhuyin-native-setup.exe`。沒裝 Inno Setup 時只會組好檔案並說明。
+3. 把 `zhuyin-native-setup.exe` 給對方。對方要先裝好 PIME 2.0；執行時會要系統管理員權限，結束時跳出結果，之後登出再登入。
+
+Setup.exe 只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，所以安全規則完全一樣。它在 `C:\ProgramData\zhuyin-native-setup\` 留一份 `install.ps1` 與檔案副本，給「新增或移除程式」裡的解除安裝用。
+
+沒有用 MSI：MSI 的元件模型和修復、回復機制，不適合「改 PIME 的 `backends.json`、執行 `regsvr32`」這種安裝；WiX 也比較重。
+
 ## 會改到什麼
 
 - `C:\Program Files (x86)\PIME\backends.json` 多一筆 `zhuyin` 後端（先備份成 `backends.json.bak`）。
@@ -19,7 +52,7 @@
 - Rust 工具鏈（`cargo`）。
 - 本專案的 `data\models\lm.bo.bin`、`data\processed\lexicon.bin`、`data\processed\syllables.json`。
 
-## 步驟
+## 步驟（手動，等同 install.cmd）
 
 1. 建置執行檔（一般權限）：
 
@@ -48,6 +81,8 @@
 
 ## 更新（改過程式之後重新安裝）
 
+再雙擊一次 `install.cmd`，然後登出再登入。手動的話：
+
 1. 在 `native\` 重新 `cargo build --release`。
 2. 系統管理員 PowerShell 再跑一次第 3 步的安裝指令。
 3. 登出再登入。
@@ -58,7 +93,7 @@
 
 ### 換回上一版
 
-新版有問題時，系統管理員 PowerShell：
+新版有問題時，雙擊 `rollback.cmd`，或用系統管理員 PowerShell：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Rollback
@@ -158,7 +193,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 移除
 
-系統管理員 PowerShell（用過 `-OnlyZhuyin` 的話先 `-RestoreAll`）：
+雙擊 `uninstall.cmd`，或用系統管理員 PowerShell（用過 `-OnlyZhuyin` 的話先 `-RestoreAll`）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Uninstall

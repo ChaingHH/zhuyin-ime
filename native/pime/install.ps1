@@ -5,6 +5,9 @@
 #   .\install.ps1 -Uninstall      移除（需系統管理員；有用過 -OnlyZhuyin 要先 -RestoreAll）
 #   .\install.ps1 -OnlyZhuyin     PIME 只留「注音 (zhuyin-native)」，隱藏新酷音、小麥注音等（第一次會把 backends.json 備份成 backends.json.full）
 #   .\install.ps1 -RestoreAll     用 backends.json.full 還原 PIME 全部輸入法
+#   .\install.ps1 -From <目錄>    用已經組好的 zhuyin\ 資料夾安裝（Setup.exe 用；不需要 repo 與 Rust）
+#   -Log <檔案>                   把輸出寫進記錄檔（install.cmd 提權執行時用，原視窗再顯示出來）
+# 一般使用者請直接雙擊同目錄的 install.cmd／uninstall.cmd／rollback.cmd（docs/PIME-INSTALL.md）
 # 參數：-Pime PIME 安裝目錄、-Data 本專案 data\ 目錄（要有 lm.bo.bin、lexicon.bin、syllables.json）
 #
 # 警告：絕對不要停掉 PIMELauncher.exe（/quit 或結束行程）。PIME 2.0.0-beta 的 PIMETextService.dll 連不上啟動器時，
@@ -18,9 +21,21 @@ param(
   [switch]$Uninstall,
   [switch]$OnlyZhuyin,
   [switch]$RestoreAll,
-  [switch]$Rollback
+  [switch]$Rollback,
+  [string]$From = '',
+  [string]$Log = ''
 )
 $ErrorActionPreference = 'Stop'
+if ($Log) { Start-Transcript -Path $Log -Force | Out-Null }
+function Finish([int]$code = 0) {
+  if ($Log) { Stop-Transcript | Out-Null }
+  exit $code
+}
+# 任何錯誤：印出原因、結束碼 1（install.cmd 依此顯示失敗）
+trap {
+  Write-Host "失敗：$($_.Exception.Message)" -ForegroundColor Red
+  Finish 1
+}
 $name = 'zhuyin'
 $dest = Join-Path $Pime $name
 $prev = Join-Path $Pime "$name.prev"
@@ -30,6 +45,14 @@ $dlls = @((Join-Path $Pime 'x64\PIMETextService.dll'), (Join-Path $Pime 'x86\PIM
 
 # 要放進 zhuyin\ 的檔案：相對路徑 → 來源
 function Source-Files {
+  if ($From) {
+    # 已經組好的資料夾（install.ps1 -Stage 的輸出）：裡面有什麼就裝什麼
+    if (-not (Test-Path (Join-Path $From 'zhuyin-native.exe'))) { throw "$From 裡沒有 zhuyin-native.exe" }
+    $root = (Resolve-Path $From).Path.TrimEnd([char]92)
+    $files = @{}
+    Get-ChildItem $root -Recurse -File | ForEach-Object { $files[$_.FullName.Substring($root.Length + 1)] = $_.FullName }
+    return $files
+  }
   $exe = Join-Path $PSScriptRoot '..\target\release\zhuyin-native.exe'
   if (-not (Test-Path $exe)) { throw "找不到 $exe：先在 native\ 執行 cargo build --release" }
   $files = @{
@@ -81,7 +104,7 @@ function Register-Dlls([string]$flag) {
 if ($Stage) {
   Put-Files (Join-Path $Stage $name) (Source-Files)
   Write-Host "已組出 $(Join-Path $Stage $name)"
-  exit 0
+  Finish
 }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -97,7 +120,7 @@ if ($Rollback) {
   Get-ChildItem $prev -Recurse -File | ForEach-Object { $files[$_.FullName.Substring($prev.Length + 1)] = $_.FullName }
   Put-Files $dest $files
   Write-Host "已換回上一版（$prev）。模型在下次載入時換回；執行檔要重新登入才換回"
-  exit 0
+  Finish
 }
 
 if ($OnlyZhuyin) {
@@ -108,7 +131,7 @@ if ($OnlyZhuyin) {
   Write-Backends ($list | Where-Object { $_.name -eq $name })
   Register-Dlls ''
   Write-Host "PIME 只剩注音 (zhuyin-native)。完整清單在 $full，用 -RestoreAll 還原。請馬上登出再登入"
-  exit 0
+  Finish
 }
 
 if ($RestoreAll) {
@@ -118,7 +141,7 @@ if ($RestoreAll) {
   Remove-Item $full
   Register-Dlls ''
   Write-Host '已還原 PIME 全部輸入法。請馬上登出再登入'
-  exit 0
+  Finish
 }
 
 if ($Uninstall) {
@@ -136,7 +159,7 @@ if ($Uninstall) {
     }
   }
   Write-Host '已移除。請登出再登入'
-  exit 0
+  Finish
 }
 
 $files = Source-Files
@@ -158,3 +181,4 @@ if (-not $installed) {
   Write-Host "已更新 $dest（上一版在 $prev，可用 -Rollback 換回）"
   Write-Host '模型在下次載入時換新（閒置卸載後或切回這個輸入法時）；執行檔要登出再登入才換新'
 }
+Finish
