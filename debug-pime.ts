@@ -57,6 +57,9 @@ const keyOf = (code: string): [number, number] => {
     Escape: [0x1b, 0x1b],
     ArrowDown: [0x28, 0],
     ArrowUp: [0x26, 0],
+    ArrowLeft: [0x25, 0],
+    ArrowRight: [0x27, 0],
+    Tab: [0x09, 0x09],
     ShiftLeft: [0x10, 0],
   };
   const v = t[code];
@@ -216,14 +219,23 @@ function checkReply(method: string, seqNum: number, r: Record<string, unknown>, 
       return (
         typeof v === 'object' &&
         v !== null &&
-        (!('candFontName' in o) || isStr(o['candFontName'])) &&
-        (!('candFontSize' in o) || isInt(o['candFontSize'])) &&
-        (!('candPerRow' in o) || isInt(o['candPerRow'])) &&
+        // 字型名：wcsncpy 進 LOGFONT.lfFaceName（PIMETextService.cpp:258，最多 31 個 UTF-16 碼元）
+        (!('candFontName' in o) ||
+          (isStr(o['candFontName']) &&
+            (o['candFontName'] as string).length > 0 &&
+            (o['candFontName'] as string).length <= 31)) &&
+        (!('candFontSize' in o) ||
+          (isInt(o['candFontSize']) && (o['candFontSize'] as number) > 0)) &&
+        (!('candPerRow' in o) || (isInt(o['candPerRow']) && (o['candPerRow'] as number) >= 1)) &&
         (!('candUseCursor' in o) || isBool(o['candUseCursor']))
       );
     },
-    '{candFontName?: string, candFontSize?: int, candPerRow?: int, candUseCursor?: bool}',
+    '{candFontName?: 1–31 字元, candFontSize?: 正整數, candPerRow?: ≥1, candUseCursor?: bool}',
   );
+  // updateStatus 最後才套用 customizeUI：和 candidateList 同一則回應時，新欄數晚一個鍵才看得到
+  const ui = r['customizeUI'] as Record<string, unknown> | undefined;
+  if (ui && 'candPerRow' in ui && 'candidateList' in r)
+    bad('candPerRow 要在 candidateList 之前的回應送（例如 filterKeyDown），同一則會晚一鍵生效');
 }
 
 const keyStates = new Array<number>(256).fill(0);
@@ -232,7 +244,12 @@ const key = async (code: string): Promise<string> => (await press(code)).out;
 const press = async (
   code: string,
   char?: string,
-): Promise<{ out: string; last: Record<string, unknown>; eaten: boolean }> => {
+): Promise<{
+  out: string;
+  last: Record<string, unknown>;
+  eaten: boolean;
+  filter: Record<string, unknown>;
+}> => {
   const [keyCode, cc] = keyOf(code);
   const charCode = char ? char.charCodeAt(0) : cc;
   const ev = { charCode, keyCode, repeatCount: 1, scanCode: 0, isExtended: false, keyStates };
@@ -243,7 +260,7 @@ const press = async (
     last = await call({ method: 'onKeyDown', ...ev });
     out += (last['commitString'] as string | undefined) ?? '';
   }
-  return { out, last, eaten: !!f['return'] };
+  return { out, last, eaten: !!f['return'], filter: f };
 };
 // 單按 Shift：down 放行、up 攔下並在 onKeyUp 切換
 // right：右 Shift（掃描碼 0x36）
@@ -360,6 +377,25 @@ async function smoke(): Promise<void> {
   await press('ArrowDown');
   const sel = (down.last['candidateList'] as string[])[1]!;
   check((await press('Enter')).last['compositionString'] === sel, `Enter 選反白的 ${sel}`);
+  await press('Escape');
+
+  // 表格（微軟注音：→／Tab 展開成表格，← 收回）：filterKeyDown 先送 candPerRow，onKeyDown 再帶清單
+  const cols = (x: { filter: Record<string, unknown> }): unknown =>
+    (x.filter['customizeUI'] as Record<string, unknown> | undefined)?.['candPerRow'];
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  const wide = await press('ArrowRight');
+  check(
+    cols(wide) === 3 && wide.last['showCandidates'] === true,
+    '→ 展開成表格（每列 3 個），視窗仍開著',
+  );
+  check(cols(await press('Tab')) === undefined, 'Tab 在表格中不重送欄數');
+  const narrow = await press('ArrowLeft');
+  check(cols(narrow) === 1 && narrow.last['showCandidates'] === true, '← 收回成一欄');
+  await press('Tab');
+  await press('Escape'); // 關視窗
+  check(cols(await press('ArrowDown')) === 1, '視窗關掉後再開，回到一欄');
+  await press('Escape');
   await press('Escape');
 }
 

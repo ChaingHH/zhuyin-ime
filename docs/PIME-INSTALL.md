@@ -103,10 +103,13 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | 選字視窗 | PageUp | 上一頁 |
 | 選字視窗 | Enter | 選反白的候選 |
 | 選字視窗 | 1–9 | 選本頁第 n 個 |
+| 選字視窗 | → 或 Tab | 展開成表格（每列 3 個） |
+| 選字視窗 | ← | 收回成一欄 |
 | 選字視窗 | Esc、Backspace | 關閉視窗，不改字 |
 
 - 選字視窗的鍵位照微軟官方說明（[Microsoft Traditional Chinese IME](https://support.microsoft.com/help/5001290) 的 Bopomofo 選字視窗）：↓ 進入視窗、↓↑ 移動、空白翻頁、數字選、Enter 選反白。
-- 沒做的微軟注音功能：Tab／→ 展開成表格、↑ 不開視窗直接換字、Shift＋數字的聯想詞、全形／半形。
+- 沒做的微軟注音功能：選字後游標跳到下一個字、清單最後一項顯示注音、↑ 不開視窗直接換字、Shift＋數字的聯想詞、全形／半形。前三項等引擎修改（見 `docs/MS-CANDIDATES.md`）。
+- 表格只是把同一頁的 9 個候選排成 3×3；PIME 的視窗一次只能畫一頁，顏色也固定用系統色。
 - 打錯音、ㄣ／ㄥ 等模糊音會自動更正（L3，預設開）。
 
 ## 記憶體
@@ -123,7 +126,9 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 {
   "shiftToggle": "right",
   "idleSecs": 300,
-  "l3": true
+  "l3": true,
+  "candFontName": "Microsoft JhengHei UI",
+  "candFontSize": 14
 }
 ```
 
@@ -132,6 +137,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊。另一邊單按不做事；其他值當 `"both"` |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
+| `candFontName` | `"Microsoft JhengHei UI"` | 選字視窗的字型（1–31 字元的字型名） |
+| `candFontSize` | `14` | 選字視窗的字級（點數，6–72） |
 
 學習檔在同一個目錄的 `adapter.json`。
 

@@ -35,6 +35,11 @@ const ID_MODE: i64 = 1;
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 const ID_SHIFT_BOTH: i64 = 4;
+/// 選字視窗展開成表格時每列幾個（一頁 9 個 → 3×3）。PIME 的視窗一次只畫一頁，表格不會比清單多
+const TABLE_COLS: i64 = 3;
+/// 候選字型：微軟注音用的微軟正黑體（LOGFONT 字型名最多 31 字元，PIMETextService.cpp:258）
+const CAND_FONT: &str = "Microsoft JhengHei UI";
+const CAND_FONT_SIZE: i64 = 14;
 const VK_RSHIFT: usize = 0xa1;
 /// 右 Shift 的掃描碼
 const SCAN_RSHIFT: u64 = 0x36;
@@ -188,6 +193,12 @@ pub struct Backend {
     shift_alone: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"
     shift_toggle: &'static str,
+    /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
+    table: bool,
+    /// DLL 目前的 candPerRow（只在變了才送）
+    sent_cols: i64,
+    /// 候選字型與字級（config.json 的 candFontName／candFontSize）
+    font: (String, i64),
 }
 
 impl Backend {
@@ -204,6 +215,9 @@ impl Backend {
             owner: String::new(),
             shift_alone: false,
             shift_toggle: "both",
+            table: false,
+            sent_cols: 1,
+            font: (CAND_FONT.into(), CAND_FONT_SIZE),
         }
         .with_settings()
     }
@@ -237,6 +251,44 @@ impl Backend {
         }
         if let Some(l3) = s.get("l3").and_then(Value::as_bool) {
             self.cfg.l3 = l3;
+        }
+        self.font = (
+            s.get("candFontName")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty() && n.encode_utf16().count() <= 31)
+                .unwrap_or(CAND_FONT)
+                .into(),
+            s.get("candFontSize")
+                .and_then(Value::as_i64)
+                .filter(|n| (6..=72).contains(n))
+                .unwrap_or(CAND_FONT_SIZE),
+        );
+    }
+
+    fn menu_open(&self) -> bool {
+        self.eng
+            .as_ref()
+            .is_some_and(|e| e.state(true).menu.is_some())
+    }
+
+    /// 表格展開／收回。DLL 的 updateStatus 最後才套用 customizeUI，同一則回應裡的候選清單
+    /// 會用舊的 candPerRow 畫（PIMEClient.cpp updateStatus、PIMETextService.cpp:269）。
+    /// 所以在 filterKeyDown 的回應先送 candPerRow（沒有 edit session 也安全：updateUI 不碰 session），
+    /// 同一個鍵的 onKeyDown 回應再帶候選清單，就會用新的欄數重畫
+    fn table_layout(&mut self, k: &Key, r: &mut Map<String, Value>) {
+        if self.menu_open() {
+            match k.code.as_deref() {
+                Some("ArrowRight" | "Tab") => self.table = true,
+                Some("ArrowLeft") => self.table = false,
+                _ => {}
+            }
+        } else {
+            self.table = false;
+        }
+        let cols = if self.table { TABLE_COLS } else { 1 };
+        if cols != self.sent_cols {
+            self.sent_cols = cols;
+            r.insert("customizeUI".into(), json!({ "candPerRow": cols }));
         }
     }
 
@@ -429,7 +481,7 @@ impl Backend {
         r.insert("showMessage".into(), json!({"message": msg, "duration": 1}));
     }
 
-    fn filter_key_down(&mut self, k: &Key) -> bool {
+    fn filter_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
         if k.vk as usize == VK_SHIFT {
             let side_ok = match self.shift_toggle {
                 "left" => !k.right_shift,
@@ -441,6 +493,7 @@ impl Backend {
         }
         self.shift_alone = false;
         if self.composing() {
+            self.table_layout(k, r);
             return true;
         }
         !self.broken
@@ -519,9 +572,16 @@ impl Backend {
                 self.active.insert(client.to_string());
                 self.read_settings();
                 r.insert("setSelKeys".into(), json!("123456789"));
+                self.table = false;
+                self.sent_cols = 1;
                 r.insert(
                     "customizeUI".into(),
-                    json!({"candPerRow": 1, "candUseCursor": true}),
+                    json!({
+                        "candPerRow": 1,
+                        "candUseCursor": true,
+                        "candFontName": self.font.0,
+                        "candFontSize": self.font.1,
+                    }),
                 );
                 self.mode_button(&mut r, "addButton");
                 None
@@ -534,7 +594,7 @@ impl Backend {
                 self.leave(client);
                 None
             }
-            "filterKeyDown" => Some(self.filter_key_down(&key_of(msg))),
+            "filterKeyDown" => Some(self.filter_key_down(&key_of(msg), &mut r)),
             "onKeyDown" => Some(self.on_key_down(&key_of(msg), &mut r)),
             "filterKeyUp" => {
                 let k = key_of(msg);
