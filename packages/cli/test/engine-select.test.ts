@@ -196,3 +196,64 @@ describe('游標在中間', () => {
     expect(e.syllableSequence).toEqual(['ㄐㄧㄥ', 'ㄧㄢˋ']);
   });
 });
+
+describe('狀態欄：選過的單字黏在多字詞旁', () => {
+  const LEX2: LexiconEntry[] = [
+    { word: '狀態', readings: [['ㄓㄨㄤˋ', 'ㄊㄞˋ']], provenance: ['moedict'] },
+    { word: '蘭', readings: [['ㄌㄢˊ']], provenance: ['moedict'] },
+    { word: '欄', readings: [['ㄌㄢˊ']], provenance: ['moedict'] },
+  ];
+  // 狀態|蘭 −7 勝過 狀態|欄 −8（差 1，比 X2 選字加成 0.55·ln2 大、比 0.55·ln6 小）
+  const LP: Record<string, number> = { 狀態: -2, 蘭: -5, 欄: -6 };
+  const SCORER2 = {
+    wordLogProb: (w: string): number => LP[w] ?? -10,
+    charSequenceLogProb: (): number => 0,
+  };
+  const typeIt = (e: ImeEngine): string => {
+    let comp = '';
+    for (const s of ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'])
+      for (const code of syllableToKeyCodes(s))
+        comp = e.onKey({ code, timestampMs: 0 }).composition;
+    return comp;
+  };
+  const make = (adapter: UserAdapter): ImeEngine => {
+    const decoder = new Decoder(SCORER2);
+    decoder.loadLexicon(LEX2);
+    return new ImeEngine(decoder, ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'], undefined, adapter);
+  };
+
+  it('選一次「欄」送出，下次直接是狀態欄（併進左邊的詞存成使用者詞）', () => {
+    const adapter = new UserAdapter();
+    const e = make(adapter);
+    expect(typeIt(e)).toBe('狀態蘭');
+    expect(key(e, 'ArrowDown').menu?.items).toEqual(['蘭', '欄']);
+    key(e, 'Digit2');
+    expect(e.commit()).toBe('狀態欄');
+    expect(adapter.phrases.get('狀態欄')?.readings).toEqual([['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ']]);
+    expect(typeIt(e)).toBe('狀態欄');
+  });
+
+  it('LM 不認得的使用者詞用拆分分數，不當未知詞：選一次就穩定翻過來', () => {
+    // 未知詞 −31.5＋使用者詞加成 8 = −23.5，輸給 狀態|蘭 −7；拆成 狀態|欄 是 −8，加 8 之後贏
+    const scorer = {
+      wordLogProb: (w: string): number => LP[w] ?? -31.5,
+      charSequenceLogProb: (): number => 0,
+      knowsWord: (w: string): boolean => w in LP,
+    };
+    const decoder = new Decoder(scorer);
+    decoder.loadLexicon(LEX2);
+    const adapter = new UserAdapter();
+    const e = new ImeEngine(decoder, ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'], undefined, adapter);
+    typeIt(e);
+    key(e, 'ArrowDown');
+    key(e, 'Digit2');
+    expect(e.commit()).toBe('狀態欄');
+    expect(typeIt(e)).toBe('狀態欄');
+  });
+
+  it('X2 選字加成以該詞的讀音為鍵：ㄌㄢˊ 選過 5 次「欄」就翻成狀態欄', () => {
+    const adapter = new UserAdapter();
+    for (let i = 0; i < 5; i++) adapter.recordSelection(['ㄌㄢˊ'], '欄');
+    expect(typeIt(make(adapter))).toBe('狀態欄');
+  });
+});

@@ -206,6 +206,11 @@ impl BackoffLm {
         self.word.log_prob(w, w1, w2)
     }
 
+    /// 詞一元表裡有這個詞（TS BackoffLM.knowsWord）
+    pub fn knows_word(&self, w: &str) -> bool {
+        self.word.uni.found(hash1(w), 0) != 0.0
+    }
+
     pub fn char_sequence_log_prob(&self, word: &str, (mut c1, mut c2): (char, char)) -> f64 {
         let mut sum = 0.0;
         for ch in word.chars() {

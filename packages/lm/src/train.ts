@@ -96,7 +96,8 @@ async function main(): Promise<void> {
   const BOS = '\u0002';
   // 句尾符：讓 LM 學到句尾分佈（吧 vs 巴）
   const EOS = '\u0003';
-  const CJK = /[\u3400-\u9FFF]/;
+  // \uE000\uFF1D\u82F1\u6587\u985E\u5225\u7B26\u865F\uFF08EN_CLASS\uFF0C@zhuyin/core\uFF1Blm \u4E0D\u4F9D\u8CF4 core \u6240\u4EE5\u5BEB\u6B7B\uFF09\uFF0C\u5B57\u7D1A\u4E5F\u8981\u7B97\u5B83
+  const CJK = /[\u3400-\u9FFF\uE000]/;
 
   let wordTokens = 0;
   let charTokens = 0;

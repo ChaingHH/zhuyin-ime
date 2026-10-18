@@ -431,6 +431,11 @@ export class LanguageModel {
     return LanguageModel.logProb(this.word, w, w1, w2);
   }
 
+  /** 詞一元表裡有這個詞 */
+  knowsWord(w: string): boolean {
+    return this.word.uni.has(w);
+  }
+
   /** log P_char(c | c1 c2)。 */
   charLogProb(c: string, c1: string, c2: string): number {
     if (this.smoothing === 'kn')

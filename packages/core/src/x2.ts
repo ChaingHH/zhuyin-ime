@@ -9,6 +9,8 @@
  *   本層只做 log-space 相對加成，且有上限。
  * - 必須可整體關閉（kill-switch），關閉時 L5 行為與無此層完全一致
  *   （支援「固定候選字視窗順序」這類肌肉記憶需求）。
+ * - 有上限：一直打字不會讓學習檔無限長大（X2_LIMITS、compact；數字見 docs/MEMORY.md
+ *   「X2 學習資料的成長」）。native/src/x2.rs 是同一份邏輯，兩邊輸出逐位元組相同。
  */
 import type { LexiconEntry } from './index.js';
 
@@ -30,11 +32,37 @@ interface SelectionRecord {
   lastAt: number;
 }
 
+/** 使用者詞條：手動造詞（manual）或挖詞（freq）；lastAt＝最後一次造詞／挖到的時間 */
+export type Phrase = Omit<LexiconEntry, 'freq'> & {
+  manual?: boolean;
+  freq?: number;
+  lastAt?: number;
+};
+
 export interface UserAdapterData {
   bySeq: Record<string, Record<string, SelectionRecord>>;
   global: Record<string, SelectionRecord>;
-  phrases: LexiconEntry[];
+  phrases: Phrase[];
 }
+
+/**
+ * 學習資料的上限。衰減後的次數 = 次數 × 0.5^(天數/14)；整理時先刪衰減到 dropBelow 以下的，
+ * 再從最弱的刪到上限。手動造詞不衰減，只在超過 maxManual 時刪最舊的。
+ */
+export const X2_LIMITS = {
+  /** 讀音×詞 的選字記錄 */
+  maxSeq: 10_000,
+  /** 全域（跨讀音）選字記錄 */
+  maxGlobal: 10_000,
+  /** 挖到的詞 */
+  maxMined: 5_000,
+  /** 手動造詞（選字視窗選過的詞）：硬上限 */
+  maxManual: 20_000,
+  /** 次數 1 約 75 天沒再出現就刪（此時加成已不到 0.01） */
+  dropBelow: 0.025,
+  /** 每新增這麼多項目整理一次（載入時也整理） */
+  compactEvery: 2_000,
+};
 
 const DEFAULTS = {
   enabled: true,
@@ -50,9 +78,13 @@ export class UserAdapter {
   private readonly bySeq = new Map<string, Map<string, SelectionRecord>>();
   private readonly global = new Map<string, SelectionRecord>();
   /** 手動造詞＋挖詞結果（帶讀音，交給 Decoder.addEntry 入格） */
-  readonly phrases = new Map<string, LexiconEntry & { manual?: boolean }>();
+  readonly phrases = new Map<string, Phrase>();
   /** 已注入 decoder 的詞（避免重複 addEntry） */
   private injected = new Set<string>();
+  /** 最近一次看到的時間（recordSelection／載入）；setUserPhrase、mineWord 沒給時間時用它 */
+  private now = 0;
+  /** 上次整理後新增的項目數 */
+  private added = 0;
 
   constructor(opts: UserAdapterOptions = {}) {
     this.opts = { ...DEFAULTS, ...opts };
@@ -69,12 +101,15 @@ export class UserAdapter {
   /** 每次選字／送出 top-1 詞時記錄。seq 為該詞對應的音節序列。 */
   recordSelection(seq: readonly string[], word: string, at: number = Date.now()): void {
     if (!this.opts.enabled) return;
+    this.now = at;
     const key = seq.join(' ');
     let m = this.bySeq.get(key);
     if (!m) {
       m = new Map();
       this.bySeq.set(key, m);
     }
+    if (!m.has(word)) this.added++;
+    if (!this.global.has(word)) this.added++;
     const rec = m.get(word) ?? { count: 0, lastAt: at };
     rec.count++;
     rec.lastAt = at;
@@ -84,6 +119,7 @@ export class UserAdapter {
     g.count++;
     g.lastAt = at;
     this.global.set(word, g);
+    this.maybeCompact();
   }
 
   /**
@@ -121,13 +157,16 @@ export class UserAdapter {
    * 使用者明示造詞（微軟「啟用使用者造詞詞典」項）：
    * 讀音由引擎從送出時的音節補齊。加成最強（仍有界）。
    */
-  setUserPhrase(word: string, readings: readonly string[]): void {
+  setUserPhrase(word: string, readings: readonly string[], at: number = this.now): void {
+    if (!this.phrases.has(word)) this.added++;
     this.phrases.set(word, {
       word,
       readings: [readings.slice()],
       provenance: ['user'],
       manual: true,
+      lastAt: at,
     });
+    this.maybeCompact();
   }
 
   /**
@@ -136,11 +175,13 @@ export class UserAdapter {
    * 首次出現即入格（覆蓋缺口是實測失敗案例的直接修法），
    * 但 freq 記錄出現次數供日後排序；重複出現不重複入格。
    */
-  mineWord(word: string, reading: readonly string[], at: number = Date.now()): boolean {
-    void at;
+  mineWord(word: string, reading: readonly string[], at: number = this.now): boolean {
     const existing = this.phrases.get(word);
     if (existing) {
-      if (!existing.manual) (existing as { freq?: number }).freq = (existing.freq ?? 1) + 1;
+      if (!existing.manual) {
+        existing.freq = (existing.freq ?? 1) + 1;
+        existing.lastAt = at;
+      }
       return false;
     }
     if (word.length < 2) return false;
@@ -149,8 +190,44 @@ export class UserAdapter {
       readings: [reading.slice()],
       provenance: ['mined'],
       freq: 1,
+      lastAt: at,
     });
+    this.added++;
+    this.maybeCompact();
     return true;
+  }
+
+  private maybeCompact(): void {
+    if (this.added >= X2_LIMITS.compactEvery) this.compact(this.now);
+  }
+
+  /**
+   * 整理：刪掉衰減完的記錄與挖詞，超過上限的從最弱的刪。已注入解碼器的詞留在解碼器裡，
+   * 下次載入才消失（ponytail: 解碼器沒有刪詞；要即時生效再加 LexiconIndex.remove）。
+   */
+  compact(at: number = this.now): void {
+    this.added = 0;
+    const L = X2_LIMITS;
+    const w = (count: number, lastAt: number): number => count * recency(lastAt, at);
+    const pairs: Array<{ k: string; word: string; w: number }> = [];
+    for (const [k, m] of this.bySeq)
+      for (const [word, r] of m) pairs.push({ k, word, w: w(r.count, r.lastAt) });
+    for (const x of weakest(pairs, L.maxSeq, L.dropBelow)) {
+      const m = this.bySeq.get(x.k)!;
+      m.delete(x.word);
+      if (m.size === 0) this.bySeq.delete(x.k);
+    }
+    const globals = [...this.global].map(([word, r]) => ({ word, w: w(r.count, r.lastAt) }));
+    for (const x of weakest(globals, L.maxGlobal, L.dropBelow)) this.global.delete(x.word);
+    // 舊檔的詞條沒有 lastAt：從現在開始算
+    for (const p of this.phrases.values()) p.lastAt ??= at;
+    const ps = [...this.phrases.values()];
+    const mined = ps
+      .filter((p) => !p.manual)
+      .map((p) => ({ word: p.word, w: w(p.freq ?? 1, p.lastAt!) }));
+    const manual = ps.filter((p) => p.manual).map((p) => ({ word: p.word, w: p.lastAt! }));
+    for (const x of weakest(mined, L.maxMined, L.dropBelow)) this.phrases.delete(x.word);
+    for (const x of weakest(manual, L.maxManual, -Infinity)) this.phrases.delete(x.word);
   }
 
   /** 注入尚未入格的詞條。 */
@@ -175,7 +252,12 @@ export class UserAdapter {
     };
   }
 
-  static fromJSON(data: UserAdapterData, opts?: UserAdapterOptions): UserAdapter {
+  /** 讀回 toJSON 的資料並整理一次（at＝現在，決定衰減） */
+  static fromJSON(
+    data: UserAdapterData,
+    opts?: UserAdapterOptions,
+    at: number = Date.now(),
+  ): UserAdapter {
     const a = new UserAdapter(opts);
     for (const [k, v] of Object.entries(data.bySeq ?? {})) {
       a.bySeq.set(k, new Map(Object.entries(v)));
@@ -186,8 +268,18 @@ export class UserAdapter {
     for (const p of data.phrases ?? []) {
       a.phrases.set(p.word, p);
     }
+    a.now = at;
+    a.compact(at);
     return a;
   }
+}
+
+/** 要刪的項目：衰減到 dropBelow 以下的全部，再從剩下最弱的刪到 cap 個（同分刪前面的）。 */
+function weakest<T extends { w: number }>(items: T[], cap: number, dropBelow: number): T[] {
+  const out = items.filter((x) => x.w < dropBelow);
+  const keep = items.filter((x) => x.w >= dropBelow);
+  if (keep.length > cap) out.push(...keep.sort((a, b) => a.w - b.w).slice(0, keep.length - cap));
+  return out;
 }
 
 /** 半衰期 14 天的時間衰減（測試可傳固定 at 保持決定性）。 */

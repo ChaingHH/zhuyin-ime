@@ -1,5 +1,5 @@
 // Rust 引擎（native/）與 TS 的對拍：同樣輸入、輸出格式與 native/src/main.rs 相同，兩邊的檔案應完全相同。
-// 資料目錄：ZHUYIN_DATA（同 Rust）；ZHUYIN_A＝詞級權重（預設 1）。
+// 資料目錄：ZHUYIN_DATA（同 Rust）；ZHUYIN_A＝詞級權重（預設 1）。core 直接用 src（engine.ts 的 @zhuyin/core 走 dist，只用到不常改的 L1/L2）。
 //   npx tsx debug-native-parity.ts keys <out>                    L1/L2：評測句按鍵 → 音節序列
 //   npx tsx debug-native-parity.ts dump <out> [nBest] [l3]       L4/L5（＋L3）N-best
 //   npx tsx debug-native-parity.ts l3 <noisy.txt> <out> <s>      L3：同 debug-l3.ts 的乾淨＋有錯輸入，印句準
@@ -16,7 +16,7 @@ import {
   UserAdapter,
   syllableToKeyCodes,
   type UserAdapterData,
-} from '@zhuyin/core';
+} from './packages/core/src/index.js';
 import { BackoffLM } from '@zhuyin/lm';
 import { ImeEngine } from './packages/cli/src/engine.js';
 import { injectNoise, rng } from './packages/cli/src/noise.js';
@@ -64,7 +64,8 @@ if (mode === 'keys') {
   const nBest = Number(args[1] ?? 4);
   const ch = args[2] === 'l3' ? new Channel(legal) : undefined;
   const out: string[] = [];
-  for (const s of samples)
+  // 加上中英評測集：原樣英文 token 也要對拍
+  for (const s of [...samples, ...(await loadEvalSamples('eval/mixed.jsonl'))])
     for (const p of dec.decode(s.syllables, {
       nBest,
       alternatives: ch ? s.syllables.map((x) => ch.expand(x)) : undefined,
@@ -109,6 +110,12 @@ if (mode === 'keys') {
 } else if (mode === 'events') {
   const n = Number(args[1] ?? samples.length);
   const ev: string[] = [];
+  // 狀態欄回歸：打 ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ、↓、選「欄」（預設詞典是第 3 個）、送出；再打一次送出應是狀態欄
+  const zt = ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'].flatMap((x) => syllableToKeyCodes(x));
+  for (const c of [...zt, 'ArrowDown', 'Digit3']) ev.push(`k\t${c}\t`);
+  ev.push('c\t0');
+  for (const c of zt) ev.push(`k\t${c}\t`);
+  ev.push('c\t0');
   samples.slice(0, n).forEach((s, si) => {
     const r = rng(si + 1);
     const key = (code: string, k = ''): number => ev.push(`k\t${code}\t${k}`);
@@ -118,6 +125,15 @@ if (mode === 'keys') {
     s.syllables.forEach((syl, j) => {
       if (j > 0 && r() < 0.04) key('Space'); // 組字中的空格（原樣 token）
       if (j > 0 && r() < 0.03) key('Comma', '<'); // 全形標點
+      if (j > 0 && r() < 0.04) {
+        // 中英混打：切英文打一個字（偶爾退一格、偶爾按空白整段送出），切回注音接著打
+        ev.push('m');
+        const word = ['session', 'iPhone', 'OK', 'app', 'line', 'G4'][Math.floor(r() * 6)]!;
+        for (const ch of word) key(/\d/.test(ch) ? `Digit${ch}` : `Key${ch.toUpperCase()}`, ch);
+        if (r() < 0.3) key('Backspace');
+        if (r() < 0.2) key('Space', ' ');
+        ev.push('m');
+      }
       const left = j > 1 && r() < 0.05 ? 1 + Math.floor(r() * 2) : 0;
       for (let i = 0; i < left; i++) key('ArrowLeft'); // 回頭在中間插音節
       if (r() < 0.04) {
@@ -190,8 +206,20 @@ if (mode === 'keys') {
         `${st.composition}\t${st.lastLegal}\t${st.cursor}\t${st.pending ?? ''}\t${m}\t${st.text ?? ''}`,
       );
     } else if (f[0] === 'c') out.push(`C\t${eng.commit(Number(f[1]))}`);
-    else if (f[0] === 'm') out.push(`M\t${eng.toggleMode()}`);
-    else throw new Error(`事件格式錯誤：${line}`);
+    else if (f[0] === 'm') {
+      eng.toggleMode();
+      out.push(`M\t${eng.mode}`);
+    } else if (f[0] === 't') Date.now = () => Number(f[1]);
+    else if (f[0] === 's') {
+      // 學習檔大小與項目數（同 zhuyin-native replay 的 `s`）
+      const d = adapter.toJSON();
+      const seq = Object.values(d.bySeq).reduce((n, m) => n + Object.keys(m).length, 0);
+      const manual = d.phrases.filter((p) => p.manual === true).length;
+      const bytes = Buffer.byteLength(JSON.stringify(d));
+      out.push(
+        `S\t${bytes}\t${seq}\t${Object.keys(d.global).length}\t${manual}\t${d.phrases.length - manual}`,
+      );
+    } else throw new Error(`事件格式錯誤：${line}`);
   }
   writeFileSync(args[1]!, out.join('\n'));
   if (args[2]) writeFileSync(args[2], JSON.stringify(adapter.toJSON()));

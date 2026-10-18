@@ -10,6 +10,8 @@ use std::collections::HashMap;
 const BOS: char = '\u{2}';
 const EOS: &str = "\u{3}";
 const UNK_WORD: &str = "\u{25A1}";
+/// 英文類別符號（decode.ts EN_CLASS）：英文原樣 token 用它查 LM
+const EN_CLASS: &str = "\u{E000}";
 /// JS 的 Math.log(1e-7)：寫死，免得 libm 的末位與 V8 不同
 const UNK_PENALTY: f64 = -16.11809565095832;
 const NONE: u32 = u32::MAX;
@@ -17,6 +19,11 @@ const NONE: u32 = u32::MAX;
 /// 不含任何注音符號的 token（組字中按的空格等）：原樣輸出、自成一詞
 pub fn is_literal(t: &str) -> bool {
     !t.chars().any(|c| ('ㄅ'..='ㄯ').contains(&c))
+}
+
+/// 含拉丁字母的原樣 token（英文）：LM 看到的是 EN_CLASS（decode.ts lmToken）
+fn is_english(t: &str) -> bool {
+    t.chars().any(|c| c.is_ascii_alphabetic()) && is_literal(t)
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +60,8 @@ pub struct Decoder {
     /// 單音節只在原讀音查無詞時才套用 L3 更正
     pub alt_single_only_if_empty: bool,
     max_span: usize,
+    /// 執行中加的詞（add_entry），詞級分數走 parts_log_prob
+    runtime_words: std::collections::HashSet<String>,
 }
 
 /// 使用者選定的詞段：從第 pos 個音節起、len 個音節固定為 word
@@ -209,6 +218,7 @@ impl Decoder {
             alt_entry_cap: 8,
             alt_single_only_if_empty: true,
             max_span,
+            runtime_words: Default::default(),
         }
     }
 
@@ -225,6 +235,7 @@ impl Decoder {
         };
         let empty = words.intern("");
         let unk = words.intern(UNK_WORD);
+        let en = words.intern(EN_CLASS);
         let key = |w1: u32, w2: u32| (w1 as u64) << 32 | w2 as u64;
         let mut paths = vec![Path {
             score: 0.0,
@@ -312,7 +323,15 @@ impl Decoder {
                     let (w1s, w2s) = (words.name(w1), words.name(w2));
                     for c in cands {
                         let name = words.name(c.word);
-                        let mut lp = self.lm.word_log_prob(name, w1s, w2s);
+                        let name = if is_english(name) { EN_CLASS } else { name };
+                        let mut lp = if !self.runtime_words.is_empty()
+                            && self.runtime_words.contains(name)
+                            && !self.lm.knows_word(name)
+                        {
+                            self.parts_log_prob(name, w1s, w2s)
+                        } else {
+                            self.lm.word_log_prob(name, w1s, w2s)
+                        };
                         // 破音字單字重罰：破音字幾乎不以單字存在
                         if words.poly(c.word) {
                             lp -= self.poly_penalty;
@@ -334,7 +353,13 @@ impl Decoder {
                         if paths[gp[0] as usize].score + wt + ct + ut + ch < floor {
                             continue;
                         }
-                        let k = key(w2, word);
+                        // LM 上下文（狀態鍵、w2、尾兩字）用 LM 看到的詞；輸出用原字
+                        let lw = if is_english(words.name(word)) {
+                            en
+                        } else {
+                            word
+                        };
+                        let k = key(w2, lw);
                         let mut li = target.index.get(&k).copied();
                         let mut cc: Option<(char, char)> = None;
                         for &p in gp {
@@ -358,13 +383,13 @@ impl Decoder {
                                 }
                             };
                             let (c1, c2) =
-                                *cc.get_or_insert_with(|| shift(rep.c1, rep.c2, words.name(word)));
+                                *cc.get_or_insert_with(|| shift(rep.c1, rep.c2, words.name(lw)));
                             paths.push(Path {
                                 score,
                                 parent: p,
                                 word,
                                 w1: w2,
-                                w2: word,
+                                w2: lw,
                                 c1,
                                 c2,
                                 ci: ci as u32,
@@ -558,8 +583,49 @@ impl Decoder {
             .collect()
     }
 
+    /// 執行中加的詞不在詞級 LM 裡時，用它拆成 LM 認得的詞的最佳分數（同 TS Decoder.partsLogProb）
+    fn parts_log_prob(&self, w: &str, w1: &str, w2: &str) -> f64 {
+        let chars: Vec<char> = w.chars().collect();
+        let n = chars.len();
+        let mut best = f64::NEG_INFINITY;
+        if (2..=6).contains(&n) {
+            for mask in 1u32..(1 << (n - 1)) {
+                let mut s = 0.0;
+                let (mut c1, mut c2) = (w1.to_string(), w2.to_string());
+                let mut start = 0;
+                let mut ok = true;
+                for k in 1..=n {
+                    if k < n && mask & (1 << (k - 1)) == 0 {
+                        continue;
+                    }
+                    let piece: String = chars[start..k].iter().collect();
+                    if !self.lm.knows_word(&piece) {
+                        ok = false;
+                        break;
+                    }
+                    let mut lp = self.lm.word_log_prob(&piece, &c1, &c2);
+                    if k - start == 1 && self.lex.poly_set.contains(&piece) {
+                        lp -= self.poly_penalty;
+                    }
+                    s += lp;
+                    c1 = std::mem::replace(&mut c2, piece);
+                    start = k;
+                }
+                if ok && s > best {
+                    best = s;
+                }
+            }
+        }
+        if best == f64::NEG_INFINITY {
+            self.lm.word_log_prob(w, w1, w2)
+        } else {
+            best
+        }
+    }
+
     /// 增量加入詞條（X2 挖詞／使用者造詞）
     pub fn add_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        self.runtime_words.insert(word.to_string());
         for r in readings {
             if r.len() > 10 {
                 continue;

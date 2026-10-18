@@ -1,5 +1,6 @@
 //! L2 槽位組字區：packages/core/src/slots.ts CompositionBuffer 的移植。
 //! 已完成的音節直接存正規形字串（TS 只在 sequence 時才轉，結果相同）；原樣字元也是字串。
+use crate::decode::is_literal;
 use crate::keymap::{map_key, slot_of, Mapped, MARKS};
 use std::collections::HashSet;
 
@@ -99,12 +100,34 @@ impl CompositionBuffer {
         true
     }
 
+    /// 英文模式打的字母／數字：併進游標前的英文 token，前面不是英文就開新的；有未完成槽位時不收
+    pub fn append_english(&mut self, ch: &str) -> bool {
+        if !self.history.is_empty() {
+            return false;
+        }
+        let c = self.cursor();
+        match self.done[..c].last_mut() {
+            Some(prev) if !prev.is_empty() && prev.chars().all(|x| x.is_ascii_alphanumeric()) => {
+                prev.push_str(ch)
+            }
+            _ => self.insert(ch.to_string()),
+        }
+        true
+    }
+
+    /// 先退部分槽位，再退游標前的已完成音節（英文 token 一次退一個字母）
     pub fn backspace(&mut self) -> bool {
         if let Some(last) = self.history.pop() {
             self.partial[last] = None;
             return true;
         }
         let c = self.cursor();
+        if let Some(prev) = self.done[..c].last_mut() {
+            if is_literal(prev) && prev.chars().count() > 1 {
+                prev.pop();
+                return true;
+            }
+        }
         if c > 0 {
             self.done.remove(c - 1);
             if let Some(c) = &mut self.cursor_at {

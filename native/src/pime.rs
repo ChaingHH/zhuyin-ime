@@ -453,25 +453,21 @@ impl Backend {
         self.mode_button(r, "changeButton");
     }
 
-    /// 單按 Shift（onKeyUp，有 edit session）：先送出組字區，再換模式，並提示「注」／「英」
+    /// 單按 Shift（onKeyUp，有 edit session）：換模式並提示「注」／「英」。
+    /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文
     fn toggle(&mut self, r: &mut Map<String, Value>) {
         // 引擎沒載入就沒有組字，只換模式
-        let text = self
-            .eng
-            .as_mut()
-            .map(|e| e.toggle_mode())
-            .unwrap_or_default();
+        if let Some(e) = self.eng.as_mut() {
+            e.toggle_mode();
+            if e.is_composing() {
+                Self::show(r, &e.state(true));
+            }
+        }
         self.mode = if self.mode == Mode::Zhuyin {
             Mode::English
         } else {
             Mode::Zhuyin
         };
-        if !text.is_empty() {
-            self.save_adapter();
-        }
-        Self::commit_text(r, &text);
-        r.insert("compositionString".into(), json!(""));
-        r.insert("showCandidates".into(), json!(false));
         self.mode_button(r, "changeButton");
         let msg = if self.mode == Mode::Zhuyin {
             "注"
@@ -517,7 +513,12 @@ impl Backend {
             self.clear(r);
             return true;
         }
+        let was = eng.is_composing();
         let st = eng.on_key(code, k.key.as_deref());
+        // 英文模式下打空白／標點會整段送出（有學習）→ 存檔
+        if was && st.text.is_some() {
+            self.save_adapter();
+        }
         if let Some(t) = &st.text {
             Self::commit_text(r, t);
         }

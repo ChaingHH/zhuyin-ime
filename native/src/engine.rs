@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 const UNK: &str = "\u{25A1}";
 const MENU_PAGE: usize = 9;
+/// 選了也不併進相鄰詞的單字（commit 規則 4；同 engine.ts STANDALONE）
+const STANDALONE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就";
 
 /// 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）
 const PUNCT: [(&str, &str); 14] = [
@@ -128,18 +130,19 @@ impl ImeEngine {
     fn decode_with_adapter(&self) -> Vec<DecodePath> {
         let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
-        let key = seq.join(" ");
         let at = self.now();
         let adapt = self.adapter.as_ref().filter(|a| a.enabled);
-        // U(w) 每次解碼同一個詞只算一次（TS 每組都重算，值相同）
-        let cache = std::cell::RefCell::new(HashMap::<String, f64>::new());
-        let modifier = |w: &str, _: usize, _: usize| -> f64 {
+        // U(w) 每次解碼同一個（詞, 起點, 長度）只算一次（TS 每組都重算，值相同）。
+        // 選字紀錄以「該詞的讀音」為鍵（record_selection 存的是詞自己的音節），不是整句
+        let cache = std::cell::RefCell::new(HashMap::<(String, usize, usize), f64>::new());
+        let modifier = |w: &str, pos: usize, len: usize| -> f64 {
             let a = adapt.unwrap();
-            if let Some(&u) = cache.borrow().get(w) {
+            let k = (w.to_string(), pos, len);
+            if let Some(&u) = cache.borrow().get(&k) {
                 return u;
             }
-            let u = a.modifier_for(&key, w, at);
-            cache.borrow_mut().insert(w.to_string(), u);
+            let u = a.modifier_for(&seq[pos..pos + len].join(" "), w, at);
+            cache.borrow_mut().insert(k, u);
             u
         };
         let paths = self.decoder.decode(
@@ -275,7 +278,7 @@ impl ImeEngine {
             composition: self.with_pending(self.last.first()),
             last_legal,
             text: None,
-            cursor: self.cursor(),
+            cursor: self.cursor_chars(),
             pending: (!pending.is_empty()).then_some(pending),
             menu: self.menu.as_ref().map(|m| MenuView {
                 items: m
@@ -292,26 +295,36 @@ impl ImeEngine {
         }
     }
 
-    /// 首選文字，打到一半的注音插在游標處（字的索引＝音節索引）
+    /// 游標前的字數：音節一個字，原樣 token（英文）照它的長度
+    fn cursor_chars(&self) -> usize {
+        self.comp.sequence()[..self.cursor()]
+            .iter()
+            .map(|t| if is_literal(t) { t.chars().count() } else { 1 })
+            .sum()
+    }
+
+    /// 首選文字，打到一半的注音插在游標處
     fn with_pending(&self, path: Option<&DecodePath>) -> String {
         let mut chars: Vec<String> = path
             .map_or(String::new(), |p| p.text())
             .chars()
             .map(String::from)
             .collect();
-        chars.insert(self.cursor().min(chars.len()), self.comp.pending_display());
+        chars.insert(
+            self.cursor_chars().min(chars.len()),
+            self.comp.pending_display(),
+        );
         chars.concat()
     }
 
-    /// 切換注音／英文；組字區未送出的內容先送出
-    pub fn toggle_mode(&mut self) -> String {
-        let text = self.commit(0);
+    /// 切換注音／英文。組字區不送出：接著打的英文併進組字區（on_key），後打的字還能改前面的中文；
+    /// 整段在 Enter、或英文模式下打空白／標點時送出
+    pub fn toggle_mode(&mut self) {
         self.mode = if self.mode == Mode::Zhuyin {
             Mode::English
         } else {
             Mode::Zhuyin
         };
-        text
     }
 
     fn direct(text: Option<String>) -> EngineState {
@@ -327,11 +340,28 @@ impl ImeEngine {
 
     /// 一次按鍵。code＝KeyboardEvent.code，key＝KeyboardEvent.key（標點、英文模式用）
     pub fn on_key(&mut self, code: &str, key: Option<&str>) -> EngineState {
-        if self.mode == Mode::English {
-            return Self::direct(key.filter(|k| k.chars().count() == 1).map(String::from));
-        }
         if self.menu.is_some() {
             return self.on_menu_key(code);
+        }
+        if self.mode == Mode::English {
+            let ch = key.filter(|k| k.chars().count() == 1);
+            if self.comp.is_empty() {
+                return Self::direct(ch.map(String::from));
+            }
+            // 組字中打英文：字母、數字併進組字區的英文 token（LM 當 EN_CLASS 看），
+            // 前面的中文跟著重解碼；有打到一半的注音時不收
+            match ch {
+                Some(c) if c.chars().all(|x| x.is_ascii_alphanumeric()) => {
+                    if !self.comp.append_english(c) {
+                        return self.state(true);
+                    }
+                    return self.after_edit(true);
+                }
+                // 空白、標點等其他字元：整段送出，再輸出這個字元
+                Some(c) => return Self::direct(Some(self.commit(0) + c)),
+                // 其他鍵（退格、Delete、方向鍵、↓ 選字、Esc）照注音模式處理
+                None => {}
+            }
         }
         if code == "Escape" {
             self.clear();
@@ -358,6 +388,11 @@ impl ImeEngine {
         } else {
             self.comp.on_key(code)
         };
+        self.after_edit(legal)
+    }
+
+    /// 組字區改過之後：已完成音節序列有變就平移選字、重解碼
+    fn after_edit(&mut self, legal: bool) -> EngineState {
         let seq = self.comp.sequence().to_vec();
         if seq != self.last_seq {
             // 選字跟著平移；落在被改動範圍內的作廢
@@ -408,8 +443,10 @@ impl ImeEngine {
                     *any = false;
                 };
             let mut at_pos = 0;
+            let mut picked_at = vec![];
             for b in &chosen.breakdown {
                 let is_picked = picked.contains(&(at_pos, b.word.as_str()));
+                picked_at.push(is_picked);
                 // 空格等原樣字元是詞界：不併進造詞
                 if b.word == UNK || b.word.chars().count() != 1 || is_literal(&b.reading[0]) {
                     flush(&mut ops, &mut chars, &mut rd, &mut any);
@@ -424,6 +461,37 @@ impl ImeEngine {
                 at_pos += b.reading.len();
             }
             flush(&mut ops, &mut chars, &mut rd, &mut any);
+
+            // 4) 選過的單字左右都是多字詞（狀態|欄）：併進相鄰的詞存成使用者詞，
+            //    左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □（同 TS）
+            let bd = &chosen.breakdown;
+            let len = |i: usize| bd[i].word.chars().count();
+            let real = |i: Option<usize>| {
+                i.filter(|&i| i < bd.len())
+                    .filter(|&i| bd[i].word != UNK && !is_literal(&bd[i].reading[0]))
+            };
+            let host = |i: Option<usize>| real(i).filter(|&i| len(i) >= 2 && len(i) + 1 <= 4);
+            for i in 0..bd.len() {
+                if !picked_at[i]
+                    || real(Some(i)).is_none()
+                    || len(i) != 1
+                    || STANDALONE.contains(bd[i].word.as_str())
+                {
+                    continue;
+                }
+                let single = |j: Option<usize>| real(j).is_some_and(|j| len(j) == 1);
+                if single(i.checked_sub(1)) || single(Some(i + 1)) {
+                    continue;
+                }
+                let (w, r) = (&bd[i].word, &bd[i].reading);
+                if let Some(h) = host(i.checked_sub(1)) {
+                    let h = &bd[h];
+                    ops.push((true, format!("{}{w}", h.word), [&h.reading[..], r].concat()));
+                } else if let Some(h) = host(Some(i + 1)) {
+                    let h = &bd[h];
+                    ops.push((true, format!("{w}{}", h.word), [r, &h.reading[..]].concat()));
+                }
+            }
             let decoder = &mut self.decoder;
             for (user, word, reading) in ops {
                 if user {
