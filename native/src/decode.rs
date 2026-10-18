@@ -10,6 +10,8 @@ use std::collections::HashMap;
 const BOS: char = '\u{2}';
 const EOS: &str = "\u{3}";
 const UNK_WORD: &str = "\u{25A1}";
+/// 英文類別符號（decode.ts EN_CLASS）：英文原樣 token 用它查 LM
+const EN_CLASS: &str = "\u{E000}";
 /// JS 的 Math.log(1e-7)：寫死，免得 libm 的末位與 V8 不同
 const UNK_PENALTY: f64 = -16.11809565095832;
 const NONE: u32 = u32::MAX;
@@ -17,6 +19,11 @@ const NONE: u32 = u32::MAX;
 /// 不含任何注音符號的 token（組字中按的空格等）：原樣輸出、自成一詞
 pub fn is_literal(t: &str) -> bool {
     !t.chars().any(|c| ('ㄅ'..='ㄯ').contains(&c))
+}
+
+/// 含拉丁字母的原樣 token（英文）：LM 看到的是 EN_CLASS（decode.ts lmToken）
+fn is_english(t: &str) -> bool {
+    t.chars().any(|c| c.is_ascii_alphabetic()) && is_literal(t)
 }
 
 #[derive(Clone, Copy)]
@@ -225,6 +232,7 @@ impl Decoder {
         };
         let empty = words.intern("");
         let unk = words.intern(UNK_WORD);
+        let en = words.intern(EN_CLASS);
         let key = |w1: u32, w2: u32| (w1 as u64) << 32 | w2 as u64;
         let mut paths = vec![Path {
             score: 0.0,
@@ -312,6 +320,7 @@ impl Decoder {
                     let (w1s, w2s) = (words.name(w1), words.name(w2));
                     for c in cands {
                         let name = words.name(c.word);
+                        let name = if is_english(name) { EN_CLASS } else { name };
                         let mut lp = self.lm.word_log_prob(name, w1s, w2s);
                         // 破音字單字重罰：破音字幾乎不以單字存在
                         if words.poly(c.word) {
@@ -334,7 +343,13 @@ impl Decoder {
                         if paths[gp[0] as usize].score + wt + ct + ut + ch < floor {
                             continue;
                         }
-                        let k = key(w2, word);
+                        // LM 上下文（狀態鍵、w2、尾兩字）用 LM 看到的詞；輸出用原字
+                        let lw = if is_english(words.name(word)) {
+                            en
+                        } else {
+                            word
+                        };
+                        let k = key(w2, lw);
                         let mut li = target.index.get(&k).copied();
                         let mut cc: Option<(char, char)> = None;
                         for &p in gp {
@@ -358,13 +373,13 @@ impl Decoder {
                                 }
                             };
                             let (c1, c2) =
-                                *cc.get_or_insert_with(|| shift(rep.c1, rep.c2, words.name(word)));
+                                *cc.get_or_insert_with(|| shift(rep.c1, rep.c2, words.name(lw)));
                             paths.push(Path {
                                 score,
                                 parent: p,
                                 word,
                                 w1: w2,
-                                w2: word,
+                                w2: lw,
                                 c1,
                                 c2,
                                 ci: ci as u32,

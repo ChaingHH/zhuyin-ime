@@ -304,13 +304,19 @@ async function smoke(): Promise<void> {
     `2 選第二候選 ${want}`,
   );
   check((await press('Enter')).out === want, 'Enter 送出選的字');
-  // 組字中單按 Shift：先送出，再切英文；英文模式放行字母
+  // 組字中單按 Shift：不送出，切英文；英文併進組字區，空白整段送出；組字區空了就放行字母
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   const sw = await shiftTap();
+  const zh = sw['compositionString'];
   check(
-    typeof sw['commitString'] === 'string' && (sw['commitString'] as string).length === 1,
-    'Shift 先送出組字',
+    !('commitString' in sw) && typeof zh === 'string' && [...zh].length === 1,
+    'Shift 不送出組字',
   );
+  await press('KeyO', 'o');
+  const en = await press('KeyK', 'k');
+  check(en.eaten && en.last['compositionString'] === `${zh}ok`, '英文併進組字區');
+  check(en.last['compositionCursor'] === [...`${zh}ok`].length, '游標在英文後面');
+  check((await press('Space', ' ')).out === `${zh}ok `, '英文模式空白整段送出');
   check(!(await press('KeyA')).eaten, '英文模式放行字母');
   await shiftTap();
   check((await press('KeyA')).eaten, '切回注音後攔下注音鍵');

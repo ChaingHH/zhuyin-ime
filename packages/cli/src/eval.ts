@@ -1,5 +1,5 @@
 ﻿import { performance } from 'node:perf_hooks';
-import { CompositionBuffer, DACHEN, syllableToKeyCodes } from '@zhuyin/core';
+import { CompositionBuffer, DACHEN, isLiteralToken, syllableToKeyCodes } from '@zhuyin/core';
 import { loadEvalSamples, loadRuntime, type EvalSample } from './runtime.js';
 
 export interface EvalReport {
@@ -87,11 +87,13 @@ export async function runEval(
 
 function verifyRoundtrip(sample: EvalSample, legal: ReadonlySet<string>): boolean {
   // 以 CompositionBuffer 逐鍵餵入，完成的音節序列須與樣本一致
+  // 原樣 token（中英評測集的英文）不走鍵盤，跳過
+  const syls = sample.syllables.filter((s) => !isLiteralToken(s));
   const buf = new CompositionBuffer(DACHEN, legal);
-  for (const syl of sample.syllables) {
+  for (const syl of syls) {
     for (const code of syllableToKeyCodes(syl)) buf.onKeyEvent({ code, timestampMs: 0 });
   }
-  return buf.sequence.join(' ') === sample.syllables.join(' ');
+  return buf.sequence.join(' ') === syls.join(' ');
 }
 
 export async function cmdEval(
@@ -107,7 +109,7 @@ export async function cmdEval(
 ): Promise<void> {
   for (const file of files) {
     const report = await runEval(file, opts);
-    const domain = file.includes('written') ? '書面' : '口語';
+    const domain = file.includes('written') ? '書面' : file.includes('mixed') ? '中英' : '口語';
     const line =
       `[eval:${domain}] n=${report.samples} 字準=${(report.charAcc * 100).toFixed(2)}% ` +
       `句準=${(report.sentAcc * 100).toFixed(2)}% p50=${report.latencyP50Ms.toFixed(1)}ms ` +

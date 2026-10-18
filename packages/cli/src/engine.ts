@@ -63,6 +63,13 @@ const PUNCT: Record<string, string> = {
 
 export type InputMode = 'zhuyin' | 'english';
 
+/**
+ * 選了也不併進相鄰詞的單字（commit 規則 4）：代名詞、虛詞本來就獨立成詞，改它是看上下文
+ * （因為|他 ↔ 因為|她），存成「因為他」反而讓下次的「因為她」更難打。
+ * ponytail: 手列清單；要更準改成查 LM 的單字頻率。和 native/src/engine.rs STANDALONE 同一份
+ */
+const STANDALONE = new Set([...'他她它牠祂你妳您我的地得在再那哪這是了著過也都就']);
+
 interface AlignedWord {
   word: string;
   seq: string[];
@@ -129,7 +136,10 @@ export class ImeEngine {
     const seq = this.comp.sequence;
     const adapt = this.adapter?.enabled ? this.adapter : undefined;
     const paths = this.decoder.decode(seq, {
-      modifier: adapt ? (w: string) => adapt.modifierFor(seq, w) : undefined,
+      // X2 的選字紀錄以「該詞的讀音」為鍵（recordSelection 存的是詞自己的音節），不是整句
+      modifier: adapt
+        ? (w: string, pos: number, len: number) => adapt.modifierFor(seq.slice(pos, pos + len), w)
+        : undefined,
       alternatives: this.alternatives(seq),
       fixed: this.fixed,
     });
@@ -238,7 +248,7 @@ export class ImeEngine {
       composition: this.withPending(this.last[0]),
       candidates: this.last,
       lastLegal,
-      cursor: this.cursor,
+      cursor: this.cursorChars,
       pending: pending || undefined,
       menu: m
         ? {
@@ -251,29 +261,49 @@ export class ImeEngine {
     };
   }
 
-  /** 首選文字，打到一半的注音插在游標處（每個音節一個字，所以字的索引＝音節索引） */
+  /** 游標前的字數：音節一個字，原樣 token（英文）照它的長度 */
+  private get cursorChars(): number {
+    const seq = this.comp.sequence;
+    let n = 0;
+    for (let i = 0; i < this.cursor; i++) n += isLiteralToken(seq[i]!) ? [...seq[i]!].length : 1;
+    return n;
+  }
+
+  /** 首選文字，打到一半的注音插在游標處 */
   private withPending(path: DecodePath | undefined): string {
     const chars = [...(path ? path.words.join('') : '')];
-    chars.splice(this.cursor, 0, this.comp.pendingDisplay);
+    chars.splice(this.cursorChars, 0, this.comp.pendingDisplay);
     return chars.join('');
   }
 
   /**
    * 切換注音／英文。「單按 Shift」要看放開事件，由前端偵測後呼叫這裡。
-   * 組字區未送出的內容先送出（回傳送出的文字），避免切到英文後留著半句注音。
+   * 組字區不送出：接著打的英文併進組字區（見 onKey），後打的字還能改前面的中文；
+   * 整段在 Enter、或英文模式下打空白／標點時送出。
    */
-  toggleMode(): string {
-    const text = this.commit();
+  toggleMode(): void {
     this.mode = this.mode === 'zhuyin' ? 'english' : 'zhuyin';
-    return text;
   }
 
   onKey(ev: KeyEvent): EngineState {
+    if (this.menu) return this.onMenuKey(ev.code);
     if (this.mode === 'english') {
       const ch = ev.key !== undefined && [...ev.key].length === 1 ? ev.key : undefined;
-      return { composition: '', candidates: [], lastLegal: true, text: ch, cursor: 0 };
+      if (this.comp.isEmpty)
+        return { composition: '', candidates: [], lastLegal: true, text: ch, cursor: 0 };
+      // 組字中打英文：字母、數字併進組字區的英文 token（LM 當 EN_CLASS 看），
+      // 前面的中文跟著重解碼（開心的 + session → 開新的session）；有打到一半的注音時不收
+      if (ch !== undefined && /^[A-Za-z0-9]$/.test(ch)) {
+        if (!this.comp.appendEnglish(ch)) return this.state(true);
+        return this.afterEdit(true);
+      }
+      // 空白、標點等其他字元：整段送出，再輸出這個字元
+      if (ch !== undefined) {
+        const text = this.commit() + ch;
+        return { composition: '', candidates: [], lastLegal: true, text, cursor: 0 };
+      }
+      // 其他鍵（退格、Delete、方向鍵、↓ 選字、Esc）照注音模式處理
     }
-    if (this.menu) return this.onMenuKey(ev.code);
     // Esc（選字視窗沒開）：放棄整段組字，同微軟注音
     if (ev.code === 'Escape') {
       this.clear();
@@ -293,6 +323,11 @@ export class ImeEngine {
     const nav = this.onNavKey(ev.code);
     if (nav) return nav;
     const outcome = inserted ? { accepted: true, legal: true } : this.comp.onKeyEvent(ev);
+    return this.afterEdit(outcome.legal);
+  }
+
+  /** 組字區改過之後：已完成音節序列有變就平移選字、重解碼 */
+  private afterEdit(legal: boolean): EngineState {
     const seq = this.comp.sequence;
     // candidates：本次按鍵有重解碼才回傳（replay 等呼叫端依此判斷），否則為空
     let candidates: DecodePath[] = [];
@@ -309,7 +344,7 @@ export class ImeEngine {
       this.last = candidates;
     }
     // 畫面一律由最新解碼結果組成（未完成槽位的按鍵不應讓已解碼文字消失）
-    return { ...this.state(outcome.legal), candidates };
+    return { ...this.state(legal), candidates };
   }
 
   /** 最近一次解碼的候選（供 `#n` 選字）。 */
@@ -369,8 +404,10 @@ export class ImeEngine {
         bufPicked = false;
       };
       let at = 0;
+      const pickedAt: boolean[] = [];
       for (const w of aligned) {
         const isPicked = picked.has(`${at}:${w.word}`);
+        pickedAt.push(isPicked);
         // 空格等原樣字元是詞界：不併進造詞
         if (w.word === UNK || [...w.word].length !== 1 || isLiteralToken(w.seq[0]!)) {
           flush();
@@ -383,6 +420,27 @@ export class ImeEngine {
         at += w.seq.length;
       }
       flush();
+
+      // 4) 選過的單字左右都是多字詞（狀態|欄 把蘭改成欄）：單字自己成不了詞，上面的規則存不到；
+      //    併進相鄰的詞存成使用者詞，左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □
+      const len = (i: number): number => [...aligned[i]!.word].length;
+      const real = (i: number): boolean =>
+        i >= 0 &&
+        i < aligned.length &&
+        aligned[i]!.word !== UNK &&
+        !isLiteralToken(aligned[i]!.seq[0]!);
+      const host = (i: number): boolean => real(i) && len(i) >= 2 && len(i) + 1 <= 4;
+      aligned.forEach((w, i) => {
+        if (!pickedAt[i] || !real(i) || len(i) !== 1 || STANDALONE.has(w.word)) return;
+        if ((real(i - 1) && len(i - 1) === 1) || (real(i + 1) && len(i + 1) === 1)) return;
+        if (host(i - 1)) {
+          const h = aligned[i - 1]!;
+          addUser(h.word + w.word, [...h.seq, ...w.seq]);
+        } else if (host(i + 1)) {
+          const h = aligned[i + 1]!;
+          addUser(w.word + h.word, [...w.seq, ...h.seq]);
+        }
+      });
     }
 
     this.clear();

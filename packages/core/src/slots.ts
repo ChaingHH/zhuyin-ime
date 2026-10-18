@@ -132,11 +132,29 @@ export class CompositionBuffer {
     return true;
   }
 
-  /** Backspace：先退部分槽位，再退游標前的已完成音節。回傳是否有變動。 */
+  /**
+   * 英文模式打的字母／數字：併進游標前的英文 token，前面不是英文就在游標處開一個新的。
+   * 有未完成槽位時不收；回傳是否放入。
+   */
+  appendEnglish(ch: string): boolean {
+    if (this.history.length > 0) return false;
+    const prev = this.cursor > 0 ? this.done[this.cursor - 1] : undefined;
+    if (typeof prev === 'string' && /^[A-Za-z0-9]+$/.test(prev))
+      this.done[this.cursor - 1] = prev + ch;
+    else this.insert(ch);
+    return true;
+  }
+
+  /** Backspace：先退部分槽位，再退游標前的已完成音節（英文 token 一次退一個字母）。回傳是否有變動。 */
   backspace(): boolean {
     const last = this.history.pop();
     if (last) {
       delete this.partial[last];
+      return true;
+    }
+    const prev = this.cursor > 0 ? this.done[this.cursor - 1] : undefined;
+    if (typeof prev === 'string' && prev.length > 1) {
+      this.done[this.cursor - 1] = prev.slice(0, -1);
       return true;
     }
     if (this.cursor > 0) {

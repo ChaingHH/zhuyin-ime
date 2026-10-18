@@ -46,19 +46,29 @@ describe('引擎接 L3', () => {
 });
 
 describe('英文模式', () => {
-  it('切到英文：先送出組字區、按鍵直接輸出；切回注音恢復組字', () => {
+  it('組字中切到英文：英文併進組字區，空白整段送出；組字區空的時直接輸出', () => {
     const decoder = new Decoder(SCORER);
     decoder.loadLexicon(LEX);
     const engine = new ImeEngine(decoder, LEGAL);
+    const key = (code: string, k?: string) => engine.onKey({ code, key: k, timestampMs: 0 });
     typeSyllables(engine, ['ㄐㄧㄣ']);
-    expect(engine.toggleMode()).toBe('金');
+    engine.toggleMode();
     expect(engine.mode).toBe('english');
-    const st = engine.onKey({ code: 'KeyR', key: 'R', timestampMs: 0 });
-    expect(st.text).toBe('R');
-    expect(st.composition).toBe('');
+    key('KeyO', 'O');
+    key('KeyK', 'K');
+    let st = key('KeyX', 'x');
+    expect(st.composition).toBe('金OKx');
+    expect(st.cursor).toBe(4);
+    expect(engine.syllableSequence).toEqual(['ㄐㄧㄣ', 'OKx']);
+    st = key('Backspace');
+    expect(st.composition).toBe('金OK');
+    expect(key('ShiftLeft', 'Shift').text).toBeUndefined();
+    engine.toggleMode();
+    expect(typeSyllables(engine, ['ㄐㄧㄣ'])).toBe('金OK金');
+    engine.toggleMode();
+    st = key('Space', ' ');
+    expect(st.text).toBe('金OK金 ');
     expect(engine.syllableSequence).toEqual([]);
-    expect(engine.onKey({ code: 'ShiftLeft', key: 'Shift', timestampMs: 0 }).text).toBeUndefined();
-    expect(engine.toggleMode()).toBe('');
-    expect(typeSyllables(engine, ['ㄐㄧㄣ'])).toBe('金');
+    expect(key('KeyR', 'R').text).toBe('R');
   });
 });

@@ -396,9 +396,8 @@ editor.addEventListener('keyup', e => {
   // 先在本地切換：緊接著的按鍵要走新模式的路（請求依序送出，伺服器端順序一致）
   showMode(mode === 'english' ? 'zhuyin' : 'english');
   enqueue(async () => {
-    const { mode: m, text } = await post('/mode', {});
-    if (text) { insertText(text); addLog(`送出 ${text}`); }
-    render({ composition: '', candidates: [] });
+    // 組字區不送出：接著打的英文併進組字區
+    const { mode: m } = await post('/mode', {});
     showMode(m);
     addLog(`切換為${m === 'english' ? '英文' : '注音'}`);
   });
@@ -411,8 +410,9 @@ editor.addEventListener('keydown', e => {
   // Ctrl／Alt 組合鍵：交給瀏覽器（Ctrl+C 複製選取、Ctrl+V 觸發 paste）
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const code = codeOf(e);
-  // 英文模式：可列印字元直接插入，編輯鍵照一般文字框（都排進佇列，順序不亂）
-  if (mode === 'english') {
+  // 英文模式、沒在組字：可列印字元直接插入，編輯鍵照一般文字框（都排進佇列，順序不亂）。
+  // 組字中的英文交給引擎，併進組字區（空白、標點會整段送出）
+  if (mode === 'english' && !(composing || busy > 0)) {
     if (EDIT.test(code)) { e.preventDefault(); enqueue(() => editKey(code)); }
     else if ([...e.key].length === 1) { e.preventDefault(); const k = e.key; enqueue(() => insertText(k)); }
     return;

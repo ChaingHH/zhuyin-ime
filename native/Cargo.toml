@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 indexmap = "2"
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip：模型檔標頭的 unseen 等浮點數要和 JS 解析到同一個位元（預設解析末位會差）
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [profile.release]
 debug = 1

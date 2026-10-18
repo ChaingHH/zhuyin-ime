@@ -75,10 +75,11 @@ export async function startWeb(port: number, l3: boolean): Promise<void> {
           // 停打 3 秒才把解碼產生的垃圾 heap 還給系統（打字中做會卡鍵；見 runtime.ts releaseHeap）
           clearTimeout(idleGc);
           idleGc = setTimeout(releaseHeap, 3000);
+          const was = engine.syllableSequence.length > 0;
           const st = engine.onKey({ code, key, timestampMs: lastKeyAt });
           const ms = performance.now() - lastKeyAt;
-          // 注音模式下打標點會先送出組字區（有學習）→ 存檔
-          if (st.text && engine.mode === 'zhuyin') saveAdapter(adapter).catch(() => {});
+          // 英文模式下打空白／標點會整段送出組字區（有學習）→ 存檔
+          if (was && st.text) saveAdapter(adapter).catch(() => {});
           json(res, {
             ...view(st, engine.getCandidates()),
             legal: st.lastLegal,
@@ -89,9 +90,8 @@ export async function startWeb(port: number, l3: boolean): Promise<void> {
           const m = process.memoryUsage();
           json(res, { rss: m.rss, heap: m.heapUsed, uptime: Math.round(process.uptime()) });
         } else if (req.method === 'POST' && req.url === '/mode') {
-          const text = engine.toggleMode();
-          if (text) saveAdapter(adapter).catch(() => {});
-          json(res, { mode: engine.mode, text });
+          engine.toggleMode();
+          json(res, { mode: engine.mode });
         } else if (req.method === 'POST' && req.url === '/commit') {
           const k = Number((await body(req))['k'] ?? 0);
           const text = engine.commit(Number.isInteger(k) && k >= 0 ? k : 0);

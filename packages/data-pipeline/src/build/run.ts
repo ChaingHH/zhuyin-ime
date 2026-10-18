@@ -8,6 +8,9 @@ import {
   type LibchewingFile,
 } from '../sources/libchewing.js';
 import { libchewingToDrafts, mergeDrafts, moedictToDrafts } from '../build/lexicon.js';
+import { existsSync } from 'node:fs';
+import type { LexiconEntry } from '@zhuyin/core';
+import type { LexiconDraft } from '../types.js';
 
 export async function cmdDownload(): Promise<void> {
   await loadMoedict();
@@ -35,7 +38,23 @@ export async function cmdLexicon(): Promise<void> {
   console.log(`      ${lc.drafts.length} 詞（跳過不可解析讀音 ${lc.skippedReadings}）`);
 
   console.log('[3/4] 合併去重…');
-  const { entries, stats } = mergeDrafts([mo.drafts, lc.drafts]);
+  // 語料挖出的複合詞（scripts/mine-words.ts → mined.jsonl；provenance=mined）
+  const mined: LexiconDraft[] = [];
+  const minedFile = path.join(PATHS.processed, 'mined.jsonl');
+  if (existsSync(minedFile)) {
+    for (const line of (await readFile(minedFile, 'utf8')).split('\n')) {
+      if (!line) continue;
+      const e = JSON.parse(line) as LexiconEntry;
+      mined.push({
+        word: e.word,
+        readings: e.readings.map((r) => ({ syllables: [], canonical: r.join(' ') })),
+        freq: e.freq,
+        provenance: ['mined'],
+      });
+    }
+    console.log(`      挖出的詞 ${mined.length}（${minedFile}）`);
+  }
+  const { entries, stats } = mergeDrafts([mo.drafts, lc.drafts, mined]);
 
   console.log('[4/4] 寫出 lexicon.jsonl + stats');
   await mkdir(PATHS.processed, { recursive: true });
