@@ -48,6 +48,11 @@ export class BackoffLM {
     return BackoffLM.logProb(this.word, w, w1, w2);
   }
 
+  /** 詞一元表裡有這個詞 */
+  knowsWord(w: string): boolean {
+    return this.word.uni.get(w, 0) !== 0;
+  }
+
   charLogProb(c: string, c1: string, c2: string): number {
     return BackoffLM.logProb(this.char, c, c1, c2);
   }

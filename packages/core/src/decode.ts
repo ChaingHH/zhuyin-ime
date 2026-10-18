@@ -17,6 +17,8 @@ import { LexiconIndex } from './lexicon.js';
 export interface Scorer {
   wordLogProb(w: string, w1: string, w2: string): number;
   charSequenceLogProb(word: string, charContext: readonly [string, string]): number;
+  /** 詞級 LM 有沒有這個詞（一元表裡有）。沒提供＝執行中加的詞照一般詞算（見 partsLogProb） */
+  knowsWord?(w: string): boolean;
 }
 
 /** 與訓練時一致的句首填充符。 */
@@ -356,7 +358,10 @@ export class Decoder {
           const us = this.uBuf;
           for (let i = 0; i < m; i++) {
             const w = lmToken(capped[i]!.word);
-            let lp = this.scorer.wordLogProb(w, w1!, w2!);
+            let lp =
+              this.runtimeWords.has(w) && this.scorer.knowsWord?.(w) === false
+                ? this.partsLogProb(w, w1!, w2!)
+                : this.scorer.wordLogProb(w, w1!, w2!);
             // 破音字單字重罰：破音字幾乎不以單字存在
             if (this.lex.polySingle.has(w) && [...w].length === 1) {
               lp -= this.opts.polyPenalty;
@@ -577,8 +582,49 @@ export class Decoder {
     };
   }
 
+  /**
+   * 執行中加的詞（使用者詞、挖詞）多半不在詞級 LM 裡，照未知詞算是約 −31，使用者詞的加成 8 也救不回來
+   *（狀態欄輸給壯|泰|蘭）。改用它拆成 LM 認得的詞的最佳分數：同一串字 LM 本來就給得出的機率，
+   * 和格裡「狀態|欄」那條路徑的詞級分數相同（含破音單字罰分），使用者詞的加成再加在上面。
+   * 只拆 2–6 字（最多 31 種切法）；拆不出來（有一段 LM 不認得）就照舊。
+   */
+  private partsLogProb(w: string, w1: string, w2: string): number {
+    const chars = [...w];
+    const n = chars.length;
+    let best = -Infinity;
+    if (n >= 2 && n <= 6) {
+      for (let mask = 1; mask < 1 << (n - 1); mask++) {
+        let s = 0;
+        let c1 = w1;
+        let c2 = w2;
+        let start = 0;
+        let ok = true;
+        for (let k = 1; k <= n && ok; k++) {
+          if (k < n && (mask & (1 << (k - 1))) === 0) continue;
+          const piece = chars.slice(start, k).join('');
+          if (!this.scorer.knowsWord!(piece)) {
+            ok = false;
+            break;
+          }
+          let lp = this.scorer.wordLogProb(piece, c1, c2);
+          if (k - start === 1 && this.lex.polySingle.has(piece)) lp -= this.opts.polyPenalty;
+          s += lp;
+          c1 = c2;
+          c2 = piece;
+          start = k;
+        }
+        if (ok && s > best) best = s;
+      }
+    }
+    return best === -Infinity ? this.scorer.wordLogProb(w, w1, w2) : best;
+  }
+
+  /** 執行中加的詞（addEntry），詞級分數走 partsLogProb */
+  private readonly runtimeWords = new Set<string>();
+
   /** 增量加入詞條（X2 挖詞／使用者造詞），不重建整個索引。 */
   addEntry(entry: LexiconEntry): void {
+    this.runtimeWords.add(entry.word);
     for (const reading of entry.readings) {
       if (reading.length > this.maxSpanCap()) continue;
       if (reading.length > this.maxSpan) this.maxSpan = reading.length;

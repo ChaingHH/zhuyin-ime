@@ -233,6 +233,24 @@ describe('狀態欄：選過的單字黏在多字詞旁', () => {
     expect(typeIt(e)).toBe('狀態欄');
   });
 
+  it('LM 不認得的使用者詞用拆分分數，不當未知詞：選一次就穩定翻過來', () => {
+    // 未知詞 −31.5＋使用者詞加成 8 = −23.5，輸給 狀態|蘭 −7；拆成 狀態|欄 是 −8，加 8 之後贏
+    const scorer = {
+      wordLogProb: (w: string): number => LP[w] ?? -31.5,
+      charSequenceLogProb: (): number => 0,
+      knowsWord: (w: string): boolean => w in LP,
+    };
+    const decoder = new Decoder(scorer);
+    decoder.loadLexicon(LEX2);
+    const adapter = new UserAdapter();
+    const e = new ImeEngine(decoder, ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'], undefined, adapter);
+    typeIt(e);
+    key(e, 'ArrowDown');
+    key(e, 'Digit2');
+    expect(e.commit()).toBe('狀態欄');
+    expect(typeIt(e)).toBe('狀態欄');
+  });
+
   it('X2 選字加成以該詞的讀音為鍵：ㄌㄢˊ 選過 5 次「欄」就翻成狀態欄', () => {
     const adapter = new UserAdapter();
     for (let i = 0; i < 5; i++) adapter.recordSelection(['ㄌㄢˊ'], '欄');
