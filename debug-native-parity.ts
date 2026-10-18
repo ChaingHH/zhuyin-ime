@@ -110,6 +110,12 @@ if (mode === 'keys') {
 } else if (mode === 'events') {
   const n = Number(args[1] ?? samples.length);
   const ev: string[] = [];
+  // 狀態欄回歸：打 ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ、↓、選「欄」（預設詞典是第 3 個）、送出；再打一次送出應是狀態欄
+  const zt = ['ㄓㄨㄤˋ', 'ㄊㄞˋ', 'ㄌㄢˊ'].flatMap((x) => syllableToKeyCodes(x));
+  for (const c of [...zt, 'ArrowDown', 'Digit3']) ev.push(`k\t${c}\t`);
+  ev.push('c\t0');
+  for (const c of zt) ev.push(`k\t${c}\t`);
+  ev.push('c\t0');
   samples.slice(0, n).forEach((s, si) => {
     const r = rng(si + 1);
     const key = (code: string, k = ''): number => ev.push(`k\t${code}\t${k}`);

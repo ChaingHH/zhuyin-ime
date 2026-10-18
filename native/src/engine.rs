@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 const UNK: &str = "\u{25A1}";
 const MENU_PAGE: usize = 9;
+/// 選了也不併進相鄰詞的單字（commit 規則 4；同 engine.ts STANDALONE）
+const STANDALONE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就";
 
 /// 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）
 const PUNCT: [(&str, &str); 14] = [
@@ -128,18 +130,19 @@ impl ImeEngine {
     fn decode_with_adapter(&self) -> Vec<DecodePath> {
         let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
-        let key = seq.join(" ");
         let at = self.now();
         let adapt = self.adapter.as_ref().filter(|a| a.enabled);
-        // U(w) 每次解碼同一個詞只算一次（TS 每組都重算，值相同）
-        let cache = std::cell::RefCell::new(HashMap::<String, f64>::new());
-        let modifier = |w: &str, _: usize, _: usize| -> f64 {
+        // U(w) 每次解碼同一個（詞, 起點, 長度）只算一次（TS 每組都重算，值相同）。
+        // 選字紀錄以「該詞的讀音」為鍵（record_selection 存的是詞自己的音節），不是整句
+        let cache = std::cell::RefCell::new(HashMap::<(String, usize, usize), f64>::new());
+        let modifier = |w: &str, pos: usize, len: usize| -> f64 {
             let a = adapt.unwrap();
-            if let Some(&u) = cache.borrow().get(w) {
+            let k = (w.to_string(), pos, len);
+            if let Some(&u) = cache.borrow().get(&k) {
                 return u;
             }
-            let u = a.modifier_for(&key, w, at);
-            cache.borrow_mut().insert(w.to_string(), u);
+            let u = a.modifier_for(&seq[pos..pos + len].join(" "), w, at);
+            cache.borrow_mut().insert(k, u);
             u
         };
         let paths = self.decoder.decode(
@@ -440,8 +443,10 @@ impl ImeEngine {
                     *any = false;
                 };
             let mut at_pos = 0;
+            let mut picked_at = vec![];
             for b in &chosen.breakdown {
                 let is_picked = picked.contains(&(at_pos, b.word.as_str()));
+                picked_at.push(is_picked);
                 // 空格等原樣字元是詞界：不併進造詞
                 if b.word == UNK || b.word.chars().count() != 1 || is_literal(&b.reading[0]) {
                     flush(&mut ops, &mut chars, &mut rd, &mut any);
@@ -456,6 +461,37 @@ impl ImeEngine {
                 at_pos += b.reading.len();
             }
             flush(&mut ops, &mut chars, &mut rd, &mut any);
+
+            // 4) 選過的單字左右都是多字詞（狀態|欄）：併進相鄰的詞存成使用者詞，
+            //    左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □（同 TS）
+            let bd = &chosen.breakdown;
+            let len = |i: usize| bd[i].word.chars().count();
+            let real = |i: Option<usize>| {
+                i.filter(|&i| i < bd.len())
+                    .filter(|&i| bd[i].word != UNK && !is_literal(&bd[i].reading[0]))
+            };
+            let host = |i: Option<usize>| real(i).filter(|&i| len(i) >= 2 && len(i) + 1 <= 4);
+            for i in 0..bd.len() {
+                if !picked_at[i]
+                    || real(Some(i)).is_none()
+                    || len(i) != 1
+                    || STANDALONE.contains(bd[i].word.as_str())
+                {
+                    continue;
+                }
+                let single = |j: Option<usize>| real(j).is_some_and(|j| len(j) == 1);
+                if single(i.checked_sub(1)) || single(Some(i + 1)) {
+                    continue;
+                }
+                let (w, r) = (&bd[i].word, &bd[i].reading);
+                if let Some(h) = host(i.checked_sub(1)) {
+                    let h = &bd[h];
+                    ops.push((true, format!("{}{w}", h.word), [&h.reading[..], r].concat()));
+                } else if let Some(h) = host(Some(i + 1)) {
+                    let h = &bd[h];
+                    ops.push((true, format!("{w}{}", h.word), [r, &h.reading[..]].concat()));
+                }
+            }
             let decoder = &mut self.decoder;
             for (user, word, reading) in ops {
                 if user {

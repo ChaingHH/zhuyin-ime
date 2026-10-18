@@ -63,6 +63,13 @@ const PUNCT: Record<string, string> = {
 
 export type InputMode = 'zhuyin' | 'english';
 
+/**
+ * 選了也不併進相鄰詞的單字（commit 規則 4）：代名詞、虛詞本來就獨立成詞，改它是看上下文
+ * （因為|他 ↔ 因為|她），存成「因為他」反而讓下次的「因為她」更難打。
+ * ponytail: 手列清單；要更準改成查 LM 的單字頻率。和 native/src/engine.rs STANDALONE 同一份
+ */
+const STANDALONE = new Set([...'他她它牠祂你妳您我的地得在再那哪這是了著過也都就']);
+
 interface AlignedWord {
   word: string;
   seq: string[];
@@ -129,7 +136,10 @@ export class ImeEngine {
     const seq = this.comp.sequence;
     const adapt = this.adapter?.enabled ? this.adapter : undefined;
     const paths = this.decoder.decode(seq, {
-      modifier: adapt ? (w: string) => adapt.modifierFor(seq, w) : undefined,
+      // X2 的選字紀錄以「該詞的讀音」為鍵（recordSelection 存的是詞自己的音節），不是整句
+      modifier: adapt
+        ? (w: string, pos: number, len: number) => adapt.modifierFor(seq.slice(pos, pos + len), w)
+        : undefined,
       alternatives: this.alternatives(seq),
       fixed: this.fixed,
     });
@@ -394,8 +404,10 @@ export class ImeEngine {
         bufPicked = false;
       };
       let at = 0;
+      const pickedAt: boolean[] = [];
       for (const w of aligned) {
         const isPicked = picked.has(`${at}:${w.word}`);
+        pickedAt.push(isPicked);
         // 空格等原樣字元是詞界：不併進造詞
         if (w.word === UNK || [...w.word].length !== 1 || isLiteralToken(w.seq[0]!)) {
           flush();
@@ -408,6 +420,27 @@ export class ImeEngine {
         at += w.seq.length;
       }
       flush();
+
+      // 4) 選過的單字左右都是多字詞（狀態|欄 把蘭改成欄）：單字自己成不了詞，上面的規則存不到；
+      //    併進相鄰的詞存成使用者詞，左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □
+      const len = (i: number): number => [...aligned[i]!.word].length;
+      const real = (i: number): boolean =>
+        i >= 0 &&
+        i < aligned.length &&
+        aligned[i]!.word !== UNK &&
+        !isLiteralToken(aligned[i]!.seq[0]!);
+      const host = (i: number): boolean => real(i) && len(i) >= 2 && len(i) + 1 <= 4;
+      aligned.forEach((w, i) => {
+        if (!pickedAt[i] || !real(i) || len(i) !== 1 || STANDALONE.has(w.word)) return;
+        if ((real(i - 1) && len(i - 1) === 1) || (real(i + 1) && len(i + 1) === 1)) return;
+        if (host(i - 1)) {
+          const h = aligned[i - 1]!;
+          addUser(h.word + w.word, [...h.seq, ...w.seq]);
+        } else if (host(i + 1)) {
+          const h = aligned[i + 1]!;
+          addUser(w.word + h.word, [...w.seq, ...h.seq]);
+        }
+      });
     }
 
     this.clear();
