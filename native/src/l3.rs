@@ -25,12 +25,13 @@ pub struct ChannelOptions {
 impl Default for ChannelOptions {
     fn default() -> Self {
         ChannelOptions {
-            sub: 9.0,
-            extra: 10.5,
-            miss: 12.0,
-            tone_adj: 7.5,
-            tone: 10.5,
-            fuzzy: 7.5,
+            // 與 TS 同步（packages/core/src/l3.ts）：寧可不修也不要修錯
+            sub: 18.0,
+            extra: 21.0,
+            miss: 24.0,
+            tone_adj: 15.0,
+            tone: 21.0,
+            fuzzy: 15.0,
             nasal: 3.5,
             max_alts: 24,
         }

@@ -101,9 +101,9 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 再登出登入。它把 `zhuyin.prev\` 的檔案放回 `zhuyin\`（同樣用改名的方式，不停 PIME）。
 
-## 只留「注音 (zhuyin-native)」
+## 只留「注音 (zhuyin-native)」（預設）
 
-要讓 Windows 只列出本專案、不再列出新酷音、小麥注音等 PIME 內建輸入法時，用系統管理員 PowerShell：
+安裝或更新時，預設就只留本專案，新酷音、小麥注音等 PIME 內建輸入法會藏起來。要保留它們，安裝時加 `-KeepAll`。之後想手動切換，用系統管理員 PowerShell：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -OnlyZhuyin
@@ -118,7 +118,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
   ```
 
 - 兩者都會在 PIME 執行中重新註冊 DLL，跑完請**馬上登出再登入**，不要先開別的程式打字。
-- 在 `-OnlyZhuyin` 狀態下 `-Uninstall` 會拒絕執行，要先 `-RestoreAll`，否則 PIME 會一個輸入法都不剩。
+- 在 `-OnlyZhuyin` 狀態下 `-Uninstall` 會先還原藏起來的輸入法，再移除本專案。
 
 ## 使用
 
@@ -139,14 +139,14 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | 選字視窗 | PageUp | 上一頁 |
 | 選字視窗 | Enter | 選反白的候選。選完游標跳到這段後面（下一個字或詞的開頭） |
 | 選字視窗 | 1–9 | 選本頁第 n 個 |
-| 選字視窗 | → 或 Tab | 展開成表格（每列 3 個） |
+| 選字視窗 | → 或 Tab | 展開成一列 9 個 |
 | 選字視窗 | ← | 收回成一欄 |
 | 選字視窗 | Esc、Backspace | 關閉視窗，不改字 |
 
 - 選字視窗的鍵位照微軟官方說明（[Microsoft Traditional Chinese IME](https://support.microsoft.com/help/5001290) 的 Bopomofo 選字視窗）：↓ 進入視窗、↓↑ 移動、空白翻頁、數字選、Enter 選反白。
 - 選了清單最後一項（注音本身），那個字就照打的注音送出，不會被學成詞。
 - 沒做的微軟注音功能：Shift＋數字的聯想詞、全形／半形。
-- 表格只是把同一頁的 9 個候選排成 3×3；PIME 的視窗一次只能畫一頁，顏色也固定用系統色。
+- 展開只是把同一頁的 9 個候選排成一列；PIME 的視窗一次只能畫一頁，顏色也固定用系統色。
 - 打錯音、ㄣ／ㄥ 等模糊音會自動更正（L3，預設開）。
 
 ## 記憶體
@@ -193,7 +193,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 移除
 
-雙擊 `uninstall.cmd`，或用系統管理員 PowerShell（用過 `-OnlyZhuyin` 的話先 `-RestoreAll`）：
+雙擊 `uninstall.cmd`，或用系統管理員 PowerShell（會順便還原藏起來的 PIME 輸入法）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Uninstall

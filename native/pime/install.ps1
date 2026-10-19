@@ -1,8 +1,9 @@
 ﻿# 把 zhuyin-native 裝成 PIME 的一個後端（使用說明見 docs/PIME-INSTALL.md，技術細節見 docs/MEMORY.md §6）。
 #   .\install.ps1 -Stage <目錄>   只組出要放進 PIME 的 zhuyin\ 資料夾，不動系統（可先檢查內容）
 #   .\install.ps1                 安裝或更新（需系統管理員）。更新前把現有的 zhuyin\ 備份成 zhuyin.prev\
+#                                 預設 PIME 只留「注音 (zhuyin-native)」（同 -OnlyZhuyin）；-KeepAll 保留新酷音、小麥注音等
 #   .\install.ps1 -Rollback       用 zhuyin.prev\ 換回上一版（需系統管理員）
-#   .\install.ps1 -Uninstall      移除（需系統管理員；有用過 -OnlyZhuyin 要先 -RestoreAll）
+#   .\install.ps1 -Uninstall      移除（需系統管理員；會先還原 -OnlyZhuyin 藏起來的輸入法）
 #   .\install.ps1 -OnlyZhuyin     PIME 只留「注音 (zhuyin-native)」，隱藏新酷音、小麥注音等（第一次會把 backends.json 備份成 backends.json.full）
 #   .\install.ps1 -RestoreAll     用 backends.json.full 還原 PIME 全部輸入法
 #   .\install.ps1 -From <目錄>    用已經組好的 zhuyin\ 資料夾安裝（Setup.exe 用；不需要 repo 與 Rust）
@@ -21,6 +22,7 @@ param(
   [switch]$Uninstall,
   [switch]$OnlyZhuyin,
   [switch]$RestoreAll,
+  [switch]$KeepAll,
   [switch]$Rollback,
   [string]$From = '',
   [string]$Log = ''
@@ -89,9 +91,18 @@ function Put-Files([string]$dir, $files) {
 }
 
 # backends.json 用不含 BOM 的 UTF-8 寫回（PIMELauncher 用 Rust 解析）
-function Write-Backends($list) {
+function Write-Backends($list, [string]$path = $backends) {
   $json = ConvertTo-Json -InputObject @($list) -Depth 3
-  [IO.File]::WriteAllText($backends, $json, (New-Object Text.UTF8Encoding $false))
+  [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding $false))
+}
+
+# PIME 只留注音 (zhuyin-native)。$all 是含 zhuyin 的完整清單，第一次存成 backends.json.full 給 -RestoreAll／-Uninstall 還原
+# 先在目前的後端都還在時取消註冊，再縮短清單、重新註冊
+function Keep-Only-Zhuyin($all) {
+  if (-not (Test-Path $full)) { Write-Backends $all $full }
+  Register-Dlls '/u'
+  Write-Backends ($all | Where-Object { $_.name -eq $name })
+  Register-Dlls ''
 }
 
 function Register-Dlls([string]$flag) {
@@ -125,11 +136,7 @@ if ($Rollback) {
 
 if ($OnlyZhuyin) {
   if (-not $installed) { throw '還沒安裝 zhuyin 後端，先執行安裝' }
-  # 先在全部後端都還在時取消註冊，再縮短清單、重新註冊：只剩注音 (zhuyin-native)
-  if (-not (Test-Path $full)) { Copy-Item $backends $full }
-  Register-Dlls '/u'
-  Write-Backends ($list | Where-Object { $_.name -eq $name })
-  Register-Dlls ''
+  Keep-Only-Zhuyin $list
   Write-Host "PIME 只剩注音 (zhuyin-native)。完整清單在 $full，用 -RestoreAll 還原。請馬上登出再登入"
   Finish
 }
@@ -145,13 +152,16 @@ if ($RestoreAll) {
 }
 
 if ($Uninstall) {
-  if (Test-Path $full) { throw "目前是 -OnlyZhuyin 狀態，先執行 -RestoreAll 再移除" }
+  # -OnlyZhuyin 狀態：用完整清單，下面重新註冊時其他輸入法就回來了
+  $hidden = Test-Path $full
+  if ($hidden) { $list = @(Get-Content -Raw -Encoding UTF8 $full | ConvertFrom-Json) }
   if ($installed) {
     # 先在後端還在時取消註冊（把 PIME 的輸入法全部移掉），再改清單、重新註冊其餘輸入法
     Register-Dlls '/u'
     Write-Backends ($list | Where-Object { $_.name -ne $name })
     Register-Dlls ''
   }
+  if ($hidden) { Remove-Item $full }
   # 後端還在跑時刪不掉執行檔：登出再登入後再跑一次 -Uninstall 就會刪掉
   foreach ($d in @($dest, $prev)) {
     if (Test-Path $d) {
@@ -173,8 +183,16 @@ if (Test-Path $dest) {
 Put-Files $dest $files
 if (-not $installed) {
   $list += [pscustomobject]@{ name = $name; command = "$name\zhuyin-native.exe"; workingDir = $name; params = 'pime' }
+}
+$others = @($list | Where-Object { $_.name -ne $name }).Count
+if (-not $KeepAll -and $others -gt 0) {
+  Keep-Only-Zhuyin $list
+  Write-Host "PIME 只留注音 (zhuyin-native)，其他 $others 個後端的輸入法藏起來了（-RestoreAll 還原、-KeepAll 安裝時保留）"
+} elseif (-not $installed) {
   Write-Backends $list
   Register-Dlls ''
+}
+if (-not $installed) {
   Write-Host "已安裝到 $dest（backends.json 備份在 backends.json.bak）"
   Write-Host '接著：登出再登入，再到「設定 > 時間與語言 > 語言 > 中文(台灣) > 鍵盤」加入「注音 (zhuyin-native)」'
 } else {

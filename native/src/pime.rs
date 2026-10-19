@@ -35,8 +35,8 @@ const ID_MODE: i64 = 1;
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 const ID_SHIFT_BOTH: i64 = 4;
-/// 選字視窗展開成表格時每列幾個（一頁 9 個 → 3×3）。PIME 的視窗一次只畫一頁，表格不會比清單多
-const TABLE_COLS: i64 = 3;
+/// 選字視窗展開時每列幾個：一頁 9 個排成一列（使用者指定，2026-10-20）。PIME 的視窗一次只畫一頁
+const TABLE_COLS: i64 = 9;
 /// 候選字型：微軟注音用的微軟正黑體（LOGFONT 字型名最多 31 字元，PIMETextService.cpp:258）
 const CAND_FONT: &str = "Microsoft JhengHei UI";
 const CAND_FONT_SIZE: i64 = 14;

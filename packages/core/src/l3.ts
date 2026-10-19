@@ -116,14 +116,15 @@ export class Channel {
   constructor(legal: Iterable<string>, opts: ChannelOptions = {}, layout: KeyboardLayout = DACHEN) {
     this.legal = new Set(legal);
     this.o = {
-      // 預設＝初始值 ×1.5：合成錯誤評測（每鍵 3%、每音節 3% 認知錯誤）的 dev 上，
-      // 有錯輸入句準 22%→51%，乾淨輸入只差 −0.4／0（×1 誤更正較多，×2 起救回率下降）
-      sub: opts.sub ?? 9,
-      extra: opts.extra ?? 10.5,
-      miss: opts.miss ?? 12,
-      toneAdj: opts.toneAdj ?? 7.5,
-      tone: opts.tone ?? 10.5,
-      fuzzy: opts.fuzzy ?? 7.5,
+      // 預設＝初始值 ×3：不修錯比修對重要（使用者要求，2026-10-20）。×1.5 會把照打、詞典沒有的
+      // 「文檔」改成「存檔」（debug-l3-probe.ts）。debug-l3.ts dev/test：乾淨輸入與 ×1.5 差不多
+      // （口語 76.4/75.8、書面 75.6/81.2），有錯輸入救回率降低（口語 52.0/46.0 → 41.6/38.8）
+      sub: opts.sub ?? 18,
+      extra: opts.extra ?? 21,
+      miss: opts.miss ?? 24,
+      toneAdj: opts.toneAdj ?? 15,
+      tone: opts.tone ?? 21,
+      fuzzy: opts.fuzzy ?? 15,
       // 3.5：ㄧㄣ ㄍㄞ → 應該（照打的「因|該」只贏 3.5）；乾淨輸入 dev/test −0.4/−0.3
       nasal: opts.nasal ?? 3.5,
       maxAlts: opts.maxAlts ?? 24,

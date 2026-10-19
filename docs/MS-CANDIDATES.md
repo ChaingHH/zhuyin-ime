@@ -40,7 +40,7 @@
 | 編號 | 能 | `setSelKeys` 設 `123456789`：每列畫成「1. 候選」（`CandidateWindow.cpp:256` 的 `L"?. "`） |
 | 反白 | 能 | `customizeUI.candUseCursor = true`，加上每次送 `candidateCursor` |
 | 字型、字級 | 能 | `onActivate` 送 `candFontName = "Microsoft JhengHei UI"`、`candFontSize = 14`（點數，`PIMETextService.cpp:416` 換算成像素）。`config.json` 的 `candFontName`／`candFontSize` 可改。字級 14 是估的，沒有和微軟注音並排量過 |
-| 表格展開（→／Tab）、收回（←） | 能，有限制 | 改 `candPerRow`：展開成每列 3 個（一頁 9 個 → 3×3），收回成 1。視窗關掉後再開，回到一欄 |
+| 表格展開（→／Tab）、收回（←） | 能，有限制 | 改 `candPerRow`：展開成每列 9 個（一頁 9 個排成一列，使用者指定），收回成 1。視窗關掉後再開，回到一欄 |
 | 顏色、圓角、陰影、分頁指示 | **不能** | 顏色寫死為系統色 `COLOR_WINDOWTEXT`／`COLOR_WINDOW`，邊框是 3D 邊框（`CandidateWindow.cpp:200–216`），協定沒有對應欄位 |
 | 表格一次顯示多頁 | **不能** | DLL 的候選數不能超過選字鍵數（`PIMETextService.cpp:273` 的 assert），一頁最多 9 個，表格只是同一頁換成多欄 |
 | 讀音放在清單最後一項 | 能 | 在 `candidateList` 最後加上讀音字串（引擎的工作，見第 4 節） |

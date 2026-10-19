@@ -428,8 +428,8 @@ async function smoke(): Promise<void> {
   await press('ArrowDown');
   const wide = await press('ArrowRight');
   check(
-    cols(wide) === 3 && wide.last['showCandidates'] === true,
-    '→ 展開成表格（每列 3 個），視窗仍開著',
+    cols(wide) === 9 && wide.last['showCandidates'] === true,
+    '→ 展開成一列 9 個，視窗仍開著',
   );
   check(cols(await press('Tab')) === undefined, 'Tab 在表格中不重送欄數');
   const narrow = await press('ArrowLeft');
