@@ -46,6 +46,8 @@ const limit = Number(process.argv[3] ?? Infinity);
 const keyOf = (code: string): [number, number] => {
   const m = /^(Digit|Key)(.)$/.exec(code);
   if (m) return [m[2]!.toUpperCase().charCodeAt(0), m[2]!.toLowerCase().charCodeAt(0)];
+  const np = /^Numpad(\d)$/.exec(code);
+  if (np) return [0x60 + Number(np[1]), np[1]!.charCodeAt(0)];
   const t: Record<string, [number, number]> = {
     Space: [0x20, 0x20],
     Minus: [0xbd, 0x2d],
@@ -437,6 +439,38 @@ async function smoke(): Promise<void> {
   await press('Tab');
   await press('Escape'); // 關視窗
   check(cols(await press('ArrowDown')) === 1, '視窗關掉後再開，回到一欄');
+  await press('Escape');
+  await press('Escape');
+
+  // 表格一頁最多 4 行 × 9；反白走過本頁最後一個就翻頁；數字（含數字鍵盤）選反白那一行的第 n 個
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  const list9 = (await press('ArrowDown')).last['candidateList'] as string[];
+  const table = (await press('ArrowRight')).last['candidateList'] as string[];
+  check(
+    list9.length === 9 && table.length > 9 && table.length <= 36,
+    `表格一頁 ${table.length} 個（清單 ${list9.length} 個）`,
+  );
+  for (let i = 0; i < 9; i++) await press('ArrowDown');
+  const row2 = await press('Numpad1');
+  check(row2.last['compositionString'] === table[9], `數字鍵盤 1 選第二行第一個（${table[9]}）`);
+  await press('Escape');
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  const full = (await press('ArrowRight')).last['candidateList'] as string[];
+  if (full.length === 36) {
+    let t = await press('ArrowDown');
+    for (let i = 1; i < 36; i++) t = await press('ArrowDown');
+    const next = t.last['candidateList'] as string[];
+    check(t.last['candidateCursor'] === 0 && next[0] !== full[0], '反白走過第 36 個就翻到下一頁');
+  }
+  await press('Escape');
+  await press('Escape');
+  // 數字鍵盤：組字中當原樣數字插進去；沒在組字就放行
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  const num = await press('Numpad5');
+  check(num.eaten && String(num.last['compositionString']).endsWith('5'), '組字中數字鍵盤打出數字');
+  await press('Escape');
+  check(!(await press('Numpad5')).eaten, '沒在組字時數字鍵盤放行');
   await press('Escape');
   await press('Escape');
 }

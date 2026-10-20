@@ -243,7 +243,7 @@ export class ImeEngine {
     const n = m.items.length;
     const pages = Math.ceil(n / MENU_PAGE);
     const pageItems = m.items.slice(m.page * MENU_PAGE, (m.page + 1) * MENU_PAGE);
-    const digit = /^Digit([1-9])$/.exec(code);
+    const digit = /^(?:Digit|Numpad)([1-9])$/.exec(code);
     const turn = (page: number): void => {
       m.page = page;
       m.sel = page * MENU_PAGE;
@@ -347,13 +347,15 @@ export class ImeEngine {
     // 有字就當原樣字元插在游標處，跟著一起送出（還沒確定就能加，游標在中間也行）。
     // 打到一半的注音時：空白是一聲，標點不收（先把注音打完或退掉）
     const punct = ev.key !== undefined ? PUNCT[ev.key] : undefined;
-    const literal = punct ?? (ev.code === 'Space' ? ' ' : undefined);
+    // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
+    const symbol = punct ?? /^Numpad([0-9])$/.exec(ev.code)?.[1];
+    const literal = symbol ?? (ev.code === 'Space' ? ' ' : undefined);
     let inserted = false;
     if (literal !== undefined && this.comp.pendingDisplay === '') {
       if (this.comp.isEmpty)
         return { composition: '', candidates: [], lastLegal: true, text: literal, cursor: 0 };
       inserted = this.comp.pushLiteral(literal);
-    } else if (punct) return this.state(true);
+    } else if (symbol) return this.state(true);
     const nav = this.onNavKey(ev.code);
     if (nav) return nav;
     const outcome = inserted ? { accepted: true, legal: true } : this.comp.onKeyEvent(ev);

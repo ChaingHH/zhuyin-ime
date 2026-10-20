@@ -94,6 +94,8 @@ pub struct ImeEngine {
     last_seq: Vec<String>,
     fixed: Vec<FixedSpan>,
     menu: Option<Menu>,
+    /// 選字視窗一頁幾個（預設 MENU_PAGE；PIME 表格展開時是好幾行）
+    page_size: usize,
 }
 
 impl ImeEngine {
@@ -109,6 +111,15 @@ impl ImeEngine {
             last_seq: vec![],
             fixed: vec![],
             menu: None,
+            page_size: MENU_PAGE,
+        }
+    }
+
+    /// 改一頁的候選數（MENU_PAGE 的倍數）；視窗開著就換到反白所在的那一頁
+    pub fn set_page_size(&mut self, n: usize) {
+        self.page_size = n;
+        if let Some(m) = self.menu.as_mut() {
+            m.page = m.sel / n;
         }
     }
 
@@ -255,16 +266,20 @@ impl ImeEngine {
     /// 選字視窗開著時的按鍵（微軟注音）：↓↑ 移反白（跨頁、頭尾循環）、空白／PageDown 下一頁、
     /// PageUp 上一頁（反白移到該頁第一個）、Enter 選反白、數字選本頁第 n 個、Esc／Backspace 關閉
     fn on_menu_key(&mut self, code: &str) -> EngineState {
+        let size = self.page_size;
         let m = self.menu.as_mut().unwrap();
         let n = m.items.len();
-        let pages = n.div_ceil(MENU_PAGE);
-        let lo = m.page * MENU_PAGE;
-        let page_items = &m.items[lo..(lo + MENU_PAGE).min(m.items.len())];
+        let pages = n.div_ceil(size);
+        let lo = m.page * size;
+        let page_items = &m.items[lo..(lo + size).min(m.items.len())];
+        // 一頁可能有好幾行（PIME 表格每行 MENU_PAGE 個）：數字選反白那一行的第 n 個
+        let row = (m.sel - lo) / MENU_PAGE * MENU_PAGE;
         let digit = code
             .strip_prefix("Digit")
+            .or_else(|| code.strip_prefix("Numpad"))
             .and_then(|d| d.parse::<usize>().ok())
             .filter(|d| (1..=9).contains(d));
-        if let Some(f) = digit.and_then(|d| page_items.get(d - 1)) {
+        if let Some(f) = digit.and_then(|d| page_items.get(row + d - 1)) {
             let f = f.clone();
             self.select(f, true);
         } else if code == "Enter" {
@@ -272,14 +287,14 @@ impl ImeEngine {
             self.select(f, true);
         } else if code == "ArrowDown" || code == "ArrowUp" {
             m.sel = (m.sel + if code == "ArrowDown" { 1 } else { n - 1 }) % n;
-            m.page = m.sel / MENU_PAGE;
+            m.page = m.sel / size;
         } else if code == "Space" || code == "PageDown" || code == "PageUp" {
             m.page = if code == "PageUp" {
                 (m.page + pages - 1) % pages
             } else {
                 (m.page + 1) % pages
             };
-            m.sel = m.page * MENU_PAGE;
+            m.sel = m.page * size;
         } else if code == "Escape" || code == "Backspace" {
             self.menu = None;
         }
@@ -324,13 +339,13 @@ impl ImeEngine {
                 items: m
                     .items
                     .iter()
-                    .skip(m.page * MENU_PAGE)
-                    .take(MENU_PAGE)
+                    .skip(m.page * self.page_size)
+                    .take(self.page_size)
                     .map(|f| f.word.clone())
                     .collect(),
                 page: m.page,
-                pages: m.items.len().div_ceil(MENU_PAGE),
-                cursor: m.sel - m.page * MENU_PAGE,
+                pages: m.items.len().div_ceil(self.page_size),
+                cursor: m.sel - m.page * self.page_size,
             }),
         }
     }
@@ -408,6 +423,11 @@ impl ImeEngine {
             return self.state(true);
         }
         let punct = key.and_then(|k| PUNCT.iter().find(|(p, _)| *p == k).map(|(_, v)| *v));
+        // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
+        let numpad = code
+            .strip_prefix("Numpad")
+            .filter(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_digit());
+        let punct = punct.or(numpad);
         let literal = punct.or((code == "Space").then_some(" "));
         let mut inserted = false;
         match literal {

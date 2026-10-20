@@ -35,8 +35,12 @@ const ID_MODE: i64 = 1;
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 const ID_SHIFT_BOTH: i64 = 4;
-/// 選字視窗展開時每列幾個：一頁 9 個排成一列（使用者指定，2026-10-20）。PIME 的視窗一次只畫一頁
+/// 選字視窗展開時每列幾個（使用者指定，2026-10-20）。PIME 的視窗一次只畫一頁
 const TABLE_COLS: i64 = 9;
+/// 表格展開時一頁最多幾行；選過最後一個就翻頁
+const TABLE_ROWS: i64 = 4;
+/// 選字鍵標籤：每行都是 1–9。DLL 畫的候選數不超過標籤數（PIMETextService.cpp updateCandidates）
+const SEL_KEYS: &str = "123456789123456789123456789123456789";
 /// 候選字型：微軟注音用的微軟正黑體（LOGFONT 字型名最多 31 字元，PIMETextService.cpp:258）
 const CAND_FONT: &str = "Microsoft JhengHei UI";
 const CAND_FONT_SIZE: i64 = 14;
@@ -60,6 +64,7 @@ fn code_of(vk: u32) -> Option<String> {
     let c = match vk {
         0x30..=0x39 => return Some(format!("Digit{}", vk - 0x30)),
         0x41..=0x5a => return Some(format!("Key{}", char::from(vk as u8))),
+        0x60..=0x69 => return Some(format!("Numpad{}", vk - 0x60)),
         0x08 => "Backspace",
         0x09 => "Tab",
         0x0d => "Enter",
@@ -302,6 +307,10 @@ impl Backend {
             self.table = false;
         }
         let cols = if self.table { TABLE_COLS } else { 1 };
+        let page = if self.table { TABLE_COLS * TABLE_ROWS } else { TABLE_COLS };
+        if let Some(e) = self.eng.as_mut() {
+            e.set_page_size(page as usize);
+        }
         if cols != self.sent_cols {
             self.sent_cols = cols;
             r.insert("customizeUI".into(), json!({ "candPerRow": cols }));
@@ -477,7 +486,7 @@ impl Backend {
         self.mode_button(r, "changeButton");
     }
 
-    /// 單按 Shift（onKeyUp，有 edit session）：換模式並提示「注」／「英」。
+    /// 單按 Shift（onKeyUp，有 edit session）：換模式（只換語言列圖示，不跳提示）。
     /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文
     fn toggle(&mut self, r: &mut Map<String, Value>) {
         // 引擎沒載入就沒有組字，只換模式
@@ -493,12 +502,6 @@ impl Backend {
             Mode::Zhuyin
         };
         self.mode_button(r, "changeButton");
-        let msg = if self.mode == Mode::Zhuyin {
-            "注"
-        } else {
-            "英"
-        };
-        r.insert("showMessage".into(), json!({"message": msg, "duration": 1}));
     }
 
     fn filter_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
@@ -613,7 +616,7 @@ impl Backend {
             "onActivate" => {
                 self.active.insert(client.to_string());
                 self.read_settings();
-                r.insert("setSelKeys".into(), json!("123456789"));
+                r.insert("setSelKeys".into(), json!(SEL_KEYS));
                 self.table = false;
                 self.sent_cols = 1;
                 r.insert(
