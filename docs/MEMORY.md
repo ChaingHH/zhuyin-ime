@@ -475,8 +475,9 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 
 - 不再停 PIME。被鎖住的執行檔與映射中的模型改名成 `*.old-<時間>` 再放新檔：Windows 允許改名執行中的 exe 和有映射的檔案，只是不能覆寫（實測：覆寫失敗訊息與使用者看到的一樣；改名、甚至刪除改名後的映射檔都成功，後端照常回應）。
 - 更新前把 `zhuyin\` 備份成 `zhuyin.prev\`，新增 `-Rollback`。
-- 已經裝過時不再 `regsvr32`（只有第一次安裝、`-OnlyZhuyin`、`-RestoreAll`、`-Uninstall` 才會）。
-- 2026-10-20：安裝預設等於 `-OnlyZhuyin`（使用者要求），`-KeepAll` 保留其他後端。從全部後端改成只留本專案的那次更新也會 `regsvr32`，要登出再登入。`-Uninstall` 在只留本專案的狀態會先用 `backends.json.full` 還原，不再拒絕。
+- 已經裝過時不再 `regsvr32`（只有第一次安裝、`-RestoreAll`、`-Uninstall` 才會）。
+- 2026-10-20 12:05–12:06：Explorer 又一秒當一次（66 次，`ucrtbase.dll` `0xc0000409`，和 10/18 同樣的特徵），12:07 登出再登入後停止。前一刻（12:04）的安裝預設做了 `-OnlyZhuyin`：`backends.json` 只剩 zhuyin、重新註冊 DLL。使用者的鍵盤清單（`Get-WinUserLanguageList` 的 `InputMethodTips`）還留著 5 個被拿掉的 PIME 輸入法。推論：Explorer 裡這些輸入法的 DLL 實例向啟動器要一個已經不存在的後端，RPC 失敗，觸發未捕捉例外（沒看到傾印，時間與特徵吻合）。
+- 修正：拿掉 `-OnlyZhuyin`。「只留本專案」改由 `run.ps1` 以一般權限改使用者的鍵盤清單：拿掉其他 PIME 的 tip（CLSID 從 `HKLM:\SOFTWARE\Microsoft\CTF\TIP` 找有本專案 profile 的那個），加上本專案，非 PIME 的（微軟注音）保留。不動 `backends.json`、不重新註冊。`-RestoreAll` 與 `-Uninstall` 仍會用 `backends.json.full` 還原舊狀態。
 - `docs/PIME-INSTALL.md` 拿掉「`/quit` 後用 `/console` 看 log」的建議，加上不要停啟動器的警告。
 
 後端這邊要守的規則（`debug-pime.ts` 會檢查）：每則請求都要在 2 秒內回（檢查器 1 秒就報錯），而且後端不能在處理請求時結束。
@@ -534,7 +535,7 @@ PIME（[EasyIME/PIME](https://github.com/EasyIME/PIME)）是開源的 Windows �
 
 PIME 三欄的量法相同：直接驅動後端，不含 TSF 開銷。
 
-#### 安裝本專案的後端（2026-10-17 已安裝；預設只留本專案，見下）
+#### 安裝本專案的後端（2026-10-17 已安裝）
 
 檔案在 `native/pime/`：
 

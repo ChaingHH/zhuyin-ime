@@ -16,7 +16,7 @@
 
 | 檔案 | 作用 |
 |---|---|
-| `uninstall.cmd` | 移除（用過「只留注音」的話，要先還原，見後面） |
+| `uninstall.cmd` | 移除 |
 | `rollback.cmd` | 換回上一版（每次更新前會自動備份上一版） |
 
 它們做的事和下面「步驟」一節的指令完全相同，安全規則也一樣：不停 PIME、被鎖的檔案改名不覆寫、保留上一版。按「否」拒絕權限時，什麼都不會改。
@@ -103,22 +103,21 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 只留「注音 (zhuyin-native)」（預設）
 
-安裝或更新時，預設就只留本專案，新酷音、小麥注音等 PIME 內建輸入法會藏起來。要保留它們，安裝時加 `-KeepAll`。之後想手動切換，用系統管理員 PowerShell：
+`install.cmd` 裝完會調整**你的鍵盤清單**：PIME 的輸入法只留「注音 (zhuyin-native)」，新酷音、小麥注音等拿掉。微軟注音這類非 PIME 的鍵盤保留，PIME 出問題時還能打字。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -OnlyZhuyin
-```
+- 這和在「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」裡移除鍵盤是同一件事。要其他輸入法，到那裡加回來。
+- 不動 PIME 的 `backends.json`，也不重新註冊 DLL。
 
-- 第一次執行會把完整的 `backends.json` 備份成 `backends.json.full`，再把 `backends.json` 縮成只有 `zhuyin` 一筆，並重新註冊 PIME 的 DLL（先取消註冊全部，再註冊剩下的）。
-- 內建輸入法的檔案都還在，只是不再註冊。
-- 還原全部：
+警告：**不要從 PIME 拿掉其他後端**（舊版的 `-OnlyZhuyin`，已移除）。2026-10-20 這樣做之後，鍵盤清單裡還留著那些輸入法，Explorer 一呼叫就找不到後端，一秒當一次，直到登出。
+
+舊版 `-OnlyZhuyin` 留下的狀態（PIME 目錄有 `backends.json.full`）：
+
+- `-Uninstall` 會先用它還原其他輸入法，再移除本專案。
+- 要單獨還原，用系統管理員 PowerShell 執行下面的指令，跑完**馬上登出再登入**：
 
   ```powershell
   powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -RestoreAll
   ```
-
-- 兩者都會在 PIME 執行中重新註冊 DLL，跑完請**馬上登出再登入**，不要先開別的程式打字。
-- 在 `-OnlyZhuyin` 狀態下 `-Uninstall` 會先還原藏起來的輸入法，再移除本專案。
 
 ## 使用
 

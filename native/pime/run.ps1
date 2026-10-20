@@ -80,8 +80,29 @@ try {
   Write-Host ''
   Show-Log
   if ($p.ExitCode -ne 0) { Done $false "$($title)失敗。記錄檔：$log" }
+  if ($Action -eq 'install') {
+    # 鍵盤清單只留本專案這個 PIME 輸入法（其他 PIME 輸入法拿掉；微軟注音等非 PIME 的保留，PIME 壞掉時還能打字）。
+    # 只改使用者設定、等同在「設定」裡移除鍵盤；不動 backends.json，執行中的程式不會找不到後端
+    $tip = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\CTF\TIP' |
+      Where-Object { Test-Path "$($_.PSPath)\LanguageProfile\0x00000404\{64B60746-4570-4343-A34A-85C12F03A93A}" } |
+      Select-Object -First 1
+    if ($tip) {
+      $pimeTip = "0404:$($tip.PSChildName.ToUpper())"
+      $ours = "$pimeTip{64B60746-4570-4343-A34A-85C12F03A93A}"
+      $langs = Get-WinUserLanguageList
+      $zh = $langs | Where-Object LanguageTag -eq 'zh-Hant-TW'
+      if (-not $zh) { $langs.Add('zh-Hant-TW'); $zh = $langs | Where-Object LanguageTag -eq 'zh-Hant-TW' }
+      $keep = @($zh.InputMethodTips | Where-Object { -not $_.ToUpper().StartsWith($pimeTip) }) + $ours
+      if (($zh.InputMethodTips -join ',') -ne ($keep -join ',')) {
+        $zh.InputMethodTips.Clear()
+        foreach ($t in $keep) { $zh.InputMethodTips.Add($t) }
+        try { Set-WinUserLanguageList $langs -Force } catch { Write-Host "  鍵盤清單沒改成（$($_.Exception.Message)），可到「設定」自己移除" -ForegroundColor Yellow }
+        Write-Host '  鍵盤清單：PIME 的輸入法只留「注音 (zhuyin-native)」（要其他的可到「設定」加回）'
+      }
+    }
+  }
   $next = @{
-    install   = '完成。請登出再登入。第一次安裝的話，再到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」加入「注音 (zhuyin-native)」。'
+    install   = '完成。請登出再登入。'
     uninstall = '已移除。請登出再登入。'
     rollback  = '已換回上一版。請登出再登入。'
   }[$Action]
