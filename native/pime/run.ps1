@@ -1,6 +1,8 @@
 ﻿# install.cmd／uninstall.cmd／rollback.cmd 的實作（docs/PIME-INSTALL.md）。以一般權限執行：
 #   install   有 cargo 就先建置（一般權限），檢查資料檔，再只把 install.ps1 那一步用系統管理員權限跑（UAC）
-#   uninstall／rollback   直接提權跑 install.ps1 -Uninstall／-Rollback
+#   uninstall  兩段：先以一般權限從鍵盤清單拿掉 zhuyin（install.ps1 -Keyboard remove）；拿掉了或後端還在跑就請使用者
+#              登出、再跑一次，不提權。沒人在用了才提權跑 -Uninstall（改 backends.json、regsvr32、刪檔）
+#   rollback   直接提權跑 install.ps1 -Rollback
 #   stage     不提權：把要安裝的檔案組到 native\pime\dist\zhuyin\（做 Setup.exe 用，也可拿來試跑）
 # 提權的那個視窗看不到輸出，所以 install.ps1 寫記錄檔（-Log），這裡再印出來，最後停住讓使用者看結果。
 # 安全規則同 install.ps1：不停 PIMELauncher、被鎖的檔案改名不覆寫、保留 zhuyin.prev\。
@@ -10,7 +12,8 @@ $here = $PSScriptRoot
 $native = Split-Path $here
 $repo = Split-Path $native
 # 資料目錄：repo 的 data\；ZHUYIN_DATA 可改（例如在 git 工作樹裡測試）
-$data = if ($env:ZHUYIN_DATA) { $env:ZHUYIN_DATA } else { Join-Path $repo 'data' }
+# 結尾的 \ 要拿掉：放進 "…\" 會把後面的引號跳脫掉
+$data = if ($env:ZHUYIN_DATA) { $env:ZHUYIN_DATA.TrimEnd([char]92) } else { Join-Path $repo 'data' }
 $script = Join-Path $here 'install.ps1'
 $log = Join-Path $env:TEMP "zhuyin-$Action-$((Get-Date).ToString('yyyyMMddHHmmss')).log"
 $title = @{ install = '安裝／更新'; uninstall = '移除'; rollback = '換回上一版'; stage = '組出安裝檔' }[$Action]
@@ -21,6 +24,15 @@ function Done([bool]$ok, [string]$msg) {
   Write-Host ''
   Read-Host '按 Enter 關閉這個視窗' | Out-Null
   exit ([int](-not $ok))
+}
+
+# 還沒做完、要使用者先登出再登入再跑一次（不是失敗）
+function Later([string]$msg) {
+  Write-Host ''
+  Write-Host "… $msg" -ForegroundColor Yellow
+  Write-Host ''
+  Read-Host '按 Enter 關閉這個視窗' | Out-Null
+  exit 2
 }
 
 # 記錄檔只印 install.ps1 自己的輸出（去掉 Start-Transcript 的頭尾）
@@ -64,6 +76,14 @@ try {
     Done $true "已組到 $dist\zhuyin\（沒有動系統）"
   }
 
+  if ($Action -eq 'uninstall') {
+    Write-Host '1. 從鍵盤清單拿掉「注音 (zhuyin-native)」…'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Keyboard remove
+    $code = $LASTEXITCODE
+    if ($code -eq 2) { Later '還沒移除完：請登出再登入，再雙擊一次 uninstall.cmd。這次只改了你的鍵盤清單。' }
+    if ($code -ne 0) { Done $false '改鍵盤清單失敗，什麼都沒有移除。' }
+  }
+
   $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"", '-Log', "`"$log`"")
   switch ($Action) {
     'install' { $argList += @('-Data', "`"$data`"") }
@@ -79,31 +99,18 @@ try {
   }
   Write-Host ''
   Show-Log
+  if ($p.ExitCode -eq 2) { Later "還沒移除完：請登出再登入，再雙擊一次 uninstall.cmd。記錄檔：$log" }
   if ($p.ExitCode -ne 0) { Done $false "$($title)失敗。記錄檔：$log" }
   if ($Action -eq 'install') {
-    # 鍵盤清單只留本專案這個 PIME 輸入法（其他 PIME 輸入法拿掉；微軟注音等非 PIME 的保留，PIME 壞掉時還能打字）。
-    # 只改使用者設定、等同在「設定」裡移除鍵盤；不動 backends.json，執行中的程式不會找不到後端
-    $tip = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\CTF\TIP' |
-      Where-Object { Test-Path "$($_.PSPath)\LanguageProfile\0x00000404\{64B60746-4570-4343-A34A-85C12F03A93A}" } |
-      Select-Object -First 1
-    if ($tip) {
-      $pimeTip = "0404:$($tip.PSChildName.ToUpper())"
-      $ours = "$pimeTip{64B60746-4570-4343-A34A-85C12F03A93A}"
-      $langs = Get-WinUserLanguageList
-      $zh = $langs | Where-Object LanguageTag -eq 'zh-Hant-TW'
-      if (-not $zh) { $langs.Add('zh-Hant-TW'); $zh = $langs | Where-Object LanguageTag -eq 'zh-Hant-TW' }
-      $keep = @($zh.InputMethodTips | Where-Object { -not $_.ToUpper().StartsWith($pimeTip) }) + $ours
-      if (($zh.InputMethodTips -join ',') -ne ($keep -join ',')) {
-        $zh.InputMethodTips.Clear()
-        foreach ($t in $keep) { $zh.InputMethodTips.Add($t) }
-        try { Set-WinUserLanguageList $langs -Force } catch { Write-Host "  鍵盤清單沒改成（$($_.Exception.Message)），可到「設定」自己移除" -ForegroundColor Yellow }
-        Write-Host '  鍵盤清單：PIME 的輸入法只留「注音 (zhuyin-native)」（要其他的可到「設定」加回）'
-      }
-    }
+    # 鍵盤清單只留本專案這個 PIME 輸入法（一般權限、只改使用者設定；第一次安裝時 PIME 還不認得 zhuyin，會請使用者登出後再跑一次）
+    Write-Host ''
+    Write-Host '3. 鍵盤清單…'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Keyboard only
+    if ($LASTEXITCODE -ne 0) { Write-Host '  鍵盤清單沒改成，可到「設定」自己加入「注音 (zhuyin-native)」' -ForegroundColor Yellow }
   }
   $next = @{
-    install   = '完成。請登出再登入。'
-    uninstall = '已移除。請登出再登入。'
+    install   = '完成。第一次安裝：登出再登入後再雙擊一次 install.cmd（加入鍵盤）；更新時看上面的說明。'
+    uninstall = '已移除。'
     rollback  = '已換回上一版。請登出再登入。'
   }[$Action]
   Done $true $next

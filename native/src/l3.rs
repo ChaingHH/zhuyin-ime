@@ -138,41 +138,49 @@ impl Channel {
         if let Some(h) = self.cache.borrow().get(observed) {
             return h.clone();
         }
-        // 插入順序＋最低代價（JS Map：更新代價不改位置）
-        let mut best: Vec<(String, f64)> = vec![];
-        let mut add = |p: &Parts, cost: f64| {
+        // 插入順序＋最低代價（JS Map：更新代價不改位置）；第三欄＝不受 max_alts 限制（漏按）
+        let mut best: Vec<(String, f64, bool)> = vec![];
+        let mut add = |p: &Parts, cost: f64, keep: bool| {
             let s = join(p);
             if s == observed || !self.legal.contains(&s) {
                 return;
             }
-            match best.iter_mut().find(|(x, _)| *x == s) {
+            match best.iter_mut().find(|(x, _, _)| *x == s) {
                 Some(e) => {
                     if cost < e.1 {
-                        e.1 = cost
+                        e.1 = cost;
+                        e.2 = keep;
                     }
                 }
-                None => best.push((s, cost)),
+                None => best.push((s, cost, keep)),
             }
         };
-        if let Some(p) = parse(observed) {
+        let parsed = parse(observed);
+        if let Some(p) = parsed {
             let o = &self.o;
+            let pools: [&[&'static str]; 3] = [&INITIALS, &MEDIALS, &FINALS];
             for slot in 0..3 {
                 let Some(c) = p.0[slot] else { continue };
                 // 多按一鍵：意圖沒有這個符號
                 let mut q = p;
                 q.0[slot] = None;
-                add(&q, o.extra);
+                add(&q, o.extra, false);
                 // 按到相鄰鍵
                 for &s in self.sym_neighbors.get(c).map_or(&[][..], |v| v) {
                     let s_slot = slot_of(s).unwrap();
                     let mut q = p;
                     if s_slot == slot {
                         q.0[slot] = Some(s);
-                        add(&q, o.sub);
+                        add(&q, o.sub, false);
                     } else if p.0[s_slot].is_none() {
                         q.0[slot] = None;
                         q.0[s_slot] = Some(s);
-                        add(&q, o.sub);
+                        add(&q, o.sub, false);
+                        // 跨槽覆蓋：鄰鍵 c 蓋掉了 slot 槽原本的符號 x（ㄒㄧㄠ 的 U 按成 Y → ㄗㄠ）
+                        for &x in pools[slot] {
+                            q.0[slot] = Some(x);
+                            add(&q, o.sub, false);
+                        }
                     }
                 }
                 let fz = if c == "ㄣ" || c == "ㄥ" {
@@ -183,11 +191,10 @@ impl Channel {
                 for &s in self.fuzzy.get(c).map_or(&[][..], |v| v) {
                     let mut q = p;
                     q.0[slot] = Some(s);
-                    add(&q, fz);
+                    add(&q, fz, false);
                 }
             }
-            // 漏按一鍵：只補空槽
-            let pools: [&[&'static str]; 3] = [&INITIALS, &MEDIALS, &FINALS];
+            // 漏按一鍵：只補空槽。不受 max_alts 限制：同代價的漏按很多，依池順序截斷會砍掉 ㄨˇ→ㄨㄛˇ
             for slot in 0..3 {
                 if p.0[slot].is_some() {
                     continue;
@@ -195,7 +202,7 @@ impl Channel {
                 for &s in pools[slot] {
                     let mut q = p;
                     q.0[slot] = Some(s);
-                    add(&q, o.miss);
+                    add(&q, o.miss, true);
                 }
             }
             // 聲調：相鄰聲調鍵較便宜，其他聲調算記錯
@@ -203,7 +210,7 @@ impl Channel {
             for m in MARKS {
                 if m != p.1 {
                     let cost = if adj.contains(&m) { o.tone_adj } else { o.tone };
-                    add(&(p.0, m), cost);
+                    add(&(p.0, m), cost, false);
                 }
             }
         }
@@ -214,12 +221,16 @@ impl Channel {
         }];
         out.extend(
             best.into_iter()
-                .take(self.o.max_alts)
-                .map(|(syl, cost)| Hypothesis { syl, cost }),
+                .enumerate()
+                .filter(|(i, (_, _, keep))| *i < self.o.max_alts || *keep)
+                .map(|(_, (syl, cost, _))| Hypothesis { syl, cost }),
         );
-        self.cache
-            .borrow_mut()
-            .insert(observed.to_string(), out.clone());
+        // 解析不了的（英文、原樣 token）不快取：常駐時快取才不會跟著打過的英文一直長
+        if parsed.is_some() {
+            self.cache
+                .borrow_mut()
+                .insert(observed.to_string(), out.clone());
+        }
         out
     }
 }

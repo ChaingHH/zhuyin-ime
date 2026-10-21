@@ -141,6 +141,12 @@ if (mode === 'keys') {
         key(syllableToKeyCodes(syl)[0]!);
         key('Backspace');
       }
+      if (r() < 0.03) {
+        // 打到一半切英文（丟掉注音，clear_pending）再切回來重打
+        key(syllableToKeyCodes(syl)[0]!);
+        ev.push('m');
+        ev.push('m');
+      }
       typeSyl(syl);
       if (r() < 0.04) {
         key('Backspace'); // 刪掉剛打的音節再重打
@@ -184,6 +190,8 @@ if (mode === 'keys') {
         key('End');
       }
     });
+    // 送出時只剩打到一半的注音或後面多一個：送出要把它丟掉
+    if (r() < 0.03) key(syllableToKeyCodes(s.syllables[0]!)[0]!);
     if (r() < 0.02) {
       ev.push('m'); // 英文模式打一個字再切回來
       key('KeyA', 'a');

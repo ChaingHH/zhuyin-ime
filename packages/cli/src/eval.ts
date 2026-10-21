@@ -1,6 +1,6 @@
 ﻿import { performance } from 'node:perf_hooks';
 import { CompositionBuffer, DACHEN, isLiteralToken, syllableToKeyCodes } from '@zhuyin/core';
-import { loadEvalSamples, loadRuntime, type EvalSample } from './runtime.js';
+import { loadEvalSamples, loadRuntime, type EvalSample, type LoadedRuntime } from './runtime.js';
 
 export interface EvalReport {
   samples: number;
@@ -23,15 +23,23 @@ export async function runEval(
     viaKeystrokes?: boolean;
     decK?: number;
   } = {},
+  /** 已載入的 runtime（多檔、sweep 共用一份）；a、γ 會改寫到它的解碼器設定上 */
+  rt?: LoadedRuntime,
 ): Promise<EvalReport> {
   const a = opts.a ?? 1;
   const gamma = opts.gamma ?? 0.5;
-  const { decoder, legalSyllables } = await loadRuntime({
-    a,
-    gamma,
-    idfBonus: opts.idfBonus,
-    baseline: opts.baseline,
-  });
+  // 一律不載入使用者學習資料，評測數字才不受 adapter.json 影響
+  const { decoder, legalSyllables } =
+    rt ??
+    (await loadRuntime({
+      a,
+      gamma,
+      idfBonus: opts.idfBonus,
+      baseline: opts.baseline,
+      noUser: true,
+    }));
+  decoder.config.a = a;
+  decoder.config.gamma = gamma;
   let samples = await loadEvalSamples(evalFile);
   if (opts.limit) samples = samples.slice(0, opts.limit);
 
@@ -55,15 +63,15 @@ export async function runEval(
       nBest: opts.decK ?? 4,
     });
     latencies.push(performance.now() - t0);
-    const top = paths[0];
-    if (!top) continue;
-    const out = top.words.join('');
+    // 沒有結果也要計入分母；逐字比較用 code point，非 BMP 字才對得上
+    const out = paths[0]?.words.join('') ?? '';
     const ref = sample.text;
-    const len = Math.min(out.length, [...ref].length);
+    const outChars = [...out];
     const refChars = [...ref];
+    const len = Math.min(outChars.length, refChars.length);
     let ok = 0;
     for (let i = 0; i < len; i++) {
-      if (out[i] === refChars[i]) ok++;
+      if (outChars[i] === refChars[i]) ok++;
     }
     charOk += ok;
     charTotal += refChars.length;
@@ -107,8 +115,13 @@ export async function cmdEval(
     decK?: number;
   },
 ): Promise<void> {
+  const rt = await loadRuntime({
+    idfBonus: opts.idfBonus,
+    baseline: opts.baseline,
+    noUser: true,
+  });
   for (const file of files) {
-    const report = await runEval(file, opts);
+    const report = await runEval(file, opts, rt);
     const domain = file.includes('written') ? '書面' : file.includes('mixed') ? '中英' : '口語';
     const line =
       `[eval:${domain}] n=${report.samples} 字準=${(report.charAcc * 100).toFixed(2)}% ` +
@@ -124,10 +137,11 @@ export async function cmdSweep(
   limit?: number,
 ): Promise<void> {
   console.log('a\\γ' + grid.map((g) => `\tγ=${g.gamma}`).join(''));
+  const rt = await loadRuntime({ noUser: true });
   for (const a of [...new Set(grid.map((g) => g.a))]) {
     const row: string[] = [`a=${a}`];
     for (const g of grid.filter((x) => x.a === a)) {
-      const r = await runEval(files[0]!, { ...g, limit });
+      const r = await runEval(files[0]!, { ...g, limit }, rt);
       row.push(`${(r.charAcc * 100).toFixed(2)}%/${(r.sentAcc * 100).toFixed(1)}%`);
     }
     console.log(row.join('\t'));

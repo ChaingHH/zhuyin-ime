@@ -147,11 +147,16 @@ async function main(): Promise<void> {
       for (const line of lines) {
         const ev = JSON.parse(line) as {
           code: string;
+          /** KeyboardEvent.key；沒給就照美式鍵盤、未按 Shift 推 */
+          key?: string;
           tMs?: number;
-          expected?: string;
         };
         t = ev.tMs ?? t;
-        const st = engine.onKey({ code: ev.code, timestampMs: ev.tMs ?? t++ });
+        const st = engine.onKey({
+          code: ev.code,
+          key: ev.key ?? keyOfCode(ev.code),
+          timestampMs: ev.tMs ?? t++,
+        });
         if (st.candidates.length > 0 || !st.lastLegal) {
           console.log(
             `${ev.code.padEnd(10)} => ${st.composition}${st.lastLegal ? '' : ' [不合法音節]'}`,
@@ -164,6 +169,12 @@ async function main(): Promise<void> {
 
     case 'eval': {
       const limit = argNum(['-n'], undefined);
+      let baseline: 'classic' | 'bigram' | undefined;
+      if (process.argv.includes('--baseline')) {
+        const v = process.argv[process.argv.indexOf('--baseline') + 1];
+        if (v !== 'classic' && v !== 'bigram') throw new Error('--baseline 只能是 classic 或 bigram');
+        baseline = v;
+      }
       const a = argNum(['-a']);
       const gamma = argNum(['-g']);
       await cmdEval(
@@ -176,9 +187,7 @@ async function main(): Promise<void> {
           limit,
           idfBonus: argNum(['--idf'], 0),
           decK: argNum(['--deck'], 28),
-          baseline: process.argv.includes('--baseline')
-            ? (process.argv[process.argv.indexOf('--baseline') + 1] as 'classic' | 'bigram')
-            : undefined,
+          baseline,
         },
       );
       break;
@@ -196,8 +205,13 @@ async function main(): Promise<void> {
 
     case 'web': {
       // 網頁測試台：--port N（預設 8787）
+      // 不用 argNum：它把非數字當成沒給、parseFloat 也收「80abc」
+      const pi = process.argv.indexOf('--port');
+      const port = pi < 0 ? 8787 : Number(process.argv[pi + 1]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535)
+        throw new Error('--port 要是 1–65535 的整數');
       const { startWeb } = await import('./web.js');
-      await startWeb(argNum(['--port'], 8787)!, !process.argv.includes('--no-l3'));
+      await startWeb(port, !process.argv.includes('--no-l3'));
       break;
     }
 

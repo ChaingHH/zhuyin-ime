@@ -124,9 +124,10 @@ export class CompositionBuffer {
 
   /**
    * 在游標處放一個原樣字元（空格、標點；解碼器原樣輸出，見 isLiteralToken）。
-   * 只在沒有未完成槽位時可用；回傳是否放入。
+   * 只在沒有未完成槽位時可用；回傳是否放入。數字照 appendEnglish 併進前面的數字／英文 token。
    */
   pushLiteral(ch: string): boolean {
+    if (/^[0-9]$/.test(ch)) return this.appendEnglish(ch);
     if (this.history.length > 0) return false;
     this.insert(ch);
     return true;
@@ -171,6 +172,12 @@ export class CompositionBuffer {
     this.done.splice(this.cursor, 1);
     if (this.cursorAt !== null && this.cursorAt >= this.done.length) this.cursorAt = null;
     return true;
+  }
+
+  /** 丟掉打到一半的注音（還沒成音節的槽位）。 */
+  clearPending(): void {
+    this.partial = {};
+    this.history = [];
   }
 
   /** 清空組字區（送出後呼叫）。 */

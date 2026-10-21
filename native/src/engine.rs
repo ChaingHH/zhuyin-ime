@@ -10,6 +10,8 @@ const UNK: &str = "\u{25A1}";
 const MENU_PAGE: usize = 9;
 /// 選了也不併進相鄰詞的單字（commit 規則 4；同 engine.ts STANDALONE）
 const STANDALONE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就";
+/// 送出時自動存的使用者詞最多幾個字（規則 3、4；同 engine.ts USER_PHRASE_MAX）
+const USER_PHRASE_MAX: usize = 6;
 
 /// 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）
 const PUNCT: [(&str, &str); 14] = [
@@ -60,10 +62,11 @@ struct Menu {
     sel: usize,
 }
 
-/// 序列從 a 改成 b：前後相同的部分不動。回傳 a 的詞段在 b 的起點；碰到被換掉的範圍回 None
-fn remapper(a: &[String], b: &[String]) -> impl Fn(usize, usize) -> Option<usize> {
+/// 序列從 a 改成 b：前後相同的部分不動。回傳 a 的詞段在 b 的起點；碰到被換掉的範圍回 None。
+/// edit_at：編輯位置（編輯前後游標的較小者），相同前綴不超過它——疊字旁刪字時只看內容分不出刪哪個（同 TS）
+fn remapper(a: &[String], b: &[String], edit_at: usize) -> impl Fn(usize, usize) -> Option<usize> {
     let mut p = 0;
-    while p < a.len() && p < b.len() && a[p] == b[p] {
+    while p < edit_at && p < a.len() && p < b.len() && a[p] == b[p] {
         p += 1;
     }
     let mut s = 0;
@@ -186,6 +189,10 @@ impl ImeEngine {
     fn menu_items(&self, with_reading: bool) -> Vec<FixedSpan> {
         let seq = self.comp.sequence();
         let start = self.cursor().min(seq.len() - 1);
+        // 原樣 token（英文、標點、空格）沒有別的字可換
+        if is_literal(&seq[start]) {
+            return vec![];
+        }
         let alts = self.alternatives(seq);
         let mut exact = vec![];
         let mut corrected: Vec<(FixedSpan, f64)> = vec![];
@@ -246,12 +253,20 @@ impl ImeEngine {
             }
             at += b.reading.len();
         }
-        let i = cur.and_then(|(p, l, w)| {
+        let next = if let Some((p, l, w)) = cur {
+            let i = items
+                .iter()
+                .position(|x| x.pos == p && x.len == l && x.word == w);
+            i.map_or(0, |i| (i + 1) % items.len())
+        } else {
+            // 游標在詞中間：換成第一個跟畫面上不同的候選（同 TS）
+            let shown = self.shown_chars(self.last.first());
             items
                 .iter()
-                .position(|x| x.pos == p && x.len == l && x.word == w)
-        });
-        let next = items[i.map_or(0, |i| (i + 1) % items.len())].clone();
+                .position(|x| x.word != shown[x.pos..x.pos + x.len].concat())
+                .unwrap_or(0)
+        };
+        let next = items[next].clone();
         self.select(next, false);
     }
 
@@ -350,12 +365,44 @@ impl ImeEngine {
         }
     }
 
-    /// 游標前的字數：音節一個字，原樣 token（英文）照它的長度
-    fn cursor_chars(&self) -> usize {
-        self.comp.sequence()[..self.cursor()]
+    /// 每個音節在畫面上的字：一般詞一音節一字；字數和音節數不同的詞（原樣 token、選了注音本身）
+    /// 整段算在第一個音節上（同 TS shownChars）
+    fn shown_chars(&self, path: Option<&DecodePath>) -> Vec<String> {
+        let seq = self.comp.sequence();
+        let mut out = vec![];
+        for b in path.map_or(&[][..], |p| &p.breakdown[..]) {
+            if b.word.chars().count() == b.reading.len() {
+                out.extend(b.word.chars().map(String::from));
+            } else {
+                out.push(b.word.clone());
+                out.extend(std::iter::repeat_n(String::new(), b.reading.len() - 1));
+            }
+        }
+        if out.len() == seq.len() {
+            return out;
+        }
+        // 沒有解碼結果：音節一個字，原樣 token 照原字
+        seq.iter()
+            .map(|t| {
+                if is_literal(t) {
+                    t.clone()
+                } else {
+                    UNK.to_string()
+                }
+            })
+            .collect()
+    }
+
+    /// 游標前的字數（照 path 畫面上的字算）
+    fn cursor_chars_in(&self, path: Option<&DecodePath>) -> usize {
+        self.shown_chars(path)[..self.cursor()]
             .iter()
-            .map(|t| if is_literal(t) { t.chars().count() } else { 1 })
+            .map(|c| c.chars().count())
             .sum()
+    }
+
+    fn cursor_chars(&self) -> usize {
+        self.cursor_chars_in(self.last.first())
     }
 
     /// 首選文字，打到一半的注音插在游標處
@@ -366,7 +413,7 @@ impl ImeEngine {
             .map(String::from)
             .collect();
         chars.insert(
-            self.cursor_chars().min(chars.len()),
+            self.cursor_chars_in(path).min(chars.len()),
             self.comp.pending_display(),
         );
         chars.concat()
@@ -380,6 +427,10 @@ impl ImeEngine {
         } else {
             Mode::Zhuyin
         };
+        // 打到一半的注音不成字：切到英文就丟掉，接著打的英文直接進來（同 TS）
+        if self.mode == Mode::English {
+            self.comp.clear_pending();
+        }
     }
 
     fn direct(text: Option<String>) -> EngineState {
@@ -398,6 +449,7 @@ impl ImeEngine {
         if self.menu.is_some() {
             return self.on_menu_key(code);
         }
+        let before = self.cursor();
         if self.mode == Mode::English {
             let ch = key.filter(|k| k.chars().count() == 1);
             if self.comp.is_empty() {
@@ -410,7 +462,7 @@ impl ImeEngine {
                     if !self.comp.append_english(c) {
                         return self.state(true);
                     }
-                    return self.after_edit(true);
+                    return self.after_edit(true, before);
                 }
                 // 空白、標點等其他字元：整段送出，再輸出這個字元
                 Some(c) => return Self::direct(Some(self.commit(0) + c)),
@@ -448,15 +500,15 @@ impl ImeEngine {
         } else {
             self.comp.on_key(code)
         };
-        self.after_edit(legal)
+        self.after_edit(legal, before)
     }
 
-    /// 組字區改過之後：已完成音節序列有變就平移選字、重解碼
-    fn after_edit(&mut self, legal: bool) -> EngineState {
+    /// 組字區改過之後：已完成音節序列有變就平移選字、重解碼。before：編輯前的游標
+    fn after_edit(&mut self, legal: bool, before: usize) -> EngineState {
         let seq = self.comp.sequence().to_vec();
         if seq != self.last_seq {
             // 選字跟著平移；落在被改動範圍內的作廢
-            let map = remapper(&self.last_seq, &seq);
+            let map = remapper(&self.last_seq, &seq, before.min(self.cursor()));
             self.fixed = std::mem::take(&mut self.fixed)
                 .into_iter()
                 .filter_map(|f| map(f.pos, f.len).map(|pos| FixedSpan { pos, ..f }))
@@ -467,14 +519,16 @@ impl ImeEngine {
         self.state(legal)
     }
 
-    /// 送出：解碼（帶 U(w)）→ 學習 → 回傳文字並清空。k>0 改用第 k 候選
+    /// 送出：解碼（帶 U(w)）→ 學習 → 回傳文字並清空。k>0 改用第 k 候選。
+    /// 打到一半的注音不送出（還沒成字），跟著組字區一起丟掉（同 TS）
     pub fn commit(&mut self, k: usize) -> String {
         if self.comp.sequence().is_empty() {
+            self.clear();
             return String::new();
         }
         let candidates = self.decode_with_adapter();
         let chosen = candidates.get(k.min(candidates.len().saturating_sub(1)));
-        let text = self.with_pending(chosen);
+        let text = chosen.map_or(String::new(), |p| p.text());
         let at = self.now();
         if let (Some(adapter), Some(chosen)) = (self.adapter.as_mut().filter(|a| a.enabled), chosen)
         {
@@ -501,7 +555,9 @@ impl ImeEngine {
             let (mut chars, mut rd, mut any) = (String::new(), vec![], false);
             let flush =
                 |ops: &mut Vec<_>, chars: &mut String, rd: &mut Vec<String>, any: &mut bool| {
-                    if chars.chars().count() >= 2 {
+                    let n = chars.chars().count();
+                    // 選過的字太長的一串不存（多半是整句沒斷好）
+                    if n >= 2 && (!*any || n <= USER_PHRASE_MAX) {
                         ops.push((*any, std::mem::take(chars), std::mem::take(rd)));
                     }
                     chars.clear();
@@ -529,11 +585,12 @@ impl ImeEngine {
             flush(&mut ops, &mut chars, &mut rd, &mut any);
 
             // 4) 選過的單字左右都是多字詞（狀態|欄）：併進相鄰的詞存成使用者詞，
-            //    左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □（同 TS）
+            //    左邊優先，合起來 ≤ USER_PHRASE_MAX 字，不跨原樣字元與 □（同 TS）
             let bd = &chosen.breakdown;
             let len = |i: usize| bd[i].word.chars().count();
             let real = |i: Option<usize>| i.filter(|&i| i < bd.len()).filter(|&i| !opaque(&bd[i]));
-            let host = |i: Option<usize>| real(i).filter(|&i| len(i) >= 2 && len(i) + 1 <= 4);
+            let host =
+                |i: Option<usize>| real(i).filter(|&i| len(i) >= 2 && len(i) < USER_PHRASE_MAX);
             for i in 0..bd.len() {
                 if !picked_at[i]
                     || real(Some(i)).is_none()

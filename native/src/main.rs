@@ -237,7 +237,7 @@ fn main() {
             adapter_file,
             l3: std::env::var("ZHUYIN_L3").map_or(true, |v| v != "0"),
             icon_dir: exe_dir.join("input_methods").join("zhuyin"),
-            idle: std::time::Duration::from_secs_f64(idle),
+            idle: pime::secs(idle, 300.0),
             settings_file: match std::env::var("ZHUYIN_CONFIG") {
                 Ok(f) if f == "off" => None,
                 Ok(f) => Some(std::path::PathBuf::from(f)),

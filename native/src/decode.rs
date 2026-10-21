@@ -434,9 +434,10 @@ impl Decoder {
             })
             .collect();
         finals.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
-        finals
+        // 同一串字的不同斷詞／讀音只留最高分那條，否則 N-best 會被同字路徑佔滿
+        let mut seen = std::collections::HashSet::new();
+        let out: Vec<DecodePath> = finals
             .iter()
-            .take(n_best)
             .map(|&(score, p)| {
                 let mut breakdown = vec![];
                 let mut cur = p;
@@ -463,7 +464,22 @@ impl Decoder {
                 breakdown.reverse();
                 DecodePath { score, breakdown }
             })
-            .collect()
+            .filter(|d| seen.insert(d.text()))
+            .take(n_best)
+            .collect();
+        // 固定段的詞走不通（不在候選）時整個格斷掉：不帶固定段重解，畫面才不會變空
+        if out.is_empty() && !o.fixed.is_empty() {
+            return self.decode(
+                seq,
+                &DecodeOptions {
+                    n_best: o.n_best,
+                    modifier: o.modifier,
+                    alternatives: o.alternatives,
+                    fixed: &[],
+                },
+            );
+        }
+        out
     }
 
     /// span 候選再套固定段：與固定段重疊的 span 只有恰好等於該段的那個詞能走；None＝走不通
@@ -480,7 +496,8 @@ impl Decoder {
         let Some(f) = o
             .fixed
             .iter()
-            .find(|f| f.pos < pos + len && pos < f.pos + f.len)
+            // 越界的固定段（編輯後殘留）直接忽略，不讓整個格斷掉
+            .find(|f| f.pos + f.len <= seq.len() && f.pos < pos + len && pos < f.pos + f.len)
         else {
             return Some(cands);
         };

@@ -10,6 +10,12 @@ describe('清洗與切句', () => {
     expect(out).toContain('滑鼠');
   });
 
+  it('NFKC：相容表意字轉統一碼、全形標點轉半形、全形英數與半形一樣不收', () => {
+    expect(cleanSentence('今天\uF9D1點天氣真好')).toBe('今天六點天氣真好');
+    expect(cleanSentence('今天天氣真好，出去走走')).toBe('今天天氣真好,出去走走');
+    expect(cleanSentence('ＡＢ今天天氣真好啊')).toBeNull();
+  });
+
   it('過濾非中文主體與過短句', () => {
     expect(cleanSentence('hello world 12345')).toBeNull();
     expect(cleanSentence('你好')).toBeNull();

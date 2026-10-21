@@ -1,4 +1,4 @@
-﻿import type { LexiconEntry, Provenance } from '@zhuyin/core';
+﻿import { isTraditionalWord, type LexiconEntry, type Provenance } from '@zhuyin/core';
 import {
   canonicalSequence,
   isStructurallyValid,
@@ -93,9 +93,11 @@ export function mergeDrafts(groups: LexiconDraft[][]): {
   const acc = new Map<
     string,
     {
-      readings: Map<string, { syls: string[]; rfreq?: number }>;
+      readings: Map<string, { rfreq?: number }>;
       provenance: Set<Provenance>;
       freq?: number;
+      /** 挖詞（mined）的頻率：只在沒有其他來源的頻率時採用，不覆蓋 libchewing */
+      minedFreq?: number;
     }
   >();
 
@@ -103,19 +105,19 @@ export function mergeDrafts(groups: LexiconDraft[][]): {
     for (const d of drafts) {
       let slot = acc.get(d.word);
       if (!slot) {
-        slot = { readings: new Map(), provenance: new Set(), freq: d.freq };
+        slot = { readings: new Map(), provenance: new Set() };
         acc.set(d.word, slot);
-      } else {
-        slot.freq = Math.max(slot.freq ?? 0, d.freq ?? 0);
+      }
+      if (d.freq !== undefined) {
+        if (d.provenance.every((p) => p === 'mined'))
+          slot.minedFreq = Math.max(slot.minedFreq ?? 0, d.freq);
+        else slot.freq = Math.max(slot.freq ?? 0, d.freq);
       }
       for (const p of d.provenance) slot.provenance.add(p);
       for (const r of d.readings) {
         const cur = slot.readings.get(r.canonical);
         if (!cur) {
-          slot.readings.set(r.canonical, {
-            syls: r.canonical.split(' '),
-            ...(r.rfreq !== undefined ? { rfreq: r.rfreq } : {}),
-          });
+          slot.readings.set(r.canonical, r.rfreq !== undefined ? { rfreq: r.rfreq } : {});
         } else if (r.rfreq !== undefined) {
           cur.rfreq = Math.max(cur.rfreq ?? 0, r.rfreq);
         }
@@ -147,10 +149,7 @@ export function mergeDrafts(groups: LexiconDraft[][]): {
           if (other === key) return false;
           const os = other.split(' ');
           return (
-            os[i] !== undefined &&
-            os[i]!.startsWith(syl.slice(0, -0)) &&
-            /[ˊˇˋ˙]/.test(os[i]!) &&
-            os[i]!.replace(/[ˊˇˋ˙]/, '') === syl
+            os[i] !== undefined && /[ˊˇˋ˙]/.test(os[i]!) && os[i]!.replace(/[ˊˇˋ˙]/, '') === syl
           );
         });
         if (tonedExists) c = c / 20;
@@ -167,6 +166,8 @@ export function mergeDrafts(groups: LexiconDraft[][]): {
   let multiReadingWords = 0;
 
   for (const [word, slot] of acc) {
+    // 含簡化字、日本新字體等非台灣繁體字的詞不收（維基 OpenCC 轉換殘留；runtime 建 lexicon.bin 時也擋）
+    if (!isTraditionalWord(word)) continue;
     const entries0 = [...slot.readings.entries()];
     const allKeys = entries0.map(([k]) => k);
     // 主讀音排序，兩層訊號：
@@ -200,7 +201,8 @@ export function mergeDrafts(groups: LexiconDraft[][]): {
       readings,
       provenance: provs,
     };
-    if (slot.freq !== undefined && slot.freq > 0) entry.freq = slot.freq;
+    const freq = slot.freq || slot.minedFreq;
+    if (freq) entry.freq = freq;
     entries.push(entry);
   }
 

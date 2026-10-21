@@ -258,7 +258,8 @@ export class Decoder {
     if (n === 0) return [];
     const nBest = callOpts.nBest ?? this.opts.nBest;
     const modifier = callOpts.modifier;
-    const fixed = callOpts.fixed ?? [];
+    // 越界的固定段（編輯後殘留）直接忽略，不讓整個格斷掉
+    const fixed = (callOpts.fixed ?? []).filter((f) => f.pos + f.len <= n);
 
     // buckets[pos][stateKey] = 該狀態的 top-K 部分路徑
     const buckets: Array<Map<string, PartialPath[]>> = Array.from(
@@ -470,7 +471,20 @@ export class Decoder {
       };
     });
     finals.sort((x, y) => y.score - x.score);
-    return finals.slice(0, nBest).map((p) => this.materialize(p));
+    // 同一串字的不同斷詞／讀音只留最高分那條，否則 N-best 會被同字路徑佔滿
+    const out: DecodePath[] = [];
+    const seen = new Set<string>();
+    for (const p of finals) {
+      if (out.length >= nBest) break;
+      const m = this.materialize(p);
+      const text = m.words.join('');
+      if (seen.has(text)) continue;
+      seen.add(text);
+      out.push(m);
+    }
+    // 固定段的詞走不通（不在候選）時整個格斷掉：不帶固定段重解，畫面才不會變空
+    if (out.length === 0 && fixed.length > 0) return this.decode(sequence, { ...callOpts, fixed: [] });
+    return out;
   }
 
   private extend(

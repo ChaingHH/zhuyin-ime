@@ -6,9 +6,12 @@ import { loadRuntime, loadEvalSamples } from './packages/cli/src/runtime.js';
 const rt = await loadRuntime({ a: 1, gamma: 0.5 });
 const nBest = Number(process.argv[3] ?? 4);
 const out: string[] = [];
+let i = 0;
 for (const f of ['colloquial', 'written'])
-  for (const s of await loadEvalSamples(`eval/${f}.jsonl`))
+  for (const s of await loadEvalSamples(`eval/${f}.jsonl`)) {
     for (const p of rt.decoder.decode(s.syllables, { nBest }))
-      out.push(`${p.words.join('|')}\t${p.score}`);
+      out.push(`${i}\t${p.words.join('|')}\t${p.score}`);
+    i++;
+  }
 writeFileSync(process.argv[2]!, out.join('\n'));
 console.log(`${out.length} 行 -> ${process.argv[2]}`);

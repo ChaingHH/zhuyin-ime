@@ -6,7 +6,7 @@
  *   在解碼器以 log-linear 相加（權重 a、γ），不做線性內插。
  */
 import { createReadStream } from 'node:fs';
-import { open, readFile } from 'node:fs/promises';
+import { open, readFile, rename } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { HashTable, PerfectTable, type Fingerprint, type QuantBits } from './hashtable.js';
 
@@ -66,6 +66,8 @@ interface BinTable {
   /** 'perfect' = PerfectTable（arrays：位移值、指紋、值欄）；省略 = HashTable */
   kind?: 'perfect';
   seed?: number;
+  /** PerfectTable 的指紋位元數；省略 = 16 */
+  fpBits?: 32;
 }
 type BinIndex = { total: number; contTotal: number; bi: BinTable; tri: BinTable } & Record<
   'uni' | 'cont' | 'biTotals' | 'biTypes' | 'biKept',
@@ -267,6 +269,7 @@ export class LanguageModel {
           seed: d.seed,
           size: d.size,
           arrays,
+          ...(d.arrays[1] instanceof Uint32Array ? { fpBits: 32 as const } : {}),
         };
       }
       const d = t.dump();
@@ -293,13 +296,16 @@ export class LanguageModel {
     head.write(BIN_MAGIC, 0, 'latin1');
     head.writeUInt32LE(header.length, BIN_MAGIC.length);
     header.copy(head, BIN_MAGIC.length + 4);
-    const fh = await open(file, 'w');
+    // 先寫暫存檔再改名：中斷時不留下截斷的模型
+    const tmp = `${file}.tmp`;
+    const fh = await open(tmp, 'w');
     try {
       await fh.write(head);
       for (const b of blobs) await fh.write(b);
     } finally {
       await fh.close();
     }
+    await rename(tmp, file);
   }
 
   private async readBin(file: string): Promise<LanguageModel> {
@@ -330,7 +336,7 @@ export class LanguageModel {
         const [pilots, fp, ...cols] = t.arrays;
         const arrays = [
           view(Uint16Array, pilots!),
-          view(Uint16Array, fp!),
+          t.fpBits === 32 ? view(Uint32Array, fp!) : view(Uint16Array, fp!),
           ...cols.map((a) => (t.bits === 16 ? view(Uint16Array, a) : view(Uint8Array, a))),
         ];
         return PerfectTable.restore(t.ncols, t.bits as 8 | 16, t.seed!, t.size, arrays);

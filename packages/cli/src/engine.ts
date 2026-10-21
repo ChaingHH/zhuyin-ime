@@ -70,6 +70,12 @@ export type InputMode = 'zhuyin' | 'english';
  */
 const STANDALONE = new Set([...'他她它牠祂你妳您我的地得在再那哪這是了著過也都就']);
 
+/**
+ * 送出時自動存的使用者詞最多幾個字（規則 3、4）：音譯名（亞里斯多德）常到 5–6 字；
+ * 再長的一串單字多半是整句沒斷好，而且 decode.ts partsLogProb 只拆到 6 字。同 engine.rs
+ */
+const USER_PHRASE_MAX = 6;
+
 interface AlignedWord {
   word: string;
   seq: string[];
@@ -85,11 +91,12 @@ export function alignWords(path: DecodePath): AlignedWord[] {
 
 /**
  * 序列從 a 改成 b：前後相同的部分不動，中間被換掉。回傳「a 裡的詞段 [pos, pos+len) 在 b 的起點」，
- * 詞段碰到被換掉的範圍就回 null。
+ * 詞段碰到被換掉的範圍就回 null。editAt：編輯位置（編輯前後游標的較小者），相同前綴不超過它——
+ * 疊字（他她、謝謝）旁刪字時，只看內容分不出刪的是哪一個
  */
-function remapper(a: readonly string[], b: readonly string[]) {
+function remapper(a: readonly string[], b: readonly string[], editAt: number) {
   let p = 0;
-  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  while (p < editAt && p < a.length && p < b.length && a[p] === b[p]) p++;
   let s = 0;
   while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
   return (pos: number, len: number): number | null =>
@@ -175,6 +182,8 @@ export class ImeEngine {
   private menuItems(withReading = true): FixedSpan[] {
     const seq = this.comp.sequence;
     const start = this.menuStart;
+    // 原樣 token（英文、標點、空格）沒有別的字可換
+    if (isLiteralToken(seq[start]!)) return [];
     const alts = this.alternatives(seq);
     const exact: FixedSpan[] = [];
     const corrected: Array<FixedSpan & { cost: number }> = [];
@@ -223,10 +232,15 @@ export class ImeEngine {
       at += w.seq.length;
     }
     const c = cur;
-    const i = c
-      ? items.findIndex((x) => x.pos === c.pos && x.len === c.len && x.word === c.word)
-      : -1;
-    this.select(items[(i + 1) % items.length]!, false);
+    if (c) {
+      const i = items.findIndex((x) => x.pos === c.pos && x.len === c.len && x.word === c.word);
+      this.select(items[(i + 1) % items.length]!, false);
+      return;
+    }
+    // 游標在詞中間：換成第一個跟畫面上不同的候選（不然第一下常是換成同一個字，看起來沒反應）
+    const shown = this.shownChars(this.last[0]);
+    const i = items.findIndex((x) => x.word !== shown.slice(x.pos, x.pos + x.len).join(''));
+    this.select(items[Math.max(0, i)]!, false);
   }
 
   private redecode(): void {
@@ -295,18 +309,36 @@ export class ImeEngine {
     };
   }
 
-  /** 游標前的字數：音節一個字，原樣 token（英文）照它的長度 */
-  private get cursorChars(): number {
+  /**
+   * 每個音節在畫面上的字：一般詞一音節一字；字數和音節數不同的詞（原樣 token、選了注音本身）
+   * 整段算在第一個音節上
+   */
+  private shownChars(path: DecodePath | undefined): string[] {
     const seq = this.comp.sequence;
-    let n = 0;
-    for (let i = 0; i < this.cursor; i++) n += isLiteralToken(seq[i]!) ? [...seq[i]!].length : 1;
-    return n;
+    const out: string[] = [];
+    for (const b of path?.breakdown ?? []) {
+      const chars = [...b.word];
+      if (chars.length === b.reading.length) out.push(...chars);
+      else out.push(b.word, ...b.reading.slice(1).map(() => ''));
+    }
+    if (out.length === seq.length) return out;
+    // 沒有解碼結果：音節一個字，原樣 token 照原字
+    return seq.map((t) => (isLiteralToken(t) ? t : UNK));
+  }
+
+  /** 游標前的字數（照 path 畫面上的字算） */
+  private cursorCharsIn(path: DecodePath | undefined): number {
+    return [...this.shownChars(path).slice(0, this.cursor).join('')].length;
+  }
+
+  private get cursorChars(): number {
+    return this.cursorCharsIn(this.last[0]);
   }
 
   /** 首選文字，打到一半的注音插在游標處 */
   private withPending(path: DecodePath | undefined): string {
     const chars = [...(path ? path.words.join('') : '')];
-    chars.splice(this.cursorChars, 0, this.comp.pendingDisplay);
+    chars.splice(this.cursorCharsIn(path), 0, this.comp.pendingDisplay);
     return chars.join('');
   }
 
@@ -315,12 +347,16 @@ export class ImeEngine {
    * 組字區不送出：接著打的英文併進組字區（見 onKey），後打的字還能改前面的中文；
    * 整段在 Enter、或英文模式下打空白／標點時送出。
    */
-  toggleMode(): void {
+  toggleMode(): EngineState {
     this.mode = this.mode === 'zhuyin' ? 'english' : 'zhuyin';
+    // 打到一半的注音不成字：切到英文就丟掉，接著打的英文直接進來
+    if (this.mode === 'english') this.comp.clearPending();
+    return this.state(true);
   }
 
   onKey(ev: KeyEvent): EngineState {
     if (this.menu) return this.onMenuKey(ev.code);
+    const before = this.cursor;
     if (this.mode === 'english') {
       const ch = ev.key !== undefined && [...ev.key].length === 1 ? ev.key : undefined;
       if (this.comp.isEmpty)
@@ -329,7 +365,7 @@ export class ImeEngine {
       // 前面的中文跟著重解碼（開心的 + session → 開新的session）；有打到一半的注音時不收
       if (ch !== undefined && /^[A-Za-z0-9]$/.test(ch)) {
         if (!this.comp.appendEnglish(ch)) return this.state(true);
-        return this.afterEdit(true);
+        return this.afterEdit(true, before);
       }
       // 空白、標點等其他字元：整段送出，再輸出這個字元
       if (ch !== undefined) {
@@ -359,18 +395,18 @@ export class ImeEngine {
     const nav = this.onNavKey(ev.code);
     if (nav) return nav;
     const outcome = inserted ? { accepted: true, legal: true } : this.comp.onKeyEvent(ev);
-    return this.afterEdit(outcome.legal);
+    return this.afterEdit(outcome.legal, before);
   }
 
-  /** 組字區改過之後：已完成音節序列有變就平移選字、重解碼 */
-  private afterEdit(legal: boolean): EngineState {
+  /** 組字區改過之後：已完成音節序列有變就平移選字、重解碼。before：編輯前的游標 */
+  private afterEdit(legal: boolean, before: number): EngineState {
     const seq = this.comp.sequence;
     // candidates：本次按鍵有重解碼才回傳（replay 等呼叫端依此判斷），否則為空
     let candidates: DecodePath[] = [];
     // 已完成音節序列有變就重解碼：完成新音節、插入空格標點、Backspace／Delete 刪掉音節
     if (seq.length !== this.lastSeq.length || seq.some((x, i) => x !== this.lastSeq[i])) {
       // 選字跟著平移；落在被改動範圍內的作廢
-      const map = remapper(this.lastSeq, seq);
+      const map = remapper(this.lastSeq, seq, Math.min(before, this.cursor));
       this.fixed = this.fixed.flatMap((f) => {
         const pos = map(f.pos, f.len);
         return pos === null ? [] : [{ ...f, pos }];
@@ -398,13 +434,18 @@ export class ImeEngine {
    * 3. 使用者造詞詞典 → setUserPhrase：選字視窗選過的詞、或含選過的字的那串單字，
    *    存成使用者詞（加成壓過 LM 差距）。改過一次，下次同讀音就是它。
    *    （手動造詞另見 CLI `phrase` 指令）
+   *
+   * 打到一半的注音不送出（還沒成字），跟著組字區一起丟掉。
    */
   commit(k = 0): string {
     const seq = this.comp.sequence.slice();
-    if (seq.length === 0) return '';
+    if (seq.length === 0) {
+      this.clear();
+      return '';
+    }
     const candidates = this.decodeWithAdapter();
     const chosen = candidates[Math.min(k, candidates.length - 1)];
-    const text = this.withPending(chosen);
+    const text = chosen ? chosen.words.join('') : '';
 
     const adapter = this.adapter;
     if (adapter?.enabled && chosen) {
@@ -431,8 +472,9 @@ export class ImeEngine {
       let bufSeq: string[] = [];
       let bufPicked = false;
       const flush = (): void => {
-        if ([...bufChars].length >= 2 && bufPicked) addUser(bufChars, bufSeq);
-        else if ([...bufChars].length >= 2 && !this.decoder.hasEntry(bufSeq, bufChars)) {
+        if ([...bufChars].length >= 2 && bufPicked) {
+          if ([...bufChars].length <= USER_PHRASE_MAX) addUser(bufChars, bufSeq);
+        } else if ([...bufChars].length >= 2 && !this.decoder.hasEntry(bufSeq, bufChars)) {
           adapter.mineWord(bufChars, bufSeq);
           for (const e of adapter.drainPendingEntries()) {
             this.decoder.addEntry(e);
@@ -461,10 +503,10 @@ export class ImeEngine {
       flush();
 
       // 4) 選過的單字左右都是多字詞（狀態|欄 把蘭改成欄）：單字自己成不了詞，上面的規則存不到；
-      //    併進相鄰的詞存成使用者詞，左邊優先，合起來 ≤ 4 字，不跨原樣字元與 □
+      //    併進相鄰的詞存成使用者詞，左邊優先，合起來 ≤ USER_PHRASE_MAX 字，不跨原樣字元與 □
       const len = (i: number): number => [...aligned[i]!.word].length;
       const real = (i: number): boolean => i >= 0 && i < aligned.length && !opaque(aligned[i]!);
-      const host = (i: number): boolean => real(i) && len(i) >= 2 && len(i) + 1 <= 4;
+      const host = (i: number): boolean => real(i) && len(i) >= 2 && len(i) + 1 <= USER_PHRASE_MAX;
       aligned.forEach((w, i) => {
         if (!pickedAt[i] || !real(i) || len(i) !== 1 || STANDALONE.has(w.word)) return;
         if ((real(i - 1) && len(i - 1) === 1) || (real(i + 1) && len(i + 1) === 1)) return;

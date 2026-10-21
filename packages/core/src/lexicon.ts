@@ -257,6 +257,7 @@ export class LexiconIndex {
     const base = Math.ceil((h0 + hlen) / 4) * 4;
     const seg = (name: string): Uint8Array => {
       const [o, n] = layout[name]!;
+      if (base + o + n > buf.length) throw new Error('詞典索引檔被截斷');
       // 要複製：Node 的 Buffer.slice 只是 view，.buffer 會是整個檔案
       return new Uint8Array(buf.subarray(base + o, base + o + n));
     };

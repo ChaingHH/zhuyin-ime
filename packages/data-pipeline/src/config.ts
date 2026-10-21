@@ -16,7 +16,8 @@ export const PATHS = {
 export const SOURCES = {
   moedict: {
     url: 'https://raw.githubusercontent.com/g0v/moedict-data/master/dict-revised.json.xz',
-    license: 'OGDL-Taiwan-1.0 (教育部重編國語辭典修訂本，via g0v/moedict-data)',
+    license:
+      'CC BY-ND 3.0 TW (教育部重編國語辭典修訂本；著作權屬教育部，須標示出處；via g0v/moedict-data，格式轉換部分 CC0)',
     revision: 'master@2026-08',
   },
   libchewing: {

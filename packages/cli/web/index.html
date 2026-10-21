@@ -397,8 +397,11 @@ editor.addEventListener('keyup', e => {
   showMode(mode === 'english' ? 'zhuyin' : 'english');
   enqueue(async () => {
     // 組字區不送出：接著打的英文併進組字區
-    const { mode: m } = await post('/mode', {});
+    const s = await post('/mode', {});
+    const m = s.mode;
     showMode(m);
+    // 切到英文會丟掉打到一半的注音：照伺服器的組字區重畫
+    render(s);
     addLog(`切換為${m === 'english' ? '英文' : '注音'}`);
   });
 });

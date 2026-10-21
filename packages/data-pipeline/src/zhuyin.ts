@@ -80,13 +80,17 @@ export function isStructurallyValid(s: Syllable): boolean {
 /**
  * 解析整串音節（空白分隔）。任一音節不可解析 → 整串回 null。
  * 自動處理萌典的黏連兒化（ㄊㄡˊㄦ → ㄊㄡˊ ㄦ）：ㄦ 直接跟在前一音節後時切開，
- * 但「ㄦ」本身為音節（ㄦˊ=而）或前綴輕聲 ˙ㄦ 時不切。
+ * 但「ㄦ」本身為音節（ㄦˊ=而）時不切。˙ 在前綴式屬於後面的 ㄦ（ㄊㄡ˙ㄦ → ㄊㄡ ˙ㄦ），
+ * 在後綴式屬於前一音節（ㄇㄜ˙ㄦ → ㄇㄜ˙ ㄦ）。
  */
 export function parseSyllableSequence(
   raw: string,
   convention: ToneMarkConvention,
 ): ParsedSyllable[] | null {
-  const normalized = raw.replace(/(?<=[\u3105-\u312F\u02CA\u02C7\u02CB])ㄦ/g, ' ㄦ');
+  const normalized =
+    convention === 'prefix'
+      ? raw.replace(/(?<=[\u3105-\u312F\u02CA\u02C7\u02CB])(˙?)ㄦ/g, ' $1ㄦ')
+      : raw.replace(/(?<=[\u3105-\u312F\u02CA\u02C7\u02CB\u02D9])ㄦ/g, ' ㄦ');
   const parts = normalized.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return null;
   const out: ParsedSyllable[] = [];
@@ -98,10 +102,13 @@ export function parseSyllableSequence(
   return out;
 }
 
-/** 一個 bopomofo 欄位可能以全形逗號／頓號列出多個讀音——切成多串。 */
+/**
+ * 一個 bopomofo 欄位可能以全形逗號／頓號列出多個讀音，或用（語音）（讀音）（又音）等標註分開
+ * （「（語音）ㄕㄡˊ （讀音）ㄕㄨˊ」）——標註本身當分隔符，切成多串。
+ */
 export function splitAlternativeReadings(raw: string): string[] {
   return raw
-    .split(/[，、]/)
+    .split(/[，、]|[（(][^）)]*[）)]/)
     .map((s) => s.trim())
     .filter(Boolean);
 }

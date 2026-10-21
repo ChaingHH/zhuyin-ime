@@ -10,7 +10,7 @@
  * 被留下的三元的上下文二元一定保留（α 存在那裡）。刪完重算 α，讓每個上下文的機率總和維持 1。
  */
 import { createReadStream } from 'node:fs';
-import { open, readFile } from 'node:fs/promises';
+import { open, readFile, rename } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { HashTable, PerfectTable, floatBits } from './hashtable.js';
 import type { LanguageModel, LmJson, NgramIndex } from './model.js';
@@ -35,9 +35,14 @@ export class BackoffLM {
 
   /** 表裡的機率都是負的，查不到回 0；退回權重查不到也是 0（α=1，正是沒存的意思）。 */
   private static logProb(x: Expert, w: string, c1: string, c2: string): number {
-    const p3 = x.tri.get3(c1, c2, w);
-    if (p3) return p3;
-    let a = x.bi.get2(c1, c2, 1);
+    // 有存的三元，其上下文二元一定有存（buildBackoff 的 need）：上下文沒有就不查三元表，
+    // 省一次查表，也擋掉 16 位元指紋誤中拿到別筆三元機率
+    let a = 0;
+    if (x.bi.get2(c1, c2, 0)) {
+      const p3 = x.tri.get3(c1, c2, w);
+      if (p3) return p3;
+      a = x.bi.get2(c1, c2, 1);
+    }
     const p2 = x.bi.get2(c2, w, 0);
     if (p2) return a + p2;
     a += x.uni.get(c2, 1);
@@ -121,13 +126,16 @@ export class BackoffLM {
     head.write(MAGIC, 0, 'latin1');
     head.writeUInt32LE(header.length, MAGIC.length);
     header.copy(head, MAGIC.length + 4);
-    const fh = await open(file, 'w');
+    // 先寫暫存檔再改名：中斷時不留下截斷的模型
+    const tmp = `${file}.tmp`;
+    const fh = await open(tmp, 'w');
     try {
       await fh.write(head);
       for (const b of blobs) await fh.write(b);
     } finally {
       await fh.close();
     }
+    await rename(tmp, file);
   }
 
   static async load(file: string): Promise<BackoffLM> {
@@ -443,6 +451,9 @@ export async function buildBackoff(
     const k = x.kn;
     const a2 = (x.alpha2 ??= finish2(x));
     for (const [ctx, [p, lower]] of x.sum3) {
+      // 上下文二元不在表裡（θ < 0 時才會：上下文沒見過的三元分數是 −1）就不存 α，
+      // 否則會插入欄 0＝0 的筆，碼本把接近 0 的 log P 都編成「沒存」
+      if (!x.bi.has(ctx)) continue;
       const [c1, c2] = splitBi(ctx);
       x.bi.add(ctx, 1, floatBits(Math.log(alpha(p, lower, k.g3(c1, c2)?.[0] ?? 1))));
     }

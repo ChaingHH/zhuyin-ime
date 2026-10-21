@@ -21,3 +21,4 @@ data/kev/**/*.jsonl
 
 # Rust 原型
 native/target/
+native/pime/dist/

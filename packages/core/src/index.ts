@@ -59,6 +59,7 @@ export * from './decode.js';
 export * from './x2.js';
 export * from './l3.js';
 export * from './lexicon.js';
+export * from './nontrad.js';
 
 export const MEDIAS = ['ㄧ', 'ㄨ', 'ㄩ'] as const;
 

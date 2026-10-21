@@ -4,6 +4,7 @@ import {
   isStructurallyValid,
   parseSyllable,
   parseSyllableSequence,
+  splitAlternativeReadings,
 } from '../src/zhuyin.js';
 
 describe('音節解析', () => {
@@ -73,6 +74,17 @@ describe('音節解析', () => {
     expect(er!.canonical).toBe('ㄦˊ');
     const lightEr = parseSyllable('˙ㄦ', 'prefix');
     expect(lightEr!.canonical).toBe('ㄦ˙');
+  });
+
+  it('黏連兒化帶輕聲：前綴式 ˙ 屬 ㄦ、後綴式 ˙ 屬前字', () => {
+    expect(canonicalSequence(parseSyllableSequence('ㄊㄡ˙ㄦ', 'prefix')!)).toBe('ㄊㄡ ㄦ˙');
+    expect(canonicalSequence(parseSyllableSequence('ㄇㄜ˙ㄦ', 'suffix')!)).toBe('ㄇㄜ˙ ㄦ');
+  });
+
+  it('萌典讀音標註當分隔符：（語音）（讀音）（又音）', () => {
+    expect(splitAlternativeReadings('（語音）ㄕㄡˊ　（讀音）ㄕㄨˊ')).toEqual(['ㄕㄡˊ', 'ㄕㄨˊ']);
+    expect(splitAlternativeReadings('ㄌㄨㄛˋ（又音）ㄌㄠˋ')).toEqual(['ㄌㄨㄛˋ', 'ㄌㄠˋ']);
+    expect(splitAlternativeReadings('ㄐㄧㄣ ㄊㄧㄢ，ㄐㄧㄣ ㄊㄧㄢ˙')).toHaveLength(2);
   });
 
   it('序列解析：今天', () => {

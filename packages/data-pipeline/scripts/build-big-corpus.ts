@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as OpenCC from 'opencc-js';
 import { iterPttTexts } from '../src/sources/corpus.js';
+import { leakChecker } from '../src/build/leak.js';
 import { EN_CLASS } from '@zhuyin/core';
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
@@ -23,23 +24,14 @@ const PTT_MAX = Number(process.argv[2] ?? 1e12);
 const WIKI_MAX = Number(process.argv[3] ?? 1e12);
 const toTwp = OpenCC.Converter({ from: 'cn', to: 'twp' });
 
-// 留測防護：片段若包含任一評測句即丟棄（評測句皆 ≥6 字，以 6 字窗索引）
-const evalSet = new Map<string, string[]>();
+// 留測防護：片段和任一評測句共用 8 字窗即丟棄（近似重複也擋，見 leak.ts）
+const evalTexts: string[] = [];
 for (const f of ['colloquial.jsonl', 'written.jsonl']) {
   for (const line of (await readFile(path.join(REPO, 'eval', f), 'utf8')).split('\n')) {
-    if (!line.startsWith('{"text"')) continue;
-    const t = (JSON.parse(line) as { text: string }).text;
-    const k = t.slice(0, 6);
-    evalSet.set(k, [...(evalSet.get(k) ?? []), t]);
+    if (line.startsWith('{"text"')) evalTexts.push((JSON.parse(line) as { text: string }).text);
   }
 }
-function leaks(run: string): boolean {
-  for (let i = 0; i + 6 <= run.length; i++) {
-    const hit = evalSet.get(run.slice(i, i + 6));
-    if (hit?.some((t) => run.startsWith(t, i))) return true;
-  }
-  return false;
-}
+const leaks = leakChecker(evalTexts);
 
 const WITH_EN = process.env['CORPUS_EN'] === '1';
 const HELDOUT_MOD = 200;

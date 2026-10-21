@@ -377,6 +377,19 @@ async function smoke(): Promise<void> {
   await shiftTap();
   check((await press('KeyA')).eaten, '切回注音後攔下注音鍵');
   await press('Escape');
+  // 注音打到一半就切英文：不成字的注音丟掉，英文直接打
+  await press('KeyS'); // ㄋ
+  const half = await shiftTap();
+  check(half['compositionString'] === '', '只有半個注音時切英文：清掉組字');
+  check(!(await press('KeyK', 'k')).eaten, '接著的英文直接放行');
+  await shiftTap();
+  for (const c of ['KeyS', 'KeyU', 'Digit3', 'KeyC']) await press(c); // ㄋㄧˇ＋ㄏ
+  const mixed = await shiftTap();
+  check([...String(mixed['compositionString'])].length === 1, '已成字的留著，半個注音丟掉');
+  const mk = await press('KeyK', 'k');
+  check(mk.eaten && String(mk.last['compositionString']).endsWith('k'), '英文接在已成字後面');
+  await shiftTap();
+  await press('Escape');
 
   // 選字視窗（微軟注音鍵位）：↓ 開、反白在第一個；↓ 移到第二個；Enter 選反白
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);

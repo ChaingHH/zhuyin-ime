@@ -26,7 +26,8 @@ async function loadLexiconIndex(): Promise<Map<string, LexiconEntry>> {
   for (const line of (await readFile(file, 'utf8')).split('\n')) {
     if (!line) continue;
     const e = JSON.parse(line) as LexiconEntry;
-    map.set(e.word, e);
+    // 評測讀音只用原詞典（不含挖出來的詞），和 build-mixed-eval.ts 一致
+    if (!e.provenance.every((p) => p === 'mined')) map.set(e.word, e);
   }
   return map;
 }

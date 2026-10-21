@@ -161,14 +161,25 @@ export class Channel {
     const hit = this.cache.get(observed);
     if (hit) return hit;
     const best = new Map<string, number>();
-    const add = (p: Parts, cost: number): void => {
+    // 漏按假設不受 maxAlts 限制：同代價的漏按很多，依池順序截斷會砍掉 ㄨˇ→ㄨㄛˇ 這種常用的
+    const uncapped = new Set<string>();
+    const add = (p: Parts, cost: number, keep = false): void => {
       const s = join(p);
       if (s === observed || !this.legal.has(s)) return;
-      if (cost < (best.get(s) ?? Infinity)) best.set(s, cost);
+      if (cost < (best.get(s) ?? Infinity)) {
+        best.set(s, cost);
+        if (keep) uncapped.add(s);
+        else uncapped.delete(s);
+      }
     };
     const p = parse(observed);
     if (p) {
       const o = this.o;
+      const pools: Record<Slot, readonly string[]> = {
+        initial: INITIALS,
+        medial: MEDIAS,
+        final: FINALS,
+      };
       for (const slot of ['initial', 'medial', 'final'] as const) {
         const c: string | undefined = p[slot];
         if (c === undefined) continue;
@@ -178,20 +189,19 @@ export class Channel {
         for (const s of this.symNeighbors.get(c) ?? ([] as string[])) {
           const sSlot = slotOf(s)!;
           if (sSlot === slot) add({ ...p, [slot]: s }, o.sub);
-          else if (p[sSlot] === undefined) add({ ...p, [slot]: undefined, [sSlot]: s }, o.sub);
+          else if (p[sSlot] === undefined) {
+            add({ ...p, [slot]: undefined, [sSlot]: s }, o.sub);
+            // 跨槽覆蓋：鄰鍵 c 蓋掉了 slot 槽原本的符號 x（ㄒㄧㄠ 的 U 按成 Y → ㄗㄠ）
+            for (const x of pools[slot]) add({ ...p, [slot]: x, [sSlot]: s }, o.sub);
+          }
         }
         const fz = c === 'ㄣ' || c === 'ㄥ' ? o.nasal : o.fuzzy;
         for (const s of this.fuzzy.get(c) ?? []) add({ ...p, [slot]: s }, fz);
       }
       // 漏按一鍵：意圖多一個符號（只補空槽）
-      const pools: Record<Slot, readonly string[]> = {
-        initial: INITIALS,
-        medial: MEDIAS,
-        final: FINALS,
-      };
       for (const slot of ['initial', 'medial', 'final'] as const) {
         if (p[slot] !== undefined) continue;
-        for (const s of pools[slot]) add({ ...p, [slot]: s }, o.miss);
+        for (const s of pools[slot]) add({ ...p, [slot]: s }, o.miss, true);
       }
       // 聲調：相鄰聲調鍵較便宜，其他聲調算記錯
       const adj = new Set(this.toneNeighbors.get(p.mark) ?? []);
@@ -201,10 +211,11 @@ export class Channel {
     }
     const alts = [...best]
       .sort((a, b) => a[1] - b[1])
-      .slice(0, this.o.maxAlts)
+      .filter(([syl], i) => i < this.o.maxAlts || uncapped.has(syl))
       .map(([syl, cost]) => ({ syl, cost }));
     const out = [{ syl: observed, cost: 0 }, ...alts];
-    this.cache.set(observed, out);
+    // 解析不了的（英文、原樣 token）不快取：常駐時快取才不會跟著打過的英文一直長
+    if (p) this.cache.set(observed, out);
     return out;
   }
 }

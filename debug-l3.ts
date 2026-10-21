@@ -51,6 +51,21 @@ function run(label: string, ch: Channel | null): void {
       row.push(`${input}${name} ${pct(0)}/${pct(1)}`);
     }
   }
+  if (ch) {
+    // 涵蓋率：注入錯誤的音節裡，正確音節出現在 ch.expand(觀察) 的比例（L3 的上限）
+    let err = 0;
+    let hit = 0;
+    for (const [name, ss] of Object.entries(sets))
+      ss.forEach((s, i) =>
+        noisy[name]![i]!.forEach((o, j, all) => {
+          if (all.length !== s.syllables.length) return;
+          if (o === s.syllables[j]) return;
+          err++;
+          if (ch.expand(o).some((h) => h.syl === s.syllables[j])) hit++;
+        }),
+      );
+    row.push(`涵蓋 ${hit}/${err} ${((hit / err) * 100).toFixed(1)}%`);
+  }
   lat.sort((x, y) => x - y);
   row.push(
     `p50 ${lat[lat.length >> 1]!.toFixed(0)}ms p95 ${lat[Math.floor(lat.length * 0.95)]!.toFixed(0)}ms`,
@@ -69,6 +84,7 @@ for (const s of scales) {
     tone: 7 * s,
     fuzzy: 5 * s,
     nasal: process.env.NASAL ? Number(process.env.NASAL) : undefined,
+    maxAlts: process.env.MAXALTS ? Number(process.env.MAXALTS) : undefined,
   });
   run(`L3 s=${s}`, ch);
 }

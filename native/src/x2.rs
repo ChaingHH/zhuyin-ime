@@ -7,11 +7,21 @@
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::OnceLock;
+
+/// 非台灣繁體字（packages/data-pipeline/scripts/build-nontrad.ts 產生，與 core/src/nontrad.ts 同一份）
+fn is_traditional_word(w: &str) -> bool {
+    static BAD: OnceLock<HashSet<char>> = OnceLock::new();
+    let bad = BAD.get_or_init(|| include_str!("nontrad.txt").chars().collect());
+    !w.chars().any(|c| bad.contains(&c))
+}
 
 const BOOST_PER_COUNT: f64 = 0.55;
 const MAX_SEQ_BOOST: f64 = 2.2;
 const GLOBAL_FACTOR: f64 = 0.35;
 const MANUAL_PHRASE_BOOST: f64 = 8.0;
+/// 手動造詞每多一個音節再加多少（算到 6 音節；同 TS manualPhraseBoostPerSyllable）
+const MANUAL_PHRASE_BOOST_PER_SYLLABLE: f64 = 10.0;
 
 /// 學習資料的上限，同 TS 的 X2_LIMITS（說明見那裡與 docs/MEMORY.md「X2 學習資料的成長」）
 const MAX_SEQ: usize = 10_000;
@@ -77,8 +87,11 @@ fn decayed(count: f64, last_at: f64, now: f64) -> f64 {
     count * recency(last_at, now)
 }
 
+/// 選字次數 +1：舊次數先衰減到現在（TS bump）
 fn bump(m: &mut IndexMap<String, Rec>, word: &str, at: f64) {
-    let count = m.get(word).map_or(0.0, |r| r.count);
+    let count = m
+        .get(word)
+        .map_or(0.0, |r| r.count * recency(r.last_at, at));
     m.insert(
         word.into(),
         Rec {
@@ -115,19 +128,30 @@ fn strings(v: &Value) -> Vec<String> {
         .collect()
 }
 
-fn rec(v: &Value) -> Rec {
-    Rec {
-        count: v["count"].as_f64().unwrap_or(0.0),
-        last_at: v["lastAt"].as_f64().unwrap_or(0.0),
-    }
+/// count／lastAt 不是數字的記錄丟掉（TS fromJSON 同）
+fn rec(v: &Value) -> Option<Rec> {
+    Some(Rec {
+        count: v["count"].as_f64()?,
+        last_at: v["lastAt"].as_f64()?,
+    })
 }
 
 fn recs(v: Option<&Value>) -> IndexMap<String, Rec> {
     v.and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .map(|(k, r)| (k.clone(), rec(r)))
+        .filter_map(|(k, r)| Some((k.clone(), rec(r)?)))
         .collect()
+}
+
+/// 現在時間比學習檔最後一筆晚超過這麼多（365 天），載入時不整理
+const CLOCK_JUMP_MS: f64 = 365.0 * 86_400_000.0;
+
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as f64
 }
 
 fn write_recs(out: &mut String, m: &IndexMap<String, Rec>) {
@@ -150,6 +174,7 @@ impl UserAdapter {
     pub fn new() -> Self {
         UserAdapter {
             enabled: true,
+            now: now_ms(),
             ..Default::default()
         }
     }
@@ -172,7 +197,9 @@ impl UserAdapter {
             return 0.0;
         }
         if self.phrases.get(word).is_some_and(Phrase::is_manual) {
-            return MANUAL_PHRASE_BOOST;
+            // 讀音越長加成越大，算到 6 音節（同 TS manualPhraseBoostPerSyllable）
+            let extra = seq_key.split(' ').count().min(6).saturating_sub(2) as f64;
+            return MANUAL_PHRASE_BOOST + MANUAL_PHRASE_BOOST_PER_SYLLABLE * extra;
         }
         let mut u = 0.0;
         if let Some(r) = self.by_seq.get(seq_key).and_then(|m| m.get(word)) {
@@ -298,7 +325,8 @@ impl UserAdapter {
     pub fn drain_pending(&mut self) -> Vec<Entry> {
         let mut out = vec![];
         for (w, p) in &self.phrases {
-            if self.injected.insert(w.clone()) {
+            // 舊 adapter.json 可能有非台灣繁體字的詞，不入格（x2.ts 同步）
+            if is_traditional_word(w) && self.injected.insert(w.clone()) {
                 out.push(Entry {
                     word: w.clone(),
                     readings: p.readings.clone(),
@@ -356,11 +384,7 @@ impl UserAdapter {
 
     /// 讀回並以現在的時間整理一次
     pub fn from_json(s: &str) -> Result<Self, String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as f64;
-        Self::from_json_at(s, now)
+        Self::from_json_at(s, now_ms())
     }
 
     /// 讀回 to_json 的資料並整理一次（at＝現在，決定衰減）
@@ -381,7 +405,10 @@ impl UserAdapter {
             .into_iter()
             .flatten()
         {
-            let word = p["word"].as_str().ok_or("phrase 缺 word")?;
+            // 壞詞條跳過（TS 同）
+            let Some(word) = p["word"].as_str() else {
+                continue;
+            };
             a.phrases.insert(
                 word.into(),
                 Phrase {
@@ -400,7 +427,19 @@ impl UserAdapter {
         }
         drop(v);
         a.now = at;
-        a.compact(at);
+        let latest = a
+            .global
+            .values()
+            .chain(a.by_seq.values().flat_map(IndexMap::values))
+            .map(|r| r.last_at)
+            .chain(a.phrases.values().filter_map(|p| p.last_at))
+            .fold(f64::NEG_INFINITY, f64::max);
+        // 時鐘跳到未來時，整理會把全部記錄當成過期刪光：跳過，等時鐘正常
+        if latest.is_finite() && at - latest > CLOCK_JUMP_MS {
+            eprintln!("x2：現在時間比學習檔最後一筆晚超過 365 天，跳過整理（時鐘錯了？）");
+        } else {
+            a.compact(at);
+        }
         Ok(a)
     }
 }

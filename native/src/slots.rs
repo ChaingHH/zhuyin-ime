@@ -91,8 +91,11 @@ impl CompositionBuffer {
         }
     }
 
-    /// 在游標處放一個原樣字元；有未完成槽位時不放
+    /// 在游標處放一個原樣字元；有未完成槽位時不放。數字照 append_english 併進前面的數字／英文 token
     pub fn push_literal(&mut self, ch: &str) -> bool {
+        if ch.len() == 1 && ch.as_bytes()[0].is_ascii_digit() {
+            return self.append_english(ch);
+        }
         if !self.history.is_empty() {
             return false;
         }
@@ -147,6 +150,12 @@ impl CompositionBuffer {
             self.cursor_at = None;
         }
         true
+    }
+
+    /// 丟掉打到一半的注音（還沒成音節的槽位）
+    pub fn clear_pending(&mut self) {
+        self.partial = [None; 3];
+        self.history.clear();
     }
 
     pub fn reset(&mut self) {

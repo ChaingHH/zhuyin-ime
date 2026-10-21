@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { UserAdapter, X2_LIMITS } from '../src/index.js';
+import { UserAdapter, X2_LIMITS, type UserAdapterData } from '../src/index.js';
 
 const T0 = 1_700_000_000_000;
 
@@ -44,6 +44,13 @@ describe('X2 UserAdapter', () => {
     const uOther = a.modifierFor(['ㄊㄧㄢ'], '金', T0);
     expect(uOther).toBeLessThan(uSame);
     expect(uOther).toBeGreaterThan(0); // 全域弱訊號存在
+  });
+
+  it('非台灣繁體字的使用者詞不入格（舊 adapter.json）', () => {
+    const a = new UserAdapter();
+    a.setUserPhrase('顔色', ['ㄧㄢˊ', 'ㄙㄜˋ']);
+    a.setUserPhrase('顏色', ['ㄧㄢˊ', 'ㄙㄜˋ']);
+    expect(a.drainPendingEntries().map((e) => e.word)).toEqual(['顏色']);
   });
 
   it('手動造詞加成強於一般選字且有別於挖詞', () => {
@@ -92,5 +99,30 @@ describe('X2 UserAdapter', () => {
     const seqs = Object.keys(b.toJSON().bySeq);
     expect(seqs.length).toBe(X2_LIMITS.maxSeq);
     expect(seqs[0]).toBe('k1');
+  });
+
+  it('舊記錄再選一次：次數先衰減再 +1', () => {
+    const a = new UserAdapter();
+    for (let i = 0; i < 100; i++) a.recordSelection(['ㄍㄠˇ'], '搞', T0);
+    const later = T0 + 140 * 86_400_000; // 10 個半衰期
+    a.recordSelection(['ㄍㄠˇ'], '搞', later);
+    const c = a.toJSON().bySeq['ㄍㄠˇ']!['搞']!.count;
+    expect(c).toBeCloseTo(100 / 1024 + 1, 9);
+  });
+
+  it('載入：時鐘跳到一年後不整理；壞欄位的記錄丟掉', () => {
+    const rec = { count: 1, lastAt: T0 };
+    const data = {
+      bySeq: { k: { 好: rec, 壞: { count: 'x', lastAt: T0 } } },
+      global: { 好: rec, 缺: { count: 1 } },
+      phrases: [{ readings: [] }],
+    } as unknown as UserAdapterData;
+    const jumped = UserAdapter.fromJSON(structuredClone(data), {}, T0 + 400 * 86_400_000);
+    expect(jumped.toJSON().bySeq).toEqual({ k: { 好: rec } });
+    expect(jumped.toJSON().global).toEqual({ 好: rec });
+    expect(jumped.phrases.size).toBe(0);
+    // 不到一年：照常整理，衰減完的刪掉
+    const normal = UserAdapter.fromJSON(structuredClone(data), {}, T0 + 300 * 86_400_000);
+    expect(normal.toJSON().global).toEqual({});
   });
 });

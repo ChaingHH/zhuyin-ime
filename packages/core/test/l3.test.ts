@@ -65,3 +65,38 @@ describe('解碼器使用 L3 假設', () => {
     expect(sum).toBeCloseTo(top.score, 6);
   });
 });
+
+describe('L3 截斷與跨槽覆蓋', () => {
+  it('漏按假設不受 maxAlts 限制', () => {
+    const ch = new Channel(['ㄧ', 'ㄧㄥ', 'ㄧˋ'], { maxAlts: 0 });
+    expect(ch.expand('ㄧ').map((x) => x.syl)).toEqual(['ㄧ', 'ㄧㄥ']);
+  });
+
+  it('鄰鍵蓋掉已填的槽：ㄒㄧㄠ 的 U 按成 Y（ㄗ）→ ㄗㄠ 推得回 ㄒㄧㄠ', () => {
+    const ch = new Channel(['ㄒㄧㄠ', 'ㄗㄠ']);
+    expect(ch.expand('ㄗㄠ').map((x) => x.syl)).toContain('ㄒㄧㄠ');
+  });
+});
+
+describe('解碼器 N-best 與固定段', () => {
+  const lex: LexiconEntry[] = [
+    { word: '經驗', readings: [['ㄐㄧㄥ', 'ㄧㄢˋ']], provenance: ['moedict'] },
+    { word: '經', readings: [['ㄐㄧㄥ']], provenance: ['moedict'] },
+    { word: '驗', readings: [['ㄧㄢˋ']], provenance: ['moedict'] },
+    { word: '晶', readings: [['ㄐㄧㄥ']], provenance: ['moedict'] },
+  ];
+  const dec = new Decoder({ wordLogProb: () => -5, charSequenceLogProb: () => 0 });
+  dec.loadLexicon(lex);
+  const obs = ['ㄐㄧㄥ', 'ㄧㄢˋ'];
+
+  it('同一串字的不同斷詞只留一條', () => {
+    const texts = dec.decode(obs, { nBest: 8 }).map((p) => p.words.join(''));
+    expect(new Set(texts).size).toBe(texts.length);
+    expect(texts).toContain('晶驗');
+  });
+
+  it('固定段越界或走不通時不帶固定段重解，不回空', () => {
+    expect(dec.decode(obs, { fixed: [{ pos: 1, len: 5, word: '驗' }] }).length).toBeGreaterThan(0);
+    expect(dec.decode(obs, { fixed: [{ pos: 0, len: 1, word: '沒有' }] }).length).toBeGreaterThan(0);
+  });
+});

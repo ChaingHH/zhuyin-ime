@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -48,13 +48,23 @@ const CAND_FONT_SIZE: i64 = 14;
 /// （docs/MEMORY.md「X2 學習資料的成長」），所以只標記有改動，停手後才寫；卸載、結束時一定寫。
 /// ponytail: 後端被直接殺掉（例如登出）會少存最後這幾秒的學習
 fn save_delay() -> Duration {
-    Duration::from_secs_f64(
+    secs(
         std::env::var("ZHUYIN_SAVE_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30.0),
+        30.0,
     )
 }
+
+/// 設定檔／環境變數的秒數 → Duration，夾在 1 秒到 1 天。`from_secs_f64` 遇到負數、NaN、
+/// 太大會 panic，而這裡在 `catch_unwind` 外，後端會一直重開
+pub fn secs(v: f64, default: f64) -> Duration {
+    Duration::try_from_secs_f64(v.clamp(1.0, 86400.0)).unwrap_or(Duration::from_secs_f64(default))
+}
+
+/// 載入失敗後多久再試（或下次 onActivate）
+const RETRY: Duration = Duration::from_secs(30);
 const VK_RSHIFT: usize = 0xa1;
 /// 右 Shift 的掃描碼
 const SCAN_RSHIFT: u64 = 0x36;
@@ -195,8 +205,9 @@ pub struct Backend {
     /// None＝還沒載入或已卸載
     eng: Option<ImeEngine>,
     save_ok: bool,
-    /// 載入失敗過：不再重試，按鍵全部放行給應用程式
-    broken: bool,
+    /// 上次載入失敗的時間：之後 RETRY 秒內按鍵全部放行給應用程式，過了或 onActivate 再試
+    /// （例如重載時剛好遇到安裝換檔）
+    broken: Option<Instant>,
     /// 注音／英文；引擎卸載後也要記得
     mode: Mode,
     /// 目前啟用這個輸入法的 client
@@ -218,6 +229,12 @@ pub struct Backend {
     /// 學習資料有改動、還沒寫檔
     dirty: bool,
     save_delay: Duration,
+    /// config.json 的 hotUpdate：執行檔被換掉後，沒有 client 啟用時自己結束，讓 PIMELauncher 開新版。
+    /// 要 PIME v2.0.0-beta2 以上（舊版 DLL 遇到後端結束會讓宿主程式當掉）。
+    /// 設定檔沒寫時看 PIME 版本（`pime_restart_safe`），讀不到版本就關
+    hot_update: bool,
+    /// 啟動時的執行檔路徑與修改時間
+    exe: Option<(PathBuf, SystemTime)>,
 }
 
 impl Backend {
@@ -226,7 +243,7 @@ impl Backend {
             cfg,
             eng: None,
             save_ok: true,
-            broken: false,
+            broken: None,
             mode: Mode::Zhuyin,
             active: HashSet::new(),
             last_key: Instant::now(),
@@ -239,6 +256,10 @@ impl Backend {
             font: (CAND_FONT.into(), CAND_FONT_SIZE),
             dirty: false,
             save_delay: save_delay(),
+            hot_update: false,
+            exe: std::env::current_exe()
+                .ok()
+                .and_then(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?))),
         }
         .with_settings()
     }
@@ -267,12 +288,16 @@ impl Backend {
             Some("right") => "right",
             _ => "both",
         };
-        if let Some(secs) = s.get("idleSecs").and_then(Value::as_f64) {
-            self.cfg.idle = Duration::from_secs_f64(secs.max(1.0));
+        if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
+            self.cfg.idle = secs(secs_v, 300.0);
         }
         if let Some(l3) = s.get("l3").and_then(Value::as_bool) {
             self.cfg.l3 = l3;
         }
+        self.hot_update = s
+            .get("hotUpdate")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| self.pime_restart_safe());
         self.font = (
             s.get("candFontName")
                 .and_then(Value::as_str)
@@ -336,7 +361,7 @@ impl Backend {
 
     /// 需要時才載入引擎
     fn engine(&mut self) -> Option<&mut ImeEngine> {
-        if self.eng.is_none() && !self.broken {
+        if self.eng.is_none() && !self.gave_up() {
             let t = Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load(&self.cfg)));
             match r {
@@ -347,16 +372,21 @@ impl Backend {
                     eprintln!("[pime] 載入引擎 {:?}", t.elapsed());
                 }
                 Ok(Err(e)) => {
-                    self.broken = true;
-                    eprintln!("[pime] 載入失敗，之後按鍵都放行：{e}");
+                    self.broken = Some(Instant::now());
+                    eprintln!("[pime] 載入失敗，{RETRY:?} 內按鍵都放行：{e}");
                 }
                 Err(_) => {
-                    self.broken = true;
-                    eprintln!("[pime] 載入失敗（panic），之後按鍵都放行");
+                    self.broken = Some(Instant::now());
+                    eprintln!("[pime] 載入失敗（panic），{RETRY:?} 內按鍵都放行");
                 }
             }
         }
         self.eng.as_mut()
+    }
+
+    /// 剛載入失敗，還沒到重試時間
+    fn gave_up(&self) -> bool {
+        self.broken.is_some_and(|t| t.elapsed() < RETRY)
     }
 
     /// 存學習檔、丟掉引擎，再把空出來的 heap 與工作集還給系統
@@ -491,9 +521,13 @@ impl Backend {
     fn toggle(&mut self, r: &mut Map<String, Value>) {
         // 引擎沒載入就沒有組字，只換模式
         if let Some(e) = self.eng.as_mut() {
+            let was = e.is_composing();
             e.toggle_mode();
             if e.is_composing() {
                 Self::show(r, &e.state(true));
+            } else if was {
+                // 組字區只有打到一半的注音，切英文後丟掉了：清掉畫面上的組字
+                r.insert("compositionString".into(), json!(""));
             }
         }
         self.mode = if self.mode == Mode::Zhuyin {
@@ -519,7 +553,7 @@ impl Backend {
             self.table_layout(k, r);
             return true;
         }
-        !self.broken
+        !self.gave_up()
             && self.mode == Mode::Zhuyin
             && !k.ctrl_alt
             && k.code.as_deref().is_some_and(starts_composition)
@@ -573,6 +607,32 @@ impl Backend {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+        // 開 hotUpdate 時，引擎卸載後也要定期醒來看執行檔換了沒
+        .or(self.hot_update.then_some(Duration::from_secs(60)))
+    }
+
+    /// 裝的 PIME 能不能承受後端結束：讀 PIME 目錄的 version.txt（執行檔在 PIME\zhuyin\ 底下）。
+    /// v2.0.0-beta 的 DLL 遇到後端結束會讓宿主程式當掉；beta2 起修掉（EasyIME/PIME#905）。讀不到就當不安全
+    fn pime_restart_safe(&self) -> bool {
+        let v = self
+            .exe
+            .as_ref()
+            .and_then(|(p, _)| std::fs::read_to_string(p.parent()?.parent()?.join("version.txt")).ok());
+        v.is_some_and(|v| pime_version_ok(v.trim()))
+    }
+
+    /// 執行檔被換掉了，沒有 client 啟用，引擎已卸載（沒在組字、學習檔已存）：可以結束讓啟動器開新版。
+    /// 只在兩則請求之間呼叫，不會在處理請求時結束。讀不到修改時間不算換掉
+    fn should_restart(&self) -> bool {
+        self.hot_update
+            && self.active.is_empty()
+            && self.eng.is_none()
+            && !self.dirty
+            && self.exe.as_ref().is_some_and(|(p, t)| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t2| t2 != *t)
+            })
     }
 
     fn on_timeout(&mut self) {
@@ -615,6 +675,7 @@ impl Backend {
             }
             "onActivate" => {
                 self.active.insert(client.to_string());
+                self.broken = None;
                 self.read_settings();
                 r.insert("setSelKeys".into(), json!(SEL_KEYS));
                 self.table = false;
@@ -718,61 +779,183 @@ impl Backend {
     }
 }
 
+/// "2.0.0-beta" 不行；"2.0.0-beta2" 以上、正式版 2.x 以上可以
+fn pime_version_ok(v: &str) -> bool {
+    let (base, pre) = v.split_once('-').unwrap_or((v, ""));
+    let major: u32 = base.split('.').next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    if major < 2 || base != "2.0.0" {
+        return major >= 2;
+    }
+    match pre.strip_prefix("beta") {
+        Some(n) => n.parse::<u32>().is_ok_and(|n| n >= 2),
+        None => pre.is_empty(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn pime_versions() {
+    for (v, ok) in [
+        ("2.0.0-beta", false),
+        ("2.0.0-beta2", true),
+        ("2.0.0-beta3", true),
+        ("2.0.0", true),
+        ("2.1.0", true),
+        ("1.3.0", false),
+        ("1.3.0-beta", false),
+        ("", false),
+    ] {
+        assert_eq!(pime_version_ok(v), ok, "{v}");
+    }
+}
+
+/// 處理一行 `<client_id>|<JSON>`，回要寫出的那一行（close 與看不懂的行不回）
+fn respond(be: &mut Backend, line: &str) -> Option<String> {
+    let (client, text) = line.trim().split_once('|')?;
+    let msg = match serde_json::from_str::<Value>(text) {
+        Ok(m) => m,
+        Err(_) => {
+            eprintln!("[pime] 無法解析：{}", line.trim_end());
+            // 撈得到 seqNum 就回失敗，DLL 才不會乾等到逾時
+            let seq = text.split("\"seqNum\":").nth(1)?;
+            let n: i64 = seq.trim_start().split(|c: char| !c.is_ascii_digit() && c != '-').next()?.parse().ok()?;
+            return Some(format!("PIME_MSG|{client}|{}", json!({"success": false, "seqNum": n})));
+        }
+    };
+    if msg["method"] == "close" {
+        be.leave(client);
+        return None;
+    }
+    // 一則訊息出錯不能拖垮後端：所有打字中的程式都靠這個行程。出錯就清掉組字、回 success:false。
+    // 這裡可能沒有 edit session，絕不能帶 showMessage
+    let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| be.handle(client, &msg)))
+        .unwrap_or_else(|_| {
+            if let Some(e) = be.eng.as_mut() {
+                e.clear();
+            }
+            let mut r = Map::new();
+            r.insert("success".into(), json!(false));
+            r.insert("compositionString".into(), json!(""));
+            r.insert("showCandidates".into(), json!(false));
+            r.insert("seqNum".into(), msg["seqNum"].clone());
+            r
+        });
+    Some(format!("PIME_MSG|{client}|{}", Value::Object(reply)))
+}
+
 pub fn serve(mut be: Backend) {
-    // 另一條執行緒讀 stdin，主迴圈才能在等訊息時順便計時閒置
+    // 另一條執行緒讀 stdin，主迴圈才能在等訊息時順便計時閒置。
+    // 用位元組讀：一行壞 UTF-8 不能讓讀取執行緒結束（lines() 會回錯誤）
     let (tx, rx) = channel::<String>();
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match stdin.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if tx.send(String::from_utf8_lossy(&buf).into_owned()).is_err() {
                 break;
             }
         }
     });
     let mut out = std::io::stdout().lock();
+    let mut write = |s: String| writeln!(out, "{s}").and_then(|_| out.flush()).is_ok();
     loop {
         let got = match be.next_wait() {
             Some(d) => rx.recv_timeout(d),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
-        let line = match got {
-            Ok(l) => l,
-            Err(RecvTimeoutError::Timeout) => {
-                be.on_timeout();
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-        let line = line.trim();
-        let Some((client, text)) = line.split_once('|') else {
-            continue;
-        };
-        let Ok(msg) = serde_json::from_str::<Value>(text) else {
-            eprintln!("[pime] 無法解析：{line}");
-            continue;
-        };
-        if msg["method"] == "close" {
-            be.leave(client);
-            continue;
-        }
-        // 一則訊息出錯不能拖垮後端：所有打字中的程式都靠這個行程。出錯就清掉組字、回 success:false
-        let reply =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| be.handle(client, &msg)))
-                .unwrap_or_else(|_| {
-                    if let Some(e) = be.eng.as_mut() {
-                        e.clear();
+        match got {
+            Ok(l) => {
+                if let Some(s) = respond(&mut be, &l) {
+                    if !write(s) {
+                        break;
                     }
-                    let mut r = Map::new();
-                    r.insert("success".into(), json!(false));
-                    r.insert("seqNum".into(), msg["seqNum"].clone());
-                    r
-                });
-        if writeln!(out, "PIME_MSG|{client}|{}", Value::Object(reply))
-            .and_then(|_| out.flush())
-            .is_err()
-        {
-            break;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => be.on_timeout(),
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if be.should_restart() {
+            // 結束前把已經送來的請求處理完；有的話這輪不結束，下次再看
+            let mut pending = false;
+            while let Ok(l) = rx.try_recv() {
+                pending = true;
+                if let Some(s) = respond(&mut be, &l) {
+                    write(s);
+                }
+            }
+            if !pending {
+                eprintln!("[pime] 執行檔已更新，結束讓 PIMELauncher 開新版");
+                break;
+            }
         }
     }
     be.unload();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> Backend {
+        Backend::new(Config {
+            data: "no-such-dir".into(),
+            adapter_file: None,
+            l3: false,
+            icon_dir: PathBuf::new(),
+            idle: Duration::from_secs(300),
+            settings_file: None,
+        })
+    }
+
+    #[test]
+    fn secs_clamped() {
+        assert_eq!(secs(-5.0, 30.0), Duration::from_secs(1));
+        assert_eq!(secs(1e20, 30.0), Duration::from_secs(86400));
+        assert_eq!(secs(f64::INFINITY, 30.0), Duration::from_secs(86400));
+        assert_eq!(secs(f64::NAN, 30.0), Duration::from_secs(30));
+        assert_eq!(secs(2.5, 30.0), Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn bad_json_replies_with_seq() {
+        let mut be = backend();
+        assert_eq!(
+            respond(&mut be, "c1|{\"method\":\"onKeyDown\",\"seqNum\": 42,"),
+            Some(r#"PIME_MSG|c1|{"success":false,"seqNum":42}"#.into())
+        );
+        assert_eq!(respond(&mut be, "c1|garbage"), None);
+        assert_eq!(respond(&mut be, "no bar"), None);
+    }
+
+    #[test]
+    fn load_failure_retries() {
+        let mut be = backend();
+        assert!(be.engine().is_none());
+        assert!(be.gave_up());
+        // onActivate 清掉失敗記錄，下個鍵會再試
+        respond(&mut be, r#"c1|{"method":"onActivate","seqNum":1}"#);
+        assert!(!be.gave_up());
+        be.broken = Some(Instant::now() - RETRY);
+        assert!(!be.gave_up());
+    }
+
+    #[test]
+    fn no_restart_with_active_client() {
+        let mut be = backend();
+        respond(&mut be, r#"c1|{"method":"onActivate","seqNum":1}"#);
+        // onActivate 會重讀設定，所以之後才開
+        be.hot_update = true;
+        be.exe = Some((std::env::current_exe().unwrap(), SystemTime::UNIX_EPOCH));
+        assert!(!be.should_restart());
+        respond(&mut be, r#"c1|{"method":"close"}"#);
+        assert!(be.should_restart());
+        // 讀不到修改時間不算換掉
+        be.exe = Some((PathBuf::from("no-such.exe"), SystemTime::UNIX_EPOCH));
+        assert!(!be.should_restart());
+    }
 }

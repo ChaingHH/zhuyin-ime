@@ -52,6 +52,19 @@ describe('雙源合併', () => {
     expect(stats.totalReadings).toBe(1);
   });
 
+  it('mined 頻率不覆蓋 libchewing，只在沒有其他頻率時採用', () => {
+    const r = [{ canonical: 'ㄐㄧㄣ ㄊㄧㄢ', syllables: [] as never }];
+    const { entries } = mergeDrafts([
+      [{ word: '今天', readings: r, freq: 25469, provenance: ['libchewing'] }],
+      [
+        { word: '今天', readings: r, freq: 999999, provenance: ['mined'] },
+        { word: '狀態欄', readings: r, freq: 42, provenance: ['mined'] },
+      ],
+    ]);
+    expect(entries.find((e) => e.word === '今天')!.freq).toBe(25469);
+    expect(entries.find((e) => e.word === '狀態欄')!.freq).toBe(42);
+  });
+
   it('不同讀音保留為多讀音條目', () => {
     const mo: LexiconDraft[] = [
       {
@@ -70,5 +83,16 @@ describe('雙源合併', () => {
     const { entries, stats } = mergeDrafts([mo, lc]);
     expect(entries[0]!.readings).toHaveLength(2);
     expect(stats.multiReadingWords).toBe(1);
+  });
+
+  it('含非台灣繁體字（簡化字、日本新字體）的詞不收，合法繁體同形字照收', () => {
+    const r = [{ canonical: 'ㄧㄢˊ', syllables: [] as never }];
+    const words = ['顔', '顏', '发展', '作戦', '這裏', '一日千里', '天台', '上樑', '南庄'];
+    const { entries } = mergeDrafts([
+      words.map((word) => ({ word, readings: r, provenance: ['libchewing'] as const })),
+    ]);
+    expect(entries.map((e) => e.word).sort()).toEqual(
+      ['一日千里', '上樑', '南庄', '天台', '顏'].sort(),
+    );
   });
 });

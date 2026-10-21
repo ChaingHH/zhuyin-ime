@@ -179,11 +179,16 @@ struct Expert {
 impl Expert {
     /// BackoffLM.logProb：表裡的機率都是負的，查不到回 0；退回權重查不到也是 0（α=1）
     fn log_prob<T: Feed + ?Sized>(&self, w: &T, c1: &T, c2: &T) -> f64 {
-        let p3 = self.tri.found(hash3(c1, c2, w), 0);
-        if p3 != 0.0 {
-            return p3;
+        // 有存的三元，其上下文二元一定有存：上下文沒有就不查三元表（擋掉指紋誤中，TS 同）
+        let mut a = 0.0;
+        let ctx = hash2(c1, c2);
+        if self.bi.found(ctx, 0) != 0.0 {
+            let p3 = self.tri.found(hash3(c1, c2, w), 0);
+            if p3 != 0.0 {
+                return p3;
+            }
+            a = self.bi.found(ctx, 1);
         }
-        let mut a = self.bi.found(hash2(c1, c2), 1);
         let p2 = self.bi.found(hash2(c2, w), 0);
         if p2 != 0.0 {
             return a + p2;

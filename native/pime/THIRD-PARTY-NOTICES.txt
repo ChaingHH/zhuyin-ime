@@ -1,0 +1,44 @@
+﻿注音 (zhuyin-native) for PIME：第三方資料聲明
+==============================================
+
+本輸入法的程式碼以 Apache-2.0 授權。安裝包裡的詞典與語言模型由下列第三方資料衍生而來。
+
+
+1. libchewing-data（新酷音詞庫）
+--------------------------------
+
+- 來源：https://github.com/chewing/libchewing-data （dict/chewing/word.csv、tsi.csv，取用版本 main@2026-08）
+- 著作權：Copyright (c) 2025 libchewing Core Team
+- 授權：GNU Lesser General Public License 2.1 或之後的版本（LGPL-2.1-or-later）。
+  全文見同一個資料夾的 LICENSE-LGPL-2.1.txt。
+
+已修改：data\processed\lexicon.bin 不是原樣的 libchewing-data。本專案做了下列修改：
+
+- 只取詞、注音讀音與頻率，轉成本專案的詞條格式，並記錄每個詞條的來源。
+- 和下面的萌典詞條、本專案從語料挖出的常用詞合併，丟掉不合法的注音。
+- 存成二進位索引（音節編號＋陣列）。
+
+修改的程式（可用來從原始資料重建）：https://github.com/q2927485-glitch/zhuyin-ime 的
+packages/data-pipeline（src/sources/libchewing.ts、src/build/lexicon.ts）與 packages/core/src/lexicon.ts。
+原始資料可從上面的 libchewing-data 網址取得。
+
+
+2. 萌典（教育部《重編國語辭典修訂本》）
+--------------------------------------
+
+- 來源：中華民國教育部《重編國語辭典修訂本》，經 g0v 萌典專案整理
+  （https://github.com/g0v/moedict-data ，dict-revised.json，取用版本 master@2026-08）
+- 授權：政府資料開放授權條款－第 1 版（OGDL-Taiwan-1.0）。散布時須標示出處，本檔即為出處標示。
+- 已修改：只取詞目與注音讀音，轉成本專案的詞條格式，和 libchewing-data 合併後存進 lexicon.bin。
+
+
+3. 語言模型（data\models\lm.bo.bin）的訓練語料
+--------------------------------------------
+
+lm.bo.bin 是從下列語料統計出來的詞與字的出現機率，不含語料原文：
+
+- Hugging Face yuhuanstudio/PTT-pretrain-zhtw（PTT 文章）
+- Hugging Face voidful/fineweb-zhtw
+- Hugging Face wikimedia/wikipedia 中文維基百科（經 OpenCC s2twp 轉成繁體中文）
+
+各語料的授權以其 dataset card 為準。

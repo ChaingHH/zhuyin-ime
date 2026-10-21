@@ -38,4 +38,11 @@ describe('LexiconIndex', () => {
       expect(lex.size).toBe(4);
     }
   });
+
+  it('截斷的索引檔丟例外（runtime 才會改從 jsonl 重建）', () => {
+    const bytes = LexiconIndex.build(ENTRIES, 10).toBytes();
+    // 截掉 4 位元組：仍對齊，typed array 本身不會丟
+    expect(() => LexiconIndex.fromBytes(bytes.subarray(0, bytes.length - 4))).toThrow();
+    expect(() => LexiconIndex.fromBytes(new Uint8Array(4))).toThrow();
+  });
 });

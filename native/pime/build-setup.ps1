@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $native = Split-Path $here
-$data = if ($env:ZHUYIN_DATA) { $env:ZHUYIN_DATA } else { Join-Path (Split-Path $native) 'data' }
+$data = if ($env:ZHUYIN_DATA) { $env:ZHUYIN_DATA.TrimEnd([char]92) } else { Join-Path (Split-Path $native) 'data' }
 
 function Done([bool]$ok, [string]$msg) {
   Write-Host ''
