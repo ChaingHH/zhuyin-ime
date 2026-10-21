@@ -49,6 +49,11 @@ const keyOf = (code: string): [number, number] => {
   const np = /^Numpad(\d)$/.exec(code);
   if (np) return [0x60 + Number(np[1]), np[1]!.charCodeAt(0)];
   const t: Record<string, [number, number]> = {
+    NumpadMultiply: [0x6a, 0x2a],
+    NumpadAdd: [0x6b, 0x2b],
+    NumpadSubtract: [0x6d, 0x2d],
+    NumpadDecimal: [0x6e, 0x2e],
+    NumpadDivide: [0x6f, 0x2f],
     Space: [0x20, 0x20],
     Minus: [0xbd, 0x2d],
     Semicolon: [0xba, 0x3b],
@@ -64,6 +69,7 @@ const keyOf = (code: string): [number, number] => {
     Tab: [0x09, 0x09],
     Home: [0x24, 0],
     PageUp: [0x21, 0],
+    ControlLeft: [0x11, 0],
     ShiftLeft: [0x10, 0],
   };
   const v = t[code];
@@ -96,6 +102,8 @@ lines.on('line', (l) => {
   w?.(JSON.parse(json) as Record<string, unknown>);
 });
 let seq = 0;
+/** 目前送訊息的 client（PIMELauncher 每個程式一個 id；行為檢查會換成第二個程式） */
+let client = 'bench';
 const call = (msg: Record<string, unknown>): Promise<Record<string, unknown>> =>
   new Promise((res, rej) => {
     const seqNum = ++seq;
@@ -110,7 +118,7 @@ const call = (msg: Record<string, unknown>): Promise<Record<string, unknown>> =>
       if (which === 'zhuyin') checkReply(String(msg['method']), seqNum, r, performance.now() - t0);
       res(r);
     };
-    child.stdin.write(`bench|${JSON.stringify({ ...msg, seqNum })}\n`);
+    child.stdin.write(`${client}|${JSON.stringify({ ...msg, seqNum })}\n`);
   });
 
 /**
@@ -443,29 +451,60 @@ async function smoke(): Promise<void> {
   await press('ArrowDown');
   const wide = await press('ArrowRight');
   check(
-    cols(wide) === 9 && wide.last['showCandidates'] === true,
-    '→ 展開成一列 9 個，視窗仍開著',
+    cols(wide) === 4 && wide.last['showCandidates'] === true,
+    `→ 展開成 4 欄（${String(cols(wide))}），視窗仍開著`,
+  );
+  const right = await press('ArrowRight');
+  check(
+    cols(right) === undefined && right.last['candidateCursor'] === 1,
+    `表格裡 → 移到右邊那一欄（反白 ${String(right.last['candidateCursor'])}）`,
+  );
+  const left = await press('ArrowLeft');
+  check(
+    cols(left) === undefined && left.last['candidateCursor'] === 0,
+    '表格裡 ← 移回左邊那一欄、不收回',
   );
   check(cols(await press('Tab')) === undefined, 'Tab 在表格中不重送欄數');
   const narrow = await press('ArrowLeft');
-  check(cols(narrow) === 1 && narrow.last['showCandidates'] === true, '← 收回成一欄');
+  check(
+    cols(narrow) === 1 &&
+      narrow.last['showCandidates'] === true &&
+      narrow.last['candidateCursor'] === 0,
+    '最左欄按 ← 收回成一欄',
+  );
   await press('Tab');
   await press('Escape'); // 關視窗
   check(cols(await press('ArrowDown')) === 1, '視窗關掉後再開，回到一欄');
   await press('Escape');
   await press('Escape');
 
-  // 表格一頁最多 4 行 × 9；反白走過本頁最後一個就翻頁；數字（含數字鍵盤）選反白那一行的第 n 個
+  // 表格一頁 9 列 × 4 欄，每欄由上往下 1–9（DLL 逐列畫，所以第一列是每欄的第 1 個）；
+  // 反白走過本頁最後一個就翻頁；數字（含數字鍵盤）選反白那一欄的第 n 個
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
-  const list9 = (await press('ArrowDown')).last['candidateList'] as string[];
-  const table = (await press('ArrowRight')).last['candidateList'] as string[];
+  const opened = await press('ArrowDown');
+  const list9 = opened.last['candidateList'] as string[];
   check(
-    list9.length === 9 && table.length > 9 && table.length <= 36,
-    `表格一頁 ${table.length} 個（清單 ${list9.length} 個）`,
+    opened.last['setSelKeys'] === '123456789',
+    `清單標籤 1–9（${String(opened.last['setSelKeys'])}）`,
   );
-  for (let i = 0; i < 9; i++) await press('ArrowDown');
-  const row2 = await press('Numpad1');
-  check(row2.last['compositionString'] === table[9], `數字鍵盤 1 選第二行第一個（${table[9]}）`);
+  const tab = await press('ArrowRight');
+  const table = tab.last['candidateList'] as string[];
+  check(
+    list9.length === 9 &&
+      table.length > 27 &&
+      table.length <= 36 &&
+      String(tab.last['setSelKeys']).startsWith('11112222'),
+    `表格一頁 ${table.length} 個、第一列標籤 ${String(tab.last['setSelKeys']).slice(0, 4)}`,
+  );
+  check(table[0] === list9[0] && table[4] === list9[1], '第一欄由上往下是清單的順序');
+  let walk = tab;
+  for (let i = 0; i < 9; i++) walk = await press('ArrowDown');
+  check(
+    walk.last['candidateCursor'] === 1,
+    `↓ 走過第一欄最後一個到第二欄頂端（${String(walk.last['candidateCursor'])}）`,
+  );
+  const col2 = await press('Numpad1');
+  check(col2.last['compositionString'] === table[1], `數字鍵盤 1 選第二欄第一個（${table[1]}）`);
   await press('Escape');
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   await press('ArrowDown');
@@ -482,10 +521,65 @@ async function smoke(): Promise<void> {
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   const num = await press('Numpad5');
   check(num.eaten && String(num.last['compositionString']).endsWith('5'), '組字中數字鍵盤打出數字');
+  for (const c of [
+    'NumpadAdd',
+    'NumpadSubtract',
+    'NumpadMultiply',
+    'NumpadDivide',
+    'NumpadDecimal',
+  ]) {
+    const op = await press(c);
+    const ch = String.fromCharCode(keyOf(c)[1]);
+    check(
+      op.eaten && String(op.last['compositionString']).endsWith(ch),
+      `組字中數字鍵盤 ${ch} 打得出來`,
+    );
+  }
   await press('Escape');
   check(!(await press('Numpad5')).eaten, '沒在組字時數字鍵盤放行');
+  check(!(await press('NumpadAdd')).eaten, '沒在組字時數字鍵盤 + 放行');
+
+  // 每個程式各有一份 DLL：程式 A 展開過表格，程式 B 啟用後，A 再開清單仍要送 1 欄（2026-10-21 清單變成橫的 1×9）
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  await press('ArrowRight');
+  // 表格開著時點到別處：組字被系統結束，A 的 DLL 停在 4 欄
+  await call({ method: 'onCompositionTerminated', forced: true });
+  client = 'bench2';
+  await call({ method: 'onActivate', isKeyboardOpen: true });
+  client = 'bench';
+  const sent: unknown[] = [];
+  for (const c of ['KeyS', 'KeyU', 'Digit3', 'ArrowDown']) {
+    const x = await press(c);
+    sent.push(cols(x));
+    if (c === 'Digit3')
+      check(x.last['compositionString'] !== '', '組字被系統結束後，接著打的注音照常進組字區');
+  }
+  check(
+    sent.filter((x) => x !== undefined).at(-1) === 1,
+    `別的程式啟用後，這個程式開清單仍收回成 1 欄（送了 ${JSON.stringify(sent)}）`,
+  );
   await press('Escape');
   await press('Escape');
+  await press('Escape');
+  await press('Escape');
+
+  // Ctrl+V 等組合鍵：單按 Ctrl 不動組字；按 V 時先送出組字（含開著的選字視窗），按鍵交給應用程式
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  keyStates[0x11] = 0x80;
+  const ctrl = await press('ControlLeft');
+  check(!ctrl.eaten, '組字中單按 Ctrl 放行、不送出');
+  const paste = await press('KeyV', '\x16');
+  check(
+    paste.last['return'] === false &&
+      paste.out.length === 1 &&
+      paste.last['compositionString'] === '' &&
+      paste.last['showCandidates'] === false,
+    `組字中 Ctrl+V：先送出「${paste.out}」，再交給應用程式`,
+  );
+  check(!(await press('KeyV', '\x16')).eaten, '沒在組字時 Ctrl+V 放行');
+  keyStates[0x11] = 0;
 }
 
 const init = await call({

@@ -4,7 +4,8 @@
 //! onKeyboardStatusChanged、onCompositionTerminated、close；回應帶 compositionString、
 //! compositionCursor、commitString、candidateList、showCandidates、candidateCursor、return。
 //! 按鍵行為照網頁測試台（packages/cli/web/index.html）：單按 Shift 切換注音／英文、Enter 送出、
-//! ↓ 開選字視窗、數字選字、←→ 移游標、Esc 取消；沒在組字時編輯鍵交給應用程式。
+//! ↓ 開選字視窗、數字選字、←→ 移游標、Esc 取消；沒在組字時編輯鍵交給應用程式；
+//! 組字中按 Ctrl／Alt 組合鍵（Ctrl+V…）先送出組字再交給應用程式。
 //!
 //! 記憶體跟著使用走（docs/MEMORY.md §6）：PIMELauncher 在第一次有 client 用到這個後端時才開行程，
 //! 之後不會關，行程結束 1 秒後還會自動重開。所以行程常駐、引擎不常駐：第一個要組字的按鍵才載入
@@ -12,7 +13,7 @@
 use crate::engine::{EngineState, ImeEngine, Mode};
 use crate::{decode, l3, lexicon, lm, x2};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, RecvTimeoutError};
@@ -35,12 +36,10 @@ const ID_MODE: i64 = 1;
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 const ID_SHIFT_BOTH: i64 = 4;
-/// 選字視窗展開時每列幾個（使用者指定，2026-10-20）。PIME 的視窗一次只畫一頁
-const TABLE_COLS: i64 = 9;
-/// 表格展開時一頁最多幾行；選過最後一個就翻頁
-const TABLE_ROWS: i64 = 4;
-/// 選字鍵標籤：每行都是 1–9。DLL 畫的候選數不超過標籤數（PIMETextService.cpp updateCandidates）
-const SEL_KEYS: &str = "123456789123456789123456789123456789";
+/// 選字視窗展開成表格：直的 9 個（每欄由上往下 1–9）、橫的 4 欄（使用者指定 9×4，2026-10-21，同微軟注音）。
+/// PIME 的 DLL 逐列畫（libIME2 CandidateWindow 第 i 個在第 i / candPerRow 列），所以送出前要轉置（`grid`）
+const TABLE_COLS: usize = 4;
+const TABLE_ROWS: usize = 9;
 /// 候選字型：微軟注音用的微軟正黑體（LOGFONT 字型名最多 31 字元，PIMETextService.cpp:258）
 const CAND_FONT: &str = "Microsoft JhengHei UI";
 const CAND_FONT_SIZE: i64 = 14;
@@ -75,6 +74,11 @@ fn code_of(vk: u32) -> Option<String> {
         0x30..=0x39 => return Some(format!("Digit{}", vk - 0x30)),
         0x41..=0x5a => return Some(format!("Key{}", char::from(vk as u8))),
         0x60..=0x69 => return Some(format!("Numpad{}", vk - 0x60)),
+        0x6a => "NumpadMultiply",
+        0x6b => "NumpadAdd",
+        0x6d => "NumpadSubtract",
+        0x6e => "NumpadDecimal",
+        0x6f => "NumpadDivide",
         0x08 => "Backspace",
         0x09 => "Tab",
         0x0d => "Enter",
@@ -222,8 +226,11 @@ pub struct Backend {
     shift_toggle: &'static str,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
-    /// DLL 目前的 candPerRow（只在變了才送）
-    sent_cols: i64,
+    /// 這個鍵（filterKeyDown 決定）只是展開／收回表格，onKeyDown 不交給引擎
+    layout_key: bool,
+    /// 每個 client 的 DLL 目前的 candPerRow（只在變了才送）。每個程式各有一份 DLL：
+    /// 只記一份的話，別的程式 onActivate 或展開過表格後，這個程式的視窗會用錯的欄數畫（2026-10-21 清單變成橫的 1×9）
+    sent_cols: HashMap<String, usize>,
     /// 候選字型與字級（config.json 的 candFontName／candFontSize）
     font: (String, i64),
     /// 學習資料有改動、還沒寫檔
@@ -252,7 +259,8 @@ impl Backend {
             shift_alone: false,
             shift_toggle: "both",
             table: false,
-            sent_cols: 1,
+            layout_key: false,
+            sent_cols: HashMap::new(),
             font: (CAND_FONT.into(), CAND_FONT_SIZE),
             dirty: false,
             save_delay: save_delay(),
@@ -322,24 +330,56 @@ impl Backend {
     /// 所以在 filterKeyDown 的回應先送 candPerRow（沒有 edit session 也安全：updateUI 不碰 session），
     /// 同一個鍵的 onKeyDown 回應再帶候選清單，就會用新的欄數重畫
     fn table_layout(&mut self, k: &Key, r: &mut Map<String, Value>) {
+        // 清單時 →／Tab 展開、表格最左欄 ← 收回：這個鍵只換排法，不交給引擎（引擎的 ← → 是換欄）
+        let first_col = self
+            .eng
+            .as_ref()
+            .and_then(|e| e.state(true).menu)
+            .is_some_and(|m| m.cursor < TABLE_ROWS);
         if self.menu_open() {
             match k.code.as_deref() {
-                Some("ArrowRight" | "Tab") => self.table = true,
-                Some("ArrowLeft") => self.table = false,
+                Some("ArrowRight" | "Tab") if !self.table => {
+                    self.table = true;
+                    self.layout_key = true;
+                }
+                Some("ArrowLeft") if self.table && first_col => {
+                    self.table = false;
+                    self.layout_key = true;
+                }
                 _ => {}
             }
         } else {
             self.table = false;
         }
-        let cols = if self.table { TABLE_COLS } else { 1 };
-        let page = if self.table { TABLE_COLS * TABLE_ROWS } else { TABLE_COLS };
-        if let Some(e) = self.eng.as_mut() {
-            e.set_page_size(page as usize);
-        }
-        if cols != self.sent_cols {
-            self.sent_cols = cols;
+        let page = if self.table {
+            TABLE_COLS * TABLE_ROWS
+        } else {
+            TABLE_ROWS
+        };
+        let Some(e) = self.eng.as_mut() else {
+            return;
+        };
+        e.set_page_size(page);
+        // 欄數照這個鍵之後那一頁的候選數：最後一頁不滿 36 個就少幾欄，視窗不會拖著空欄
+        let len = k
+            .code
+            .as_deref()
+            .and_then(|c| e.menu_page_len_after(c))
+            .unwrap_or(0);
+        let cols = if self.table {
+            len.div_ceil(TABLE_ROWS).clamp(1, TABLE_COLS)
+        } else {
+            1
+        };
+        if self.sent_cols.get(&self.owner) != Some(&cols) {
+            self.sent_cols.insert(self.owner.clone(), cols);
             r.insert("customizeUI".into(), json!({ "candPerRow": cols }));
         }
+    }
+
+    /// 這次組字的 client 的 DLL 現在幾欄
+    fn cols(&self) -> usize {
+        self.sent_cols.get(&self.owner).copied().unwrap_or(1)
     }
 
     /// 改一項設定並存檔（保留檔案裡其他項目；先寫暫存檔再改名）
@@ -459,8 +499,8 @@ impl Backend {
             }));
     }
 
-    /// 把引擎狀態寫進回應：組字字串、游標（UTF-16 單位）、選字視窗
-    fn show(r: &mut Map<String, Value>, st: &EngineState) {
+    /// 把引擎狀態寫進回應：組字字串、游標（UTF-16 單位）、選字視窗（cols＝DLL 目前的欄數）
+    fn show(r: &mut Map<String, Value>, st: &EngineState, cols: usize) {
         let chars: Vec<char> = st.composition.chars().collect();
         let pend = st.pending.as_deref().map_or(0, |p| p.chars().count());
         let upto = (st.cursor + pend).min(chars.len());
@@ -469,8 +509,11 @@ impl Backend {
         r.insert("compositionCursor".into(), json!(cursor));
         match &st.menu {
             Some(m) => {
-                r.insert("candidateList".into(), json!(m.items));
-                r.insert("candidateCursor".into(), json!(m.cursor));
+                let (items, cursor, keys) = grid(&m.items, m.cursor, cols);
+                // 標籤跟著排法變，每次都送：updateStatus 先套用 setSelKeys 才畫候選
+                r.insert("setSelKeys".into(), json!(keys));
+                r.insert("candidateList".into(), json!(items));
+                r.insert("candidateCursor".into(), json!(cursor));
                 r.insert("showCandidates".into(), json!(true));
             }
             None => {
@@ -519,12 +562,13 @@ impl Backend {
     /// 單按 Shift（onKeyUp，有 edit session）：換模式（只換語言列圖示，不跳提示）。
     /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文
     fn toggle(&mut self, r: &mut Map<String, Value>) {
+        let cols = self.cols();
         // 引擎沒載入就沒有組字，只換模式
         if let Some(e) = self.eng.as_mut() {
             let was = e.is_composing();
             e.toggle_mode();
             if e.is_composing() {
-                Self::show(r, &e.state(true));
+                Self::show(r, &e.state(true), cols);
             } else if was {
                 // 組字區只有打到一半的注音，切英文後丟掉了：清掉畫面上的組字
                 r.insert("compositionString".into(), json!(""));
@@ -549,6 +593,12 @@ impl Backend {
             return false;
         }
         self.shift_alone = false;
+        // 每個鍵都先重設：組字被系統結束後，下一個鍵不會走 table_layout
+        self.layout_key = false;
+        // 單按 Ctrl、Alt、Win 不動組字（Ctrl+V 要等 V 按下才送出組字）
+        if matches!(k.vk, 0x11 | 0x12 | 0x5b | 0x5c | 0xa2..=0xa5) {
+            return false;
+        }
         if self.composing() {
             self.table_layout(k, r);
             return true;
@@ -560,10 +610,23 @@ impl Backend {
     }
 
     fn on_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
-        // 組字中的其他鍵（Tab、F1、Ctrl+…）吃掉，不讓它插進組字中間
-        let Some(code) = k.code.as_deref().filter(|_| !k.ctrl_alt) else {
+        // Ctrl／Alt 組合鍵（Ctrl+V 貼上、Ctrl+Z、Ctrl+S…）：先送出組字（同 Enter），按鍵交給應用程式。
+        // DLL 先套用回應（commitString）再看 return，所以應用程式收到按鍵時字已經在文件裡
+        if k.ctrl_alt {
+            if let Some(e) = self.eng.as_mut().filter(|e| e.is_composing()) {
+                let text = e.commit(0);
+                self.dirty = true;
+                Self::commit_text(r, &text);
+                self.clear(r);
+            }
+            return false;
+        }
+        // 組字中的其他鍵（Tab、F1…）吃掉，不讓它插進組字中間
+        let Some(code) = k.code.as_deref() else {
             return true;
         };
+        let cols = self.cols();
+        let layout_key = self.layout_key;
         let Some(eng) = self.engine() else {
             return false;
         };
@@ -575,7 +638,11 @@ impl Backend {
             return true;
         }
         let was = eng.is_composing();
-        let st = eng.on_key(code, k.key.as_deref());
+        let st = if layout_key {
+            eng.state(true)
+        } else {
+            eng.on_key(code, k.key.as_deref())
+        };
         // 英文模式下打空白／標點會整段送出（有學習）
         if was && st.text.is_some() {
             self.dirty = true;
@@ -583,13 +650,14 @@ impl Backend {
         if let Some(t) = &st.text {
             Self::commit_text(r, t);
         }
-        Self::show(r, &st);
+        Self::show(r, &st, cols);
         true
     }
 
     /// client 停用或斷線：沒有 client 在用就卸載
     fn leave(&mut self, client: &str) {
         self.active.remove(client);
+        self.sent_cols.remove(client);
         if self.active.is_empty() {
             self.unload();
         }
@@ -614,10 +682,9 @@ impl Backend {
     /// 裝的 PIME 能不能承受後端結束：讀 PIME 目錄的 version.txt（執行檔在 PIME\zhuyin\ 底下）。
     /// v2.0.0-beta 的 DLL 遇到後端結束會讓宿主程式當掉；beta2 起修掉（EasyIME/PIME#905）。讀不到就當不安全
     fn pime_restart_safe(&self) -> bool {
-        let v = self
-            .exe
-            .as_ref()
-            .and_then(|(p, _)| std::fs::read_to_string(p.parent()?.parent()?.join("version.txt")).ok());
+        let v = self.exe.as_ref().and_then(|(p, _)| {
+            std::fs::read_to_string(p.parent()?.parent()?.join("version.txt")).ok()
+        });
         v.is_some_and(|v| pime_version_ok(v.trim()))
     }
 
@@ -677,9 +744,8 @@ impl Backend {
                 self.active.insert(client.to_string());
                 self.broken = None;
                 self.read_settings();
-                r.insert("setSelKeys".into(), json!(SEL_KEYS));
                 self.table = false;
-                self.sent_cols = 1;
+                self.sent_cols.insert(client.to_string(), 1);
                 r.insert(
                     "customizeUI".into(),
                     json!({
@@ -779,10 +845,72 @@ impl Backend {
     }
 }
 
+/// 引擎一頁的候選（每欄 TABLE_ROWS 個，欄由左到右）轉成 DLL 逐列畫的順序。
+/// 回傳（候選、反白位置、選字鍵標籤）：標籤是那一格在欄裡的第幾個（1–9）；
+/// 最後一欄不滿時中間的空格補空字串、標籤補空白（DLL 仍會畫出「 . 」），尾端的空格不送
+fn grid(items: &[String], cursor: usize, cols: usize) -> (Vec<String>, usize, String) {
+    let cols = cols.max(1);
+    // 一般是 9 列；欄數比候選少（例如 DLL 還是 1 欄）就加長，不丟候選
+    let rows = items
+        .len()
+        .div_ceil(cols)
+        .max(items.len().min(TABLE_ROWS))
+        .max(1);
+    let mut out = vec![];
+    let mut keys = String::new();
+    for i in 0..rows * cols {
+        let (row, col) = (i / cols, i % cols);
+        match items.get(col * rows + row) {
+            Some(w) => {
+                out.push(w.clone());
+                keys.push(char::from(b'1' + (row % TABLE_ROWS) as u8));
+            }
+            None => {
+                out.push(String::new());
+                keys.push(' ');
+            }
+        }
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+        keys.pop();
+    }
+    (out, cursor % rows * cols + cursor / rows, keys)
+}
+
+#[cfg(test)]
+#[test]
+fn grid_is_column_major() {
+    let w = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>();
+    // 36 個、4 欄：第一列是每欄的第 1 個，標籤 1111 2222 …
+    let (items, cur, keys) = grid(&w(36), 10, 4);
+    assert_eq!(&items[..5], ["0", "9", "18", "27", "1"]);
+    assert_eq!(&keys[..8], "11112222");
+    assert_eq!(keys.len(), 36);
+    // 第 10 個（第 2 欄第 2 個）在第 2 列第 2 格
+    assert_eq!(items[cur], "10");
+    // 20 個、3 欄：第 3 欄只有 2 個，中間空格補空字串、尾端不送
+    let (items, cur, keys) = grid(&w(20), 19, 3);
+    assert_eq!(&items[..3], ["0", "9", "18"]);
+    assert_eq!(items[5], "19");
+    assert_eq!(items[8], "");
+    assert_eq!(&keys[6..9], "33 ");
+    assert_eq!(items.last().unwrap(), "17");
+    assert_eq!(items[cur], "19");
+    // 1 欄：原順序
+    let (items, cur, keys) = grid(&w(9), 3, 1);
+    assert_eq!(items, w(9));
+    assert_eq!((cur, keys.as_str()), (3, "123456789"));
+}
+
 /// "2.0.0-beta" 不行；"2.0.0-beta2" 以上、正式版 2.x 以上可以
 fn pime_version_ok(v: &str) -> bool {
     let (base, pre) = v.split_once('-').unwrap_or((v, ""));
-    let major: u32 = base.split('.').next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    let major: u32 = base
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0);
     if major < 2 || base != "2.0.0" {
         return major >= 2;
     }
@@ -818,8 +946,16 @@ fn respond(be: &mut Backend, line: &str) -> Option<String> {
             eprintln!("[pime] 無法解析：{}", line.trim_end());
             // 撈得到 seqNum 就回失敗，DLL 才不會乾等到逾時
             let seq = text.split("\"seqNum\":").nth(1)?;
-            let n: i64 = seq.trim_start().split(|c: char| !c.is_ascii_digit() && c != '-').next()?.parse().ok()?;
-            return Some(format!("PIME_MSG|{client}|{}", json!({"success": false, "seqNum": n})));
+            let n: i64 = seq
+                .trim_start()
+                .split(|c: char| !c.is_ascii_digit() && c != '-')
+                .next()?
+                .parse()
+                .ok()?;
+            return Some(format!(
+                "PIME_MSG|{client}|{}",
+                json!({"success": false, "seqNum": n})
+            ));
         }
     };
     if msg["method"] == "close" {

@@ -125,6 +125,7 @@ if (mode === 'keys') {
     s.syllables.forEach((syl, j) => {
       if (j > 0 && r() < 0.04) key('Space'); // 組字中的空格（原樣 token）
       if (j > 0 && r() < 0.03) key('Comma', '<'); // 全形標點
+      if (j > 0 && r() < 0.03) key(['Numpad7', 'NumpadAdd', 'NumpadDecimal'][Math.floor(r() * 3)]!); // 數字鍵盤
       if (j > 0 && r() < 0.04) {
         // 中英混打：切英文打一個字（偶爾退一格、偶爾按空白整段送出），切回注音接著打
         ev.push('m');

@@ -40,6 +40,15 @@ export interface MenuView {
 /** 選字視窗每頁幾個（數字鍵 1–9） */
 const MENU_PAGE = 9;
 
+/** 數字鍵盤的運算符號（KeyboardEvent.code 去掉 "Numpad"）：和數字一樣原樣輸出（同 engine.rs numpad_op） */
+const NUMPAD_OP: Record<string, string> = {
+  Add: '+',
+  Subtract: '-',
+  Multiply: '*',
+  Divide: '/',
+  Decimal: '.',
+};
+
 /**
  * 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）。只收不跟大千注音鍵衝突的：
  * 大千佔掉 , . / ; - 與數字，所以這些要按 Shift。
@@ -384,7 +393,10 @@ export class ImeEngine {
     // 打到一半的注音時：空白是一聲，標點不收（先把注音打完或退掉）
     const punct = ev.key !== undefined ? PUNCT[ev.key] : undefined;
     // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
-    const symbol = punct ?? /^Numpad([0-9])$/.exec(ev.code)?.[1];
+    const symbol =
+      punct ??
+      /^Numpad([0-9])$/.exec(ev.code)?.[1] ??
+      NUMPAD_OP[/^Numpad(\w+)$/.exec(ev.code)?.[1] ?? ''];
     const literal = symbol ?? (ev.code === 'Space' ? ' ' : undefined);
     let inserted = false;
     if (literal !== undefined && this.comp.pendingDisplay === '') {

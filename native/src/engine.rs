@@ -62,6 +62,55 @@ struct Menu {
     sel: usize,
 }
 
+/// 數字鍵盤的運算符號（KeyboardEvent.code 去掉 "Numpad"）：和數字一樣原樣輸出（同 engine.ts NUMPAD_OP）
+fn numpad_op(name: &str) -> Option<&'static str> {
+    match name {
+        "Add" => Some("+"),
+        "Subtract" => Some("-"),
+        "Multiply" => Some("*"),
+        "Divide" => Some("/"),
+        "Decimal" => Some("."),
+        _ => None,
+    }
+}
+
+/// 選字視窗按 code 之後的（反白, 頁）：↓↑ 移反白（跨頁、頭尾循環）、空白／PageDown 下一頁、
+/// PageUp 上一頁（反白移到該頁第一個）、表格裡 ← → 換欄；其他鍵不動
+fn menu_move(m: &Menu, code: &str, size: usize) -> (usize, usize) {
+    let n = m.items.len();
+    let pages = n.div_ceil(size);
+    match code {
+        "ArrowDown" | "ArrowUp" => {
+            let sel = (m.sel + if code == "ArrowDown" { 1 } else { n - 1 }) % n;
+            (sel, sel / size)
+        }
+        "Space" | "PageDown" | "PageUp" => {
+            let page = if code == "PageUp" {
+                (m.page + pages - 1) % pages
+            } else {
+                (m.page + 1) % pages
+            };
+            (page * size, page)
+        }
+        // 表格（一頁好幾欄，每欄 MENU_PAGE 個）：← → 移到左右那一欄的同一列；右邊那欄比較短就到它最後一個。
+        // 最左欄的 ← 由 PIME 拿去收回表格，不會進到這裡
+        "ArrowLeft" if size > MENU_PAGE && (m.sel - m.page * size) >= MENU_PAGE => {
+            (m.sel - MENU_PAGE, m.page)
+        }
+        "ArrowRight" if size > MENU_PAGE => {
+            let end = n.min((m.page + 1) * size);
+            let next_col =
+                (m.sel - m.page * size) / MENU_PAGE * MENU_PAGE + MENU_PAGE + m.page * size;
+            if next_col < end {
+                ((m.sel + MENU_PAGE).min(end - 1), m.page)
+            } else {
+                (m.sel, m.page)
+            }
+        }
+        _ => (m.sel, m.page),
+    }
+}
+
 /// 序列從 a 改成 b：前後相同的部分不動。回傳 a 的詞段在 b 的起點；碰到被換掉的範圍回 None。
 /// edit_at：編輯位置（編輯前後游標的較小者），相同前綴不超過它——疊字旁刪字時只看內容分不出刪哪個（同 TS）
 fn remapper(a: &[String], b: &[String], edit_at: usize) -> impl Fn(usize, usize) -> Option<usize> {
@@ -283,11 +332,9 @@ impl ImeEngine {
     fn on_menu_key(&mut self, code: &str) -> EngineState {
         let size = self.page_size;
         let m = self.menu.as_mut().unwrap();
-        let n = m.items.len();
-        let pages = n.div_ceil(size);
         let lo = m.page * size;
         let page_items = &m.items[lo..(lo + size).min(m.items.len())];
-        // 一頁可能有好幾行（PIME 表格每行 MENU_PAGE 個）：數字選反白那一行的第 n 個
+        // 一頁可能有好幾欄（PIME 表格每欄由上往下 MENU_PAGE 個）：數字選反白那一欄的第 n 個
         let row = (m.sel - lo) / MENU_PAGE * MENU_PAGE;
         let digit = code
             .strip_prefix("Digit")
@@ -300,20 +347,22 @@ impl ImeEngine {
         } else if code == "Enter" {
             let f = m.items[m.sel].clone();
             self.select(f, true);
-        } else if code == "ArrowDown" || code == "ArrowUp" {
-            m.sel = (m.sel + if code == "ArrowDown" { 1 } else { n - 1 }) % n;
-            m.page = m.sel / size;
-        } else if code == "Space" || code == "PageDown" || code == "PageUp" {
-            m.page = if code == "PageUp" {
-                (m.page + pages - 1) % pages
-            } else {
-                (m.page + 1) % pages
-            };
-            m.sel = m.page * size;
+        } else if matches!(
+            code,
+            "ArrowDown" | "ArrowUp" | "Space" | "PageDown" | "PageUp" | "ArrowLeft" | "ArrowRight"
+        ) {
+            (m.sel, m.page) = menu_move(m, code, size);
         } else if code == "Escape" || code == "Backspace" {
             self.menu = None;
         }
         self.state(true)
+    }
+
+    /// 選字視窗開著時按 code 之後，畫面那一頁有幾個候選；不改狀態（PIME 要在 filterKeyDown 先送欄數）
+    pub fn menu_page_len_after(&self, code: &str) -> Option<usize> {
+        let m = self.menu.as_ref()?;
+        let (_, page) = menu_move(m, code, self.page_size);
+        Some((m.items.len() - page * self.page_size).min(self.page_size))
     }
 
     fn on_nav_key(&mut self, code: &str) -> Option<EngineState> {
@@ -479,7 +528,9 @@ impl ImeEngine {
         let numpad = code
             .strip_prefix("Numpad")
             .filter(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_digit());
-        let punct = punct.or(numpad);
+        let punct = punct
+            .or(numpad)
+            .or(code.strip_prefix("Numpad").and_then(numpad_op));
         let literal = punct.or((code == "Space").then_some(" "));
         let mut inserted = false;
         match literal {
