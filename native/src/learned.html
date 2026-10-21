@@ -175,6 +175,14 @@ async function del(i, btn) {
     toast(`刪除失敗：${e.message}（輸入法可能重開過，從右鍵選單再開一次）`);
   }
 }
+// 關分頁、離開頁面：告訴後端，最後一個頁面關掉幾秒後網頁服務就停（重新整理會馬上再連上，不會停）
+// 有的瀏覽器關分頁不送這個通知：另外每 60 秒報一次「還開著」，後端 3 分鐘沒收到任何請求也會停
+if (TOKEN) {
+  addEventListener('pagehide', () =>
+    fetch(`/close?t=${TOKEN}`, { method: 'POST', keepalive: true }).catch(() => {}),
+  );
+  setInterval(() => fetch(`/ping?t=${TOKEN}`).catch(() => {}), 60_000);
+}
 document.getElementById('t').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-i]');
   if (b) del(Number(b.dataset.i), b);

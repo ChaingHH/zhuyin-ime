@@ -6,7 +6,7 @@
 ; 需要對方已經裝好 PIME 2.0（v2.0.0-beta3 以上較安全，見 docs/MS-CANDIDATES.md §5.4）。
 
 #define AppName "注音 (zhuyin-native) for PIME"
-#define AppVersion "0.1.0"
+#define AppVersion "0.99.0"
 
 [Setup]
 AppId={{64B60746-4570-4343-A34A-85C12F03A93B}

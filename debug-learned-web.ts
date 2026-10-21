@@ -12,16 +12,20 @@ import { syllableToKeyCodes } from '@zhuyin/core';
 
 const dir = mkdtempSync(join(tmpdir(), 'zhuyin-web-'));
 const adapterFile = join(dir, 'adapter.json');
-const child = spawn(process.env['ZHUYIN_EXE'] ?? 'native/target/release/zhuyin-native.exe', ['pime'], {
-  env: {
-    ...process.env,
-    ZHUYIN_ADAPTER: adapterFile,
-    ZHUYIN_CONFIG: join(dir, 'config.json'),
-    ZHUYIN_LOG: 'off',
-    ZHUYIN_NO_OPEN: '1',
+const child = spawn(
+  process.env['ZHUYIN_EXE'] ?? 'native/target/release/zhuyin-native.exe',
+  ['pime'],
+  {
+    env: {
+      ...process.env,
+      ZHUYIN_ADAPTER: adapterFile,
+      ZHUYIN_CONFIG: join(dir, 'config.json'),
+      ZHUYIN_LOG: 'off',
+      ZHUYIN_NO_OPEN: '1',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
   },
-  stdio: ['pipe', 'pipe', 'pipe'],
-});
+);
 let url = '';
 createInterface({ input: child.stderr }).on('line', (l) => {
   const m = /學習資料頁 (http\S+)/.exec(l);
@@ -53,7 +57,9 @@ const VK: Record<string, [number, number]> = {
 };
 const press = async (code: string): Promise<Record<string, unknown>> => {
   const m = /^(?:Key|Digit)(.)$/.exec(code);
-  const [keyCode, charCode] = m ? [m[1]!.charCodeAt(0), m[1]!.toLowerCase().charCodeAt(0)] : VK[code]!;
+  const [keyCode, charCode] = m
+    ? [m[1]!.charCodeAt(0), m[1]!.toLowerCase().charCodeAt(0)]
+    : VK[code]!;
   const ev = { keyCode, charCode, repeatCount: 1, scanCode: 0, isExtended: false, keyStates };
   const f = await call({ method: 'filterKeyDown', ...ev });
   return f['return'] ? call({ method: 'onKeyDown', ...ev }) : f;
@@ -107,12 +113,23 @@ const { origin, host } = new URL(url);
 const token = new URL(url).searchParams.get('t')!;
 
 const page = await http('GET', url);
-check(page.status === 200 && page.text.includes('狀態欄') && page.text.includes(token), '頁面有學到的詞和 token');
+check(
+  page.status === 200 && page.text.includes('狀態欄') && page.text.includes(token),
+  '頁面有學到的詞和 token',
+);
 check((await http('GET', `${origin}/?t=${'0'.repeat(32)}`)).status === 403, '錯的 token 拒絕');
-check((await http('GET', url, { Host: `localhost:${new URL(url).port}` })).status === 403, 'Host 不對（DNS rebinding）拒絕');
+check(
+  (await http('GET', url, { Host: `localhost:${new URL(url).port}` })).status === 403,
+  'Host 不對（DNS rebinding）拒絕',
+);
 const body = JSON.stringify({ kind: 'phrase', word: '狀態欄', reading: null });
 const del = (headers: Record<string, string>) =>
-  http('POST', `${origin}/delete?t=${token}`, { 'Content-Type': 'application/json', ...headers }, body);
+  http(
+    'POST',
+    `${origin}/delete?t=${token}`,
+    { 'Content-Type': 'application/json', ...headers },
+    body,
+  );
 check((await del({})).status === 403, '沒有 Origin 的 POST 拒絕');
 check((await del({ Origin: 'http://evil.example' })).status === 403, '別的網站的 POST 拒絕');
 const ok = await del({ Origin: origin, Host: host });
@@ -123,6 +140,41 @@ check(!(await http('GET', url)).text.includes('"狀態欄"'), '重新整理後�
 const saved = readFileSync(adapterFile, 'utf8');
 check(!saved.includes('"狀態欄"'), 'adapter.json 已存檔、沒有這個詞');
 check((await typeZt()) === before, `刪掉後打回學習前的樣子（${before}）`);
+
+// 關分頁就停：頁面 pagehide 送 POST /close；開著的頁面數歸零、3 秒內沒有新的頁面就停。上面 GET 過兩次頁面＝兩個頁面
+const close = () => http('POST', `${origin}/close?t=${token}`, { Origin: origin });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+check(
+  (await http('GET', `${origin}/ping?t=${token}`)).status === 200,
+  '頁面的定時 ping 有回應（不算新頁面）',
+);
+await close();
+await close();
+await http('GET', url); // 重新整理：先 close 再 GET
+await sleep(3500);
+check((await http('GET', url)).status === 200, '重新整理（close 後馬上載入）服務不會停');
+check(
+  (await http('POST', `${origin}/close?t=${token}`)).status === 404,
+  '沒有 Origin 的 close 不算',
+);
+await close();
+await close();
+await sleep(3500);
+check(
+  await http('GET', url).then(
+    () => false,
+    () => true,
+  ),
+  '所有頁面都關掉 3 秒後服務停了',
+);
+const old = url;
+url = '';
+await call({ method: 'onCommand', id: 5, type: 2 });
+for (let i = 0; i < 50 && !url; i++) await sleep(20);
+check(
+  !!url && url !== old && (await http('GET', url)).status === 200,
+  '再從右鍵選單開，會開一個新的服務',
+);
 
 child.stdin.end();
 console.log('學習資料頁刪除檢查通過');
