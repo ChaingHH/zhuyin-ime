@@ -52,6 +52,9 @@ export interface UserAdapterData {
  * 學習資料的上限。衰減後的次數 = 次數 × 0.5^(天數/14)；整理時先刪衰減到 dropBelow 以下的，
  * 再從最弱的刪到上限。手動造詞不衰減，只在超過 maxManual 時刪最舊的。
  */
+/** 挖詞要在幾次送出出現過才加進解碼器（mineWord、drainPendingEntries）。同 x2.rs MINED_MIN_FREQ */
+export const MINED_MIN_FREQ = 2;
+
 export const X2_LIMITS = {
   /** 讀音×詞 的選字記錄 */
   maxSeq: 10_000,
@@ -173,9 +176,9 @@ export class UserAdapter {
 
   /**
    * 從送出字串挖掘新詞（「讓 IME 學習造詞」項）：
-   * 引擎把解碼路徑中連續的 UNK（□）span 交進來。
-   * 首次出現即入格（覆蓋缺口是實測失敗案例的直接修法），
-   * 但 freq 記錄出現次數供日後排序；重複出現不重複入格。
+   * 引擎把解碼路徑中連續的單字詞交進來。freq 記出現次數（每次送出最多算一次），
+   * 到 MINED_MIN_FREQ 才入格（drainPendingEntries）：只出現一次的多半是斷錯的片段（2026-10-21 使用者的
+   * 學習資料裡 41 個挖詞全是 freq 1、幾乎都是「了嗎」「地表個也改了」這類）。
    */
   mineWord(word: string, reading: readonly string[], at: number = this.now): boolean {
     const existing = this.phrases.get(word);
@@ -237,6 +240,8 @@ export class UserAdapter {
     const out: LexiconEntry[] = [];
     for (const e of this.phrases.values()) {
       // 舊 adapter.json 可能有非台灣繁體字的詞（詞典過濾前學到的），不入格；x2.rs 同步
+      // 挖詞要出現 MINED_MIN_FREQ 次才入格（mineWord）
+      if (!e.manual && (e.freq ?? 1) < MINED_MIN_FREQ) continue;
       if (!this.injected.has(e.word) && isTraditionalWord(e.word)) {
         this.injected.add(e.word);
         out.push(e);

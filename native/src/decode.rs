@@ -660,6 +660,14 @@ impl Decoder {
         }
     }
 
+    /// 拿掉 add_entry 加的詞（學習資料頁的刪除）
+    pub fn remove_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        self.runtime_words.remove(word);
+        for r in readings {
+            self.lex.remove(r, word);
+        }
+    }
+
     pub fn has_entry(&self, reading: &[String], word: &str) -> bool {
         self.lex.has(reading, word)
     }

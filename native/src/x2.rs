@@ -23,6 +23,9 @@ const MANUAL_PHRASE_BOOST: f64 = 8.0;
 /// 手動造詞每多一個音節再加多少（算到 6 音節；同 TS manualPhraseBoostPerSyllable）
 const MANUAL_PHRASE_BOOST_PER_SYLLABLE: f64 = 10.0;
 
+/// 挖詞要在幾次送出出現過才加進解碼器（同 TS MINED_MIN_FREQ）：只出現一次的多半是斷錯的片段
+const MINED_MIN_FREQ: f64 = 2.0;
+
 /// 學習資料的上限，同 TS 的 X2_LIMITS（說明見那裡與 docs/MEMORY.md「X2 學習資料的成長」）
 const MAX_SEQ: usize = 10_000;
 const MAX_GLOBAL: usize = 10_000;
@@ -234,7 +237,7 @@ impl UserAdapter {
         self.maybe_compact();
     }
 
-    /// 送出時挖到的新詞：第一次出現就入格，重複出現只累加 freq
+    /// 送出時挖到的新詞：freq 記出現次數（每次送出最多算一次），到 MINED_MIN_FREQ 才入格（drain_pending）
     pub fn mine_word(&mut self, word: &str, reading: &[String]) -> bool {
         if let Some(p) = self.phrases.get_mut(word) {
             if !p.is_manual() {
@@ -321,11 +324,48 @@ impl UserAdapter {
         }
     }
 
+    /// 學習資料頁的刪除（pime.rs）：拿掉使用者詞，連同這個詞的選字紀錄（各讀音與全域）。
+    /// 回傳它的讀音（呼叫端從解碼器拿掉）；沒有這個詞回空的
+    pub fn remove_phrase(&mut self, word: &str) -> Vec<Vec<String>> {
+        let readings = self
+            .phrases
+            .shift_remove(word)
+            .map_or(vec![], |p| p.readings);
+        self.injected.remove(word);
+        self.by_seq.retain(|_, m| {
+            m.shift_remove(word);
+            !m.is_empty()
+        });
+        self.global.shift_remove(word);
+        readings
+    }
+
+    /// 學習資料頁的刪除：一筆選字紀錄。reading＝音節以空白相接（依讀音的那筆），None＝全域那筆
+    pub fn remove_selection(&mut self, reading: Option<&str>, word: &str) -> bool {
+        match reading {
+            None => self.global.shift_remove(word).is_some(),
+            Some(k) => {
+                let Some(m) = self.by_seq.get_mut(k) else {
+                    return false;
+                };
+                let hit = m.shift_remove(word).is_some();
+                if m.is_empty() {
+                    self.by_seq.shift_remove(k);
+                }
+                hit
+            }
+        }
+    }
+
     /// 還沒注入解碼器的詞條
     pub fn drain_pending(&mut self) -> Vec<Entry> {
         let mut out = vec![];
         for (w, p) in &self.phrases {
             // 舊 adapter.json 可能有非台灣繁體字的詞，不入格（x2.ts 同步）
+            // 挖詞要出現 MINED_MIN_FREQ 次才入格（mine_word）
+            if !p.is_manual() && p.freq.unwrap_or(1.0) < MINED_MIN_FREQ {
+                continue;
+            }
             if is_traditional_word(w) && self.injected.insert(w.clone()) {
                 out.push(Entry {
                     word: w.clone(),

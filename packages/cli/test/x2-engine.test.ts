@@ -43,8 +43,13 @@ describe('X2 引擎整合：覆蓋缺口的學習曲線', () => {
     keysFor(engine, SEQ);
     expect(engine.commit()).toBe('聯準會');
 
-    // commit 已把相鄰單字合併挖詞入格
+    // commit 把相鄰單字合併記成挖詞，但只出現一次還不入格（MINED_MIN_FREQ）
     expect(adapter.phrases.has('聯準會')).toBe(true);
+    expect(decoder.hasEntry(SEQ, '聯準會')).toBe(false);
+    // 第二次送出才入格
+    keysFor(engine, SEQ);
+    expect(engine.commit()).toBe('聯準會');
+    expect(decoder.hasEntry(SEQ, '聯準會')).toBe(true);
 
     // t1：同一引擎再打一次——格上有邊了。整詞路徑與三單字路徑同形，
     // 整句候選只留分數高的那條；整詞要從選字視窗選（游標移到最前、↓、選第 1 個＝最長的詞）

@@ -110,7 +110,8 @@ Setup.exe 只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，�
   2. 舊檔改名成 `*.old-<時間>`。
   3. 把 `*.new` 改名過去。這一步失敗就把舊檔改回來，所以不會有「沒有執行檔」的時候。
   沒被鎖的舊檔馬上刪，被鎖的下次更新時刪。內容沒變的檔案不動。
-- 新模型在下次載入時生效（閒置卸載後、或切回這個輸入法時）；新執行檔要登出再登入才生效。開了 `hotUpdate`（見下一節）就不用登出。
+- 新模型在下次載入時生效（閒置卸載後、或切回這個輸入法時）。
+- 新執行檔：PIME v2.0.0-beta2 以上時，執行檔有變就由腳本結束執行中的 `zhuyin-native`（只結束它，不碰 PIMELauncher），PIMELauncher 約 1 秒後開新版，裝完馬上就能測。組字中的字會清掉；停手不到 30 秒就安裝的話，最後幾句的學習還沒寫檔，會少記。更舊的 PIME 要登出再登入才生效。
 - 更新前，腳本把目前的 `PIME\zhuyin\` 整個複製成 `PIME\zhuyin.prev\`。要裝的執行檔和目前裝的相同（例如連裝兩次）時不複製，`zhuyin.prev\` 保持原本的上一版。學習檔和設定檔在 `%APPDATA%`，不受影響。
 
 ### 不登出就換新執行檔（`hotUpdate`，要 PIME v2.0.0-beta2 以上）
@@ -177,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 |---|---|---|
 | 任何時候 | 單按 Shift | 切換注音／英文。組字中按：先送出，再切換。可設成只用左邊或只用右邊的 Shift（見「設定」） |
 | 任何時候 | 點工作列的「注／英」圖示 | 切換注音／英文。組字中點不切換（先 Enter 送出或 Esc 取消） |
-| 任何時候 | 右鍵點「注／英」圖示 | 選單：切換中／英；「左右 Shift 都切換中英」「只用左 Shift 切換中英」「只用右 Shift 切換中英」三選一（打勾的是目前的設定） |
+| 任何時候 | 右鍵點「注／英」圖示 | 選單：「查看學習資料」用瀏覽器開學到的詞，每一列可以「刪除」（馬上生效、馬上存檔；刪使用者詞會連同它的選字次數一起刪）。頁面由後端在本機開的小網頁服務提供（只有本機連得到、網址帶隨機密碼，30 分鐘沒用就關掉）；開不起來時退回唯讀的 `%APPDATA%\PIME\zhuyin\learned.html`；「左 Shift 切換中英」「右 Shift 切換中英」兩個開關，點一下切換打勾（打勾＝單按那顆 Shift 會切換中英） |
 | 組字中 | 大千鍵位 | 打注音；空白＝一聲 |
 | 組字中 | ← → Home End | 移游標，改前面的字 |
 | 組字中 | ↓ | 開選字視窗：列出從游標那個字開始的詞（長詞在前），最後一項是那個字的注音本身；游標在最後時是最後一個字 |
@@ -225,7 +226,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 | 項目 | 預設 | 作用 |
 |---|---|---|
-| `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊。另一邊單按不做事；其他值當 `"both"` |
+| `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊、`"none"` 都不切換（用左鍵點圖示切換）。關掉的那邊單按不做事；其他值當 `"both"` |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
 | `candFontName` | `"Microsoft JhengHei UI"` | 選字視窗的字型（1–31 字元的字型名） |
@@ -239,6 +240,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 ## 疑難排解
 
 - 後端的記錄檔：`%APPDATA%\PIME\zhuyin\backend.log`（超過 1MB 改名成 `backend.log.old`）。每次啟動、結束（含原因）、載入／卸載模型、出錯（panic）都會記一行，有時間。打字當掉或字突然不見時，先看這個檔最後幾行。環境變數 `ZHUYIN_LOG`＝路徑或 `off`。
+- 記錄檔裡連續出現「啟動」、中間沒有「結束」：後端是被 PIMELauncher 殺掉的。它在某則請求 15 秒沒回應時會這樣做。
+- 不重裝、只想重開後端：先停手 30 秒（讓學習檔寫完），再執行 `Stop-Process -Name zhuyin-native`，PIMELauncher 約 1 秒後會開新的。`install.cmd` 換了執行檔時會自己這樣做。**只能結束 `zhuyin-native`，不要結束 PIMELauncher。**
 
 - PIME 2.0 的啟動器平常**不寫 log**（背景模式把 log 丟掉），`%LOCALAPPDATA%\PIME\Log\PIMELauncher.log` 會是空的。
 - `PIMELauncher.exe /console` 可以顯示 log，但要先停掉正在跑的啟動器，那會讓所有程式當掉（見上面的警告）。**不要用。**要查後端的行為，在 repo 裡用 `debug-pime.ts` 直接驅動後端（不經 PIME）。

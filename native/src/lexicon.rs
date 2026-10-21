@@ -248,4 +248,18 @@ impl Lexicon {
             None => self.extra_new.entry(ids).or_default().push(w),
         }
     }
+
+    /// 拿掉執行中加的詞（學習資料頁的刪除）。基本詞典的詞拿不掉；詞字串留在疊加層，之後再加回來沿用同一個編號
+    pub fn remove(&mut self, reading: &[String], word: &str) {
+        let (Some(ids), Some(w)) = (self.to_ids(reading), self.find_word(word)) else {
+            return;
+        };
+        let list = match self.find_key(&ids) {
+            Some(k) => self.extra_by_key.get_mut(&k),
+            None => self.extra_new.get_mut(&ids),
+        };
+        if let Some(l) = list {
+            l.retain(|&x| x != w);
+        }
+    }
 }

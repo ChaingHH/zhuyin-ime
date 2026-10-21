@@ -85,6 +85,19 @@ const STANDALONE = new Set([...'他她它牠祂你妳您我的地得在再那哪
  */
 const USER_PHRASE_MAX = 6;
 
+/**
+ * 送出時自動學的詞，頭尾不能是這些字（規則 2–4）：虛字、代名詞、語尾助詞開頭或結尾的一串，
+ * 多半是斷錯的片段（「了嗎」「式的」「集嗎」），存起來反而干擾下次。同 engine.rs PARTICLE_EDGE
+ */
+const PARTICLE_EDGE = new Set([...STANDALONE, ...'嗎呢吧啊呀喔哦']);
+const edgeOk = (w: string): boolean => {
+  const c = [...w];
+  return !PARTICLE_EDGE.has(c[0]!) && !PARTICLE_EDGE.has(c[c.length - 1]!);
+};
+
+/** 自動挖詞（規則 2）最多幾個字：更長的一串單字多半是整句沒斷好。同 engine.rs MINED_MAX */
+const MINED_MAX = 4;
+
 interface AlignedWord {
   word: string;
   seq: string[];
@@ -471,7 +484,7 @@ export class ImeEngine {
         if (!opaque(w)) adapter.recordSelection(w.seq, w.word);
       }
 
-      // 2) 造詞挖掘：連續 ≥2 個單字詞且組合尚未存在 → 合併為新詞
+      // 2) 造詞挖掘：連續 2–4 個單字詞、頭尾不是虛字、組合尚未存在 → 記一次；兩次送出都出現才入格
       // 3) 這串字裡有使用者選過的字、或選過的多字詞 → 使用者詞
       // ponytail: 長度取「連續單字」整串，「他坐沒坐相」會整串存；要精確長度再加手動造詞鍵
       const picked = new Set(this.fixed.map((f) => `${f.pos}:${f.word}`));
@@ -483,10 +496,20 @@ export class ImeEngine {
       let bufChars = '';
       let bufSeq: string[] = [];
       let bufPicked = false;
+      // 同一次送出裡重複出現的挖詞只算一次（挖詞要在兩次送出都出現才入格，x2.ts MINED_MIN_FREQ）
+      const minedNow = new Set<string>();
       const flush = (): void => {
-        if ([...bufChars].length >= 2 && bufPicked) {
-          if ([...bufChars].length <= USER_PHRASE_MAX) addUser(bufChars, bufSeq);
-        } else if ([...bufChars].length >= 2 && !this.decoder.hasEntry(bufSeq, bufChars)) {
+        const n = [...bufChars].length;
+        if (n >= 2 && bufPicked) {
+          if (n <= USER_PHRASE_MAX && edgeOk(bufChars)) addUser(bufChars, bufSeq);
+        } else if (
+          n >= 2 &&
+          n <= MINED_MAX &&
+          edgeOk(bufChars) &&
+          !minedNow.has(bufChars) &&
+          !this.decoder.hasEntry(bufSeq, bufChars)
+        ) {
+          minedNow.add(bufChars);
           adapter.mineWord(bufChars, bufSeq);
           for (const e of adapter.drainPendingEntries()) {
             this.decoder.addEntry(e);
@@ -522,12 +545,13 @@ export class ImeEngine {
       aligned.forEach((w, i) => {
         if (!pickedAt[i] || !real(i) || len(i) !== 1 || STANDALONE.has(w.word)) return;
         if ((real(i - 1) && len(i - 1) === 1) || (real(i + 1) && len(i + 1) === 1)) return;
+        // 合起來的詞頭尾是虛字就不存（例如「都可以」＋「嗎」）
         if (host(i - 1)) {
           const h = aligned[i - 1]!;
-          addUser(h.word + w.word, [...h.seq, ...w.seq]);
+          if (edgeOk(h.word + w.word)) addUser(h.word + w.word, [...h.seq, ...w.seq]);
         } else if (host(i + 1)) {
           const h = aligned[i + 1]!;
-          addUser(w.word + h.word, [...w.seq, ...h.seq]);
+          if (edgeOk(w.word + h.word)) addUser(w.word + h.word, [...w.seq, ...h.seq]);
         }
       });
     }

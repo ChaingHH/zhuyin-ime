@@ -20,7 +20,8 @@
 # 警告：絕對不要停掉 PIMELauncher.exe（/quit 或結束行程）。PIME 2.0.0-beta 的 PIMETextService.dll 連不上啟動器時，
 # 會在每個載入它的程式裡丟出沒人接的 C++ 例外（handleRpcResponse 對 null 呼叫 json::value()），Explorer 會一秒當一次。
 # 所以更新時不停 PIME：執行中的 zhuyin-native.exe 與映射中的 lm.bo.bin 不能覆寫但可以改名，
-# 先把舊檔改名成 *.old-<時間>，再放新檔；模型在下次載入時換新，執行檔在重新登入後換新。
+# 先把舊檔改名成 *.old-<時間>，再放新檔；模型在下次載入時換新。執行檔：PIME v2.0.0-beta2 以上時結束舊的
+# zhuyin-native（Restart-Backend，PIMELauncher 會開新版），更舊的 PIME 要重新登入才換新。
 param(
   [string]$Pime = 'C:\Program Files (x86)\PIME',
   [string]$Data = (Join-Path $PSScriptRoot '..\..\data'),
@@ -101,15 +102,15 @@ function Put-File([string]$from, [string]$to) {
     Move-Item $to $old
   }
   try { Move-Item "$to.new" $to } catch { if ($old) { Move-Item $old $to }; throw }
-  # 沒被鎖的舊檔馬上刪；被鎖的留到下次更新
-  if ($old) { try { Remove-Item $old -Force } catch { } }
+  # 沒被鎖的舊檔馬上刪；被鎖的（執行中的舊後端）留到下次更新。
+  # 用 SilentlyContinue 而不是 try/catch：記錄檔（Start-Transcript）連被接住的錯誤都會寫成 TerminatingError，看起來像安裝失敗
+  if ($old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
 }
 
 function Put-Files([string]$dir, $files) {
   # 上次更新留下、已經沒人用的舊檔
-  Get-ChildItem $dir -Recurse -Filter '*.old-*' -ErrorAction SilentlyContinue | ForEach-Object {
-    try { Remove-Item $_.FullName -Force } catch { }
-  }
+  Get-ChildItem $dir -Recurse -Filter '*.old-*' -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
   foreach ($k in $files.Keys) { Put-File $files[$k] (Join-Path $dir $k) }
 }
 
@@ -315,15 +316,26 @@ if ($Uninstall) {
   Finish
 }
 
+# 換成新執行檔：結束執行中的舊後端，PIMELauncher 約 1 秒後用新執行檔重開。只結束 zhuyin\ 底下的 zhuyin-native，
+# 絕不碰 PIMELauncher（見檔頭警告）。只在 PIME v2.0.0-beta2 以上做：舊版 DLL 遇到後端結束會讓程式當掉。
+# ponytail: 停手不到 30 秒（save_delay）就安裝時，最後幾句的學習還沒寫進 adapter.json，會少記
+function Restart-Backend {
+  $ps = @(Get-Process zhuyin-native -ErrorAction SilentlyContinue |
+      Where-Object { $_.Path -and $_.Path.StartsWith("$dest\", [StringComparison]::OrdinalIgnoreCase) })
+  if (-not $ps) { return $false }
+  $ps | Stop-Process -Force -ErrorAction SilentlyContinue
+  $true
+}
+
 $files = Source-Files
+$oldExe = Join-Path $dest 'zhuyin-native.exe'
+$exeChanged = -not ((Test-Path $oldExe) -and (Get-FileHash $oldExe).Hash -eq (Get-FileHash $files['zhuyin-native.exe']).Hash)
 $list = @(Read-Backends $backends)
 $installed = [bool]($list | Where-Object { $_.name -eq $name })
 Copy-Item $backends "$backends.bak" -Force
 if (Test-Path $dest) {
   # 備份目前這版給 -Rollback 用。重裝同一個執行檔（例如連裝兩次）不覆蓋，不然上一版會被換成這一版
-  $old = Join-Path $dest 'zhuyin-native.exe'
-  $same = (Test-Path $old) -and (Get-FileHash $old).Hash -eq (Get-FileHash $files['zhuyin-native.exe']).Hash
-  if ($same -and (Test-Path $prev)) { Write-Host "執行檔和目前裝的相同，保留原本的 $prev" } else { Backup $dest $prev }
+  if (-not $exeChanged -and (Test-Path $prev)) { Write-Host "執行檔和目前裝的相同，保留原本的 $prev" } else { Backup $dest $prev }
 }
 Put-Files $dest $files
 if (-not $installed) {
@@ -342,7 +354,13 @@ if (-not $installed) {
   Write-Host '模型在下次載入時換新（閒置卸載後或切回這個輸入法時）'
   $ver = Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $Pime 'version.txt')
   if ($ver -and (Pime-VersionOk $ver.Trim())) {
-    Write-Host '執行檔：停手 5 分鐘（idleSecs）後自動換新，不用登出（config.json 的 hotUpdate 設 false 時要登出）'
+    if (-not $exeChanged) {
+      Write-Host '執行檔和目前裝的相同，後端照常執行'
+    } elseif (Restart-Backend) {
+      Write-Host '執行檔：已結束舊的後端，PIMELauncher 約 1 秒後開新版（組字中的字會清掉；停手不到 30 秒的話最後幾句的學習會少記）'
+    } else {
+      Write-Host '執行檔：後端沒在執行，下次打字就是新版'
+    }
   } else {
     Write-Host '執行檔要登出再登入才換新（PIME 升到 2.0.0-beta2 以上就不用）'
   }

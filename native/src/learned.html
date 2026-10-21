@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- 右鍵選單「查看學習資料」開的頁面（pime.rs show_learned）。後端把學習資料換進下面的 DATA、
+     本機網頁服務的 token 換進 TOKEN（learned_web.rs），刪除送 POST /delete。
+     服務開不起來時是唯讀的檔案版（TOKEN 是空字串，不顯示刪除鈕）。 -->
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注音學習資料</title>
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #2563eb; --bar: #dbeafe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1917; --fg: #f5f5f4; --muted: #a8a29e; --line: #44403c; --card: #292524; --accent: #60a5fa; --bar: #1e3a5f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 "Microsoft JhengHei UI", system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .stat b { display: block; font-size: 24px; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .tabs button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  input[type=search] { font: inherit; flex: 1 1 200px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+  .wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--card); cursor: pointer; user-select: none; font-size: 13px; color: var(--muted); }
+  th.on { color: var(--fg); }
+  td.word { font-size: 17px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; position: relative; }
+  td.num i { position: absolute; inset: 4px auto 4px 0; background: var(--bar); border-radius: 3px; z-index: 0; }
+  td.num em { position: relative; font-style: normal; }
+  td.muted { color: var(--muted); }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  td.act { width: 1%; }
+  td.act button { font: inherit; font-size: 13px; border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 2px 10px; border-radius: 5px; cursor: pointer; }
+  td.act button:hover { border-color: #dc2626; color: #dc2626; }
+  td.act button:disabled { opacity: .5; cursor: default; }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 8px 16px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>注音學習資料</h1>
+  <p class="sub" id="sub"></p>
+  <div class="stats" id="stats"></div>
+  <div class="bar">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <input type="search" id="q" placeholder="搜尋詞或注音">
+  </div>
+  <p class="hint" id="hint"></p>
+  <div class="wrap"><table id="t"></table></div>
+</main>
+<div class="toast" id="toast" role="status"></div>
+<script>
+const DATA = /*DATA*/null;
+const TOKEN = /*TOKEN*/"";
+const d = DATA || {};
+const fmt = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { hour12: false }) : '');
+const kind = (p) =>
+  p.manual ? '選過的詞' : (p.provenance || []).includes('mined') ? '常打的詞（自動）' : '使用者詞';
+const phrases = (d.phrases || []).map((p) => ({
+  word: p.word,
+  reading: (p.readings || []).map((r) => r.join(' ')).join('／'),
+  kind: kind(p),
+  // 選過的詞沒有次數（選一次就加進詞典），顯示「—」
+  count: p.freq ?? null,
+  lastAt: p.lastAt ?? 0,
+}));
+const global = Object.entries(d.global || {}).map(([word, r]) => ({ word, count: r.count, lastAt: r.lastAt }));
+const bySeq = Object.entries(d.bySeq || {}).flatMap(([reading, ws]) =>
+  Object.entries(ws).map(([word, r]) => ({ word, reading, count: r.count, lastAt: r.lastAt })),
+);
+const TABS = [
+  { id: 'phrases', name: '使用者詞', rows: phrases, hint: '加進詞典的詞：選字時選過的詞，和常打、自動學到的詞。之後打同樣的注音會優先出現。',
+    cols: [['word', '詞'], ['reading', '注音'], ['kind', '來源'], ['count', '次數'], ['lastAt', '最近']] },
+  { id: 'bySeq', name: '依讀音的選字', rows: bySeq, hint: '打某個注音時選定的字詞。同樣的注音再出現時，這個詞會加分。',
+    cols: [['word', '詞'], ['reading', '注音'], ['count', '次數'], ['lastAt', '最近']] },
+  { id: 'global', name: '常用詞', rows: global, hint: '不分讀音，送出過的字詞累計。次數會隨時間慢慢衰減。',
+    cols: [['word', '詞'], ['count', '次數'], ['lastAt', '最近']] },
+];
+document.getElementById('sub').textContent = !DATA
+  ? '還沒有學習資料。'
+  : TOKEN
+    ? `產生於 ${fmt(Date.now())}。重新整理頁面就是最新的資料；刪除馬上生效。`
+    : `產生於 ${fmt(Date.now())}。這是唯讀的快照：刪除要從輸入法圖示的右鍵選單再開一次。`;
+document.getElementById('stats').innerHTML = TABS.map(
+  (t) => `<div class="stat"><b>${t.rows.length}</b><span>${t.name}</span></div>`,
+).join('');
+let tab = TABS[0], sortKey = 'lastAt', desc = true;
+/** 目前表格畫出來的列（刪除鈕的 data-i 指這裡） */
+let shown = [];
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+function render() {
+  document.getElementById('tabs').innerHTML = TABS.map(
+    (t) => `<button role="tab" aria-selected="${t === tab}" data-id="${t.id}">${t.name}（${t.rows.length}）</button>`,
+  ).join('');
+  document.getElementById('hint').textContent = tab.hint;
+  const q = document.getElementById('q').value.trim();
+  const rows = tab.rows
+    .filter((r) => !q || r.word.includes(q) || (r.reading || '').includes(q))
+    .sort((a, b) => {
+      const x = a[sortKey] ?? 0, y = b[sortKey] ?? 0;
+      const c = typeof x === 'number' ? x - y : String(x).localeCompare(String(y), 'zh-Hant');
+      return desc ? -c : c;
+    });
+  const max = Math.max(1, ...tab.rows.map((r) => r.count || 0));
+  const head = tab.cols
+    .map(([k, n]) => `<th data-k="${k}" class="${k === sortKey ? 'on' : ''}">${n}${k === sortKey ? (desc ? ' ▼' : ' ▲') : ''}</th>`)
+    .join('') + (TOKEN ? '<th></th>' : '');
+  shown = rows.slice(0, 2000);
+  const act = (i) => (TOKEN ? `<td class="act"><button data-i="${i}" title="刪除這一筆學習">刪除</button></td>` : '');
+  const body = shown.map((r, i) => '<tr>' + tab.cols.map(([k]) => {
+    if (k === 'word') return `<td class="word">${esc(r.word)}</td>`;
+    if (k === 'count' && r.count == null) return `<td class="num muted">—</td>`;
+    if (k === 'count') return `<td class="num"><i style="width:${(100 * (r.count || 0)) / max}%"></i><em>${(r.count || 0).toFixed(r.count % 1 ? 2 : 0)}</em></td>`;
+    if (k === 'lastAt') return `<td class="muted">${fmt(r.lastAt)}</td>`;
+    return `<td class="${k === 'reading' ? 'muted' : ''}">${esc(r[k] ?? '')}</td>`;
+  }).join('') + act(i) + '</tr>').join('');
+  document.getElementById('t').innerHTML =
+    `<thead><tr>${head}</tr></thead><tbody>${body || `<tr><td class="empty" colspan="${tab.cols.length + (TOKEN ? 1 : 0)}">沒有符合的項目</td></tr>`}</tbody>`;
+}
+document.getElementById('tabs').onclick = (e) => {
+  const id = e.target.dataset?.id;
+  if (id) { tab = TABS.find((t) => t.id === id); if (!tab.cols.some(([k]) => k === sortKey)) sortKey = 'lastAt'; render(); }
+};
+document.getElementById('t').onclick = (e) => {
+  const k = e.target.closest('th')?.dataset.k;
+  if (k) { desc = k === sortKey ? !desc : k !== 'word' && k !== 'reading' && k !== 'kind'; sortKey = k; render(); }
+};
+document.getElementById('q').oninput = render;
+
+// 刪除：使用者詞連同它的選字紀錄一起刪（後端 remove_phrase），另外兩個分頁只刪那一筆
+const KIND = { phrases: 'phrase', bySeq: 'seq', global: 'global' };
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('on'), 2500);
+}
+async function del(i, btn) {
+  const r = shown[i];
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/delete?t=${TOKEN}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: KIND[tab.id], word: r.word, reading: r.reading ?? null }),
+    });
+    const j = await res.json();
+    if (!j.ok) throw new Error('沒有刪到');
+    const drop = (rows, f) => rows.splice(0, rows.length, ...rows.filter((x) => !f(x)));
+    if (tab.id === 'phrases') {
+      drop(phrases, (x) => x.word === r.word);
+      drop(bySeq, (x) => x.word === r.word);
+      drop(global, (x) => x.word === r.word);
+    } else drop(tab.rows, (x) => x === r);
+    document.getElementById('stats').innerHTML = TABS.map(
+      (t) => `<div class="stat"><b>${t.rows.length}</b><span>${t.name}</span></div>`,
+    ).join('');
+    render();
+    toast(`已刪除「${r.word}」`);
+  } catch (e) {
+    btn.disabled = false;
+    toast(`刪除失敗：${e.message}（輸入法可能重開過，從右鍵選單再開一次）`);
+  }
+}
+document.getElementById('t').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-i]');
+  if (b) del(Number(b.dataset.i), b);
+});
+render();
+</script>
+</body>
+</html>

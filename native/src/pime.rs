@@ -11,12 +11,12 @@
 //! 之後不會關，行程結束 1 秒後還會自動重開。所以行程常駐、引擎不常駐：第一個要組字的按鍵才載入
 //! 引擎，閒置 ZHUYIN_IDLE_SECS 秒（預設 300）沒按鍵、或最後一個 client 停用時卸載。
 use crate::engine::{EngineState, ImeEngine, Mode};
-use crate::{decode, l3, lexicon, lm, x2};
+use crate::{decode, l3, learned_web, lexicon, lm, x2};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 #[link(name = "kernel32")]
@@ -75,10 +75,43 @@ const VK_CONTROL: usize = 0x11;
 const VK_MENU: usize = 0x12;
 const MODE_BUTTON: &str = "windows-mode-icon";
 const ID_MODE: i64 = 1;
-/// 右鍵選單：哪一邊的 Shift 切換中英（id 2 沿用舊版的「只用左 Shift」）
+/// 右鍵選單：左、右 Shift 各一個開關（打勾＝單按會切換中英）。id 4 是舊版的「左右都切換」，不再用
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
-const ID_SHIFT_BOTH: i64 = 4;
+/// 右鍵選單：用瀏覽器開學習資料（learned.html）
+const ID_SHOW_LEARNED: i64 = 5;
+const LEARNED_HTML: &str = include_str!("learned.html");
+
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: isize,
+        op: *const u16,
+        file: *const u16,
+        params: *const u16,
+        dir: *const u16,
+        show: i32,
+    ) -> isize;
+}
+
+/// config.json 的 shiftToggle → （左 Shift 切換, 右 Shift 切換）；看不懂的值當兩邊都切換
+fn shift_sides(v: &str) -> (bool, bool) {
+    match v {
+        "left" => (true, false),
+        "right" => (false, true),
+        "none" => (false, false),
+        _ => (true, true),
+    }
+}
+
+fn shift_name(left: bool, right: bool) -> &'static str {
+    match (left, right) {
+        (true, true) => "both",
+        (true, false) => "left",
+        (false, true) => "right",
+        (false, false) => "none",
+    }
+}
 /// 選字視窗展開成表格：直的 9 個（每欄由上往下 1–9）、橫的 4 欄（使用者指定 9×4，2026-10-21，同微軟注音）。
 /// PIME 的 DLL 逐列畫（libIME2 CandidateWindow 第 i 個在第 i / candPerRow 列），所以送出前要轉置（`grid`）
 const TABLE_COLS: usize = 4;
@@ -265,7 +298,7 @@ pub struct Backend {
     owner: String,
     /// 單按 Shift：按下 Shift 後到放開前沒有按別的鍵
     shift_alone: bool,
-    /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"
+    /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
     shift_toggle: &'static str,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
@@ -285,6 +318,10 @@ pub struct Backend {
     hot_update: bool,
     /// 啟動時的執行檔路徑與修改時間
     exe: Option<(PathBuf, SystemTime)>,
+    /// 學習資料頁的本機網頁服務（第一次開頁面才起）
+    web: Option<learned_web::Server>,
+    /// 給網頁服務把請求送進主迴圈（serve 設定；測試裡是 None，頁面退回唯讀的檔案版）
+    web_tx: Option<Sender<Msg>>,
 }
 
 impl Backend {
@@ -311,6 +348,8 @@ impl Backend {
             exe: std::env::current_exe()
                 .ok()
                 .and_then(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?))),
+            web: None,
+            web_tx: None,
         }
         .with_settings()
     }
@@ -330,15 +369,12 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"，其他值當 both）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
-        self.shift_toggle = match s.get("shiftToggle").and_then(Value::as_str) {
-            Some("left") => "left",
-            Some("right") => "right",
-            _ => "both",
-        };
+        let (l, r) = shift_sides(s.get("shiftToggle").and_then(Value::as_str).unwrap_or(""));
+        self.shift_toggle = shift_name(l, r);
         if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = secs(secs_v, 300.0);
         }
@@ -425,6 +461,132 @@ impl Backend {
         self.sent_cols.get(&self.owner).copied().unwrap_or(1)
     }
 
+    /// 右鍵選單「查看學習資料」：學習資料（引擎載入中用記憶體裡最新的，否則讀 adapter.json）嵌進 learned.html，
+    /// 存在 adapter.json 旁邊，用預設瀏覽器開。這裡沒有 edit session、DLL 等回應最多 2 秒，所以開瀏覽器放到別的執行緒
+    /// 學習資料頁：學習資料（引擎載入中用記憶體裡最新的，否則讀 adapter.json）嵌進 learned.html。
+    /// token：本機網頁服務的 token，頁面靠它送刪除；空字串＝唯讀（服務開不起來時的檔案版）
+    fn learned_page(&self, token: &str) -> String {
+        let data = self
+            .eng
+            .as_ref()
+            .and_then(|e| e.adapter.as_ref())
+            .map(|a| a.to_json())
+            .or_else(|| std::fs::read_to_string(self.cfg.adapter_file.as_ref()?).ok())
+            .unwrap_or_else(|| "null".into());
+        // 嵌在 <script> 裡：拆開 "</" 才不會被當成 </script>
+        LEARNED_HTML
+            .replacen("/*DATA*/null", &data.replace("</", "<\\/"), 1)
+            .replacen("/*TOKEN*/\"\"", &json!(token).to_string(), 1)
+    }
+
+    /// 學習資料頁的刪除（learned_web 的 POST /delete）。引擎載入中就改記憶體裡的資料、從解碼器拿掉詞、馬上存檔；
+    /// 沒載入就直接改 adapter.json。kind：phrase＝使用者詞（連同它的選字紀錄）、seq＝依讀音的一筆、global＝常用詞的一筆
+    fn delete_learned(&mut self, v: &Value) -> bool {
+        let (kind, word, reading) = (
+            v["kind"].as_str().unwrap_or(""),
+            v["word"].as_str().unwrap_or(""),
+            v["reading"].as_str(),
+        );
+        let Some(f) = self.cfg.adapter_file.clone().filter(|_| self.save_ok) else {
+            return false;
+        };
+        if word.is_empty() {
+            return false;
+        }
+        let apply = |a: &mut x2::UserAdapter| -> (bool, Vec<Vec<String>>) {
+            match kind {
+                "phrase" => {
+                    let r = a.remove_phrase(word);
+                    (!r.is_empty(), r)
+                }
+                "seq" => (
+                    a.remove_selection(Some(reading.unwrap_or("")), word),
+                    vec![],
+                ),
+                "global" => (a.remove_selection(None, word), vec![]),
+                _ => (false, vec![]),
+            }
+        };
+        if let Some(e) = self.eng.as_mut().filter(|e| e.adapter.is_some()) {
+            let (hit, readings) = apply(e.adapter.as_mut().unwrap());
+            e.decoder.remove_entry(word, &readings);
+            if hit {
+                self.save_adapter();
+                self.dirty = false;
+            }
+            return hit;
+        }
+        let Some(mut a) = std::fs::read_to_string(&f)
+            .ok()
+            .and_then(|s| x2::UserAdapter::from_json(&s).ok())
+        else {
+            return false;
+        };
+        let (hit, _) = apply(&mut a);
+        hit && write_atomic(&f, &a.to_json())
+    }
+
+    /// 網頁服務的請求（主迴圈呼叫）
+    fn web(&mut self, a: learned_web::Ask) {
+        let out = match &a.req {
+            learned_web::WebReq::Page => self.learned_page(&a.token),
+            learned_web::WebReq::Delete(v) => json!({ "ok": self.delete_learned(v) }).to_string(),
+        };
+        let _ = a.reply.send(out);
+    }
+
+    /// 右鍵選單「查看學習資料」：開本機網頁服務（開著就沿用），用預設瀏覽器開它的網址。
+    /// 這裡沒有 edit session、DLL 等回應最多 2 秒，所以開瀏覽器放到別的執行緒。
+    /// 服務開不起來就退回唯讀的檔案版（adapter.json 旁的 learned.html）
+    fn show_learned(&mut self) {
+        let Some(f) = self.cfg.adapter_file.clone() else {
+            return;
+        };
+        if !self.web.as_ref().is_some_and(learned_web::Server::alive) {
+            self.web = self.web_tx.clone().and_then(|tx| {
+                learned_web::start(move |a| tx.send(Msg::Web(a)).is_ok())
+                    .map_err(|e| eprintln!("[pime] 學習資料頁的服務開不起來：{e}"))
+                    .ok()
+            });
+        }
+        let target = match &self.web {
+            Some(s) => s.url.clone(),
+            None => {
+                let out = f.with_file_name("learned.html");
+                if f.parent().map_or(Ok(()), std::fs::create_dir_all).is_err()
+                    || std::fs::write(&out, self.learned_page("")).is_err()
+                {
+                    eprintln!("[pime] 無法寫入 {}", out.display());
+                    return;
+                }
+                out.to_string_lossy().into_owned()
+            }
+        };
+        // 測試用（debug-learned-web.ts）：不開瀏覽器，網址寫到 stderr
+        if std::env::var_os("ZHUYIN_NO_OPEN").is_some() {
+            eprintln!("[pime] 學習資料頁 {target}");
+            return;
+        }
+        std::thread::spawn(move || {
+            let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+            let (op, file) = (w("open"), w(&target));
+            let r = unsafe {
+                ShellExecuteW(
+                    0,
+                    op.as_ptr(),
+                    file.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1,
+                )
+            };
+            // 回傳值 ≤ 32 是失敗（ShellExecuteW 的文件）
+            if r <= 32 {
+                eprintln!("[pime] 開不了學習資料頁（{r}）");
+            }
+        });
+    }
+
     /// 改一項設定並存檔（保留檔案裡其他項目；先寫暫存檔再改名）
     fn write_setting(&self, key: &str, v: Value) {
         let Some(f) = &self.cfg.settings_file else {
@@ -505,14 +667,7 @@ impl Backend {
         ) else {
             return;
         };
-        // 先寫暫存檔再改名：寫到一半當掉不會毀掉學習資料
-        let tmp = f.with_extension("json.tmp");
-        let ok = f.parent().map_or(Ok(()), std::fs::create_dir_all).is_ok()
-            && std::fs::write(&tmp, a.to_json()).is_ok()
-            && std::fs::rename(&tmp, f).is_ok();
-        if !ok {
-            eprintln!("[pime] 無法寫入 {}", f.display());
-        }
+        write_atomic(f, &a.to_json());
     }
 
     fn mode_icon(&self) -> String {
@@ -627,11 +782,8 @@ impl Backend {
 
     fn filter_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
         if k.vk as usize == VK_SHIFT {
-            let side_ok = match self.shift_toggle {
-                "left" => !k.right_shift,
-                "right" => k.right_shift,
-                _ => true,
-            };
+            let (l, r) = shift_sides(self.shift_toggle);
+            let side_ok = if k.right_shift { r } else { l };
             self.shift_alone = !k.ctrl_alt && side_ok;
             return false;
         }
@@ -826,29 +978,31 @@ impl Backend {
             "onCommand" => {
                 match msg["id"].as_i64() {
                     Some(ID_MODE) if !self.composing() => self.flip_mode(&mut r),
-                    Some(id @ (ID_SHIFT_LEFT | ID_SHIFT_RIGHT | ID_SHIFT_BOTH)) => {
-                        self.shift_toggle = match id {
-                            ID_SHIFT_LEFT => "left",
-                            ID_SHIFT_RIGHT => "right",
-                            _ => "both",
+                    Some(id @ (ID_SHIFT_LEFT | ID_SHIFT_RIGHT)) => {
+                        let (l, r) = shift_sides(self.shift_toggle);
+                        self.shift_toggle = if id == ID_SHIFT_LEFT {
+                            shift_name(!l, r)
+                        } else {
+                            shift_name(l, !r)
                         };
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
+                    Some(ID_SHOW_LEARNED) => self.show_learned(),
                     _ => {}
                 }
                 None
             }
             // 右鍵點語言列圖示：回傳選單（PIME 的 menuFromJson 只讀 id／text／checked／enabled／submenu；
-            // id 0＋空字串＝分隔線。沒有單選格式，三個 Shift 選項用 checked 標目前那個）
+            // id 0＋空字串＝分隔線）。左、右 Shift 各一個開關，checked＝開著；切換中英用左鍵點圖示
             "onMenu" => {
+                let (l, r2) = shift_sides(self.shift_toggle);
                 r.insert(
                     "return".into(),
                     json!([
-                        {"id": ID_MODE, "text": "切換中／英"},
+                        {"id": ID_SHOW_LEARNED, "text": "查看學習資料"},
                         {"id": 0, "text": ""},
-                        {"id": ID_SHIFT_BOTH, "text": "左右 Shift 都切換中英", "checked": self.shift_toggle == "both"},
-                        {"id": ID_SHIFT_LEFT, "text": "只用左 Shift 切換中英", "checked": self.shift_toggle == "left"},
-                        {"id": ID_SHIFT_RIGHT, "text": "只用右 Shift 切換中英", "checked": self.shift_toggle == "right"},
+                        {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
+                        {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
                     ]),
                 );
                 None
@@ -946,6 +1100,25 @@ fn grid_is_column_major() {
     assert_eq!((cur, keys.as_str()), (3, "123456789"));
 }
 
+/// 寫學習檔：先寫暫存檔再改名，寫到一半當掉不會毀掉學習資料
+fn write_atomic(f: &std::path::Path, text: &str) -> bool {
+    let tmp = f.with_extension("json.tmp");
+    let ok = f.parent().map_or(Ok(()), std::fs::create_dir_all).is_ok()
+        && std::fs::write(&tmp, text).is_ok()
+        && std::fs::rename(&tmp, f).is_ok();
+    if !ok {
+        eprintln!("[pime] 無法寫入 {}", f.display());
+    }
+    ok
+}
+
+/// 主迴圈收的訊息：PIMELauncher 送來的一行、學習資料頁的請求、stdin 關了
+enum Msg {
+    Line(String),
+    Web(learned_web::Ask),
+    Eof,
+}
+
 /// "2.0.0-beta" 不行；"2.0.0-beta2" 以上、正式版 2.x 以上可以
 fn pime_version_ok(v: &str) -> bool {
     let (base, pre) = v.split_once('-').unwrap_or((v, ""));
@@ -980,7 +1153,7 @@ fn pime_versions() {
     }
 }
 
-/// 處理一行 `<client_id>|<JSON>`，回要寫出的那一行（close 與看不懂的行不回）
+/// 處理一行 `<client_id>|<JSON>`，回要寫出的那一行（看不懂又撈不到 seqNum 的行不回；其他每則都回，含 close）
 fn respond(be: &mut Backend, line: &str) -> Option<String> {
     let (client, text) = line.trim().split_once('|')?;
     let msg = match serde_json::from_str::<Value>(text) {
@@ -1001,9 +1174,15 @@ fn respond(be: &mut Backend, line: &str) -> Option<String> {
             ));
         }
     };
+    // close 也要回：PIMELauncher（v2.0.0-beta3 的 Rust 版，backend_manager.rs）記下每則帶 seqNum 的請求，
+    // 15 秒（HANG_TIMEOUT）沒回就當後端當掉、直接殺掉重開。以前不回 close，每關一個程式 15 秒後
+    // 後端就被殺：組字消失、那幾秒的按鍵丟掉、沒存的學習也沒了（2026-10-21 的「打字突然當機」）
     if msg["method"] == "close" {
         be.leave(client);
-        return None;
+        let mut r = Map::new();
+        r.insert("success".into(), json!(true));
+        r.insert("seqNum".into(), msg["seqNum"].clone());
+        return Some(format!("PIME_MSG|{client}|{}", Value::Object(r)));
     }
     // 一則訊息出錯不能拖垮後端：所有打字中的程式都靠這個行程。出錯就清掉組字、回 success:false。
     // 這裡可能沒有 edit session，絕不能帶 showMessage
@@ -1025,17 +1204,25 @@ fn respond(be: &mut Backend, line: &str) -> Option<String> {
 pub fn serve(mut be: Backend) {
     // 另一條執行緒讀 stdin，主迴圈才能在等訊息時順便計時閒置。
     // 用位元組讀：一行壞 UTF-8 不能讓讀取執行緒結束（lines() 會回錯誤）
-    let (tx, rx) = channel::<String>();
+    let (tx, rx) = channel::<Msg>();
+    be.web_tx = Some(tx.clone());
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
         let mut buf = Vec::new();
         loop {
             buf.clear();
             match stdin.read_until(b'\n', &mut buf) {
-                Ok(0) | Err(_) => break,
+                // 網頁服務也拿著 tx，通道不會因為這條執行緒結束就斷：明確送 Eof
+                Ok(0) | Err(_) => {
+                    let _ = tx.send(Msg::Eof);
+                    break;
+                }
                 Ok(_) => {}
             }
-            if tx.send(String::from_utf8_lossy(&buf).into_owned()).is_err() {
+            if tx
+                .send(Msg::Line(String::from_utf8_lossy(&buf).into_owned()))
+                .is_err()
+            {
                 break;
             }
         }
@@ -1048,7 +1235,10 @@ pub fn serve(mut be: Backend) {
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match got {
-            Ok(l) => {
+            Ok(Msg::Web(a)) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| be.web(a)));
+            }
+            Ok(Msg::Line(l)) => {
                 if let Some(s) = respond(&mut be, &l) {
                     if !write(s) {
                         eprintln!("[pime] {} 結束：stdout 寫不出去", now_str());
@@ -1060,7 +1250,7 @@ pub fn serve(mut be: Backend) {
             Err(RecvTimeoutError::Timeout) => {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| be.on_timeout()));
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Ok(Msg::Eof) | Err(RecvTimeoutError::Disconnected) => {
                 eprintln!(
                     "[pime] {} 結束：stdin 關閉（PIMELauncher 結束或關掉後端）",
                     now_str()
@@ -1071,10 +1261,16 @@ pub fn serve(mut be: Backend) {
         if be.should_restart() {
             // 結束前把已經送來的請求處理完；有的話這輪不結束，下次再看
             let mut pending = false;
-            while let Ok(l) = rx.try_recv() {
+            while let Ok(m) = rx.try_recv() {
                 pending = true;
-                if let Some(s) = respond(&mut be, &l) {
-                    write(s);
+                match m {
+                    Msg::Line(l) => {
+                        if let Some(s) = respond(&mut be, &l) {
+                            write(s);
+                        }
+                    }
+                    Msg::Web(a) => be.web(a),
+                    Msg::Eof => {}
                 }
             }
             if !pending {
@@ -1144,7 +1340,11 @@ mod tests {
         be.hot_update = true;
         be.exe = Some((std::env::current_exe().unwrap(), SystemTime::UNIX_EPOCH));
         assert!(!be.should_restart());
-        respond(&mut be, r#"c1|{"method":"close"}"#);
+        // close 也要回同一個 seqNum：PIMELauncher 15 秒沒收到回應就殺掉後端
+        assert_eq!(
+            respond(&mut be, r#"c1|{"method":"close","seqNum":7}"#),
+            Some(r#"PIME_MSG|c1|{"success":true,"seqNum":7}"#.into())
+        );
         assert!(be.should_restart());
         // 讀不到修改時間不算換掉
         be.exe = Some((PathBuf::from("no-such.exe"), SystemTime::UNIX_EPOCH));

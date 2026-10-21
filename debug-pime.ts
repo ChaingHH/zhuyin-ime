@@ -311,43 +311,50 @@ async function smoke(): Promise<void> {
   check((await press('KeyA')).eaten, '組字中點圖示不切換');
   await press('Escape');
   // 右鍵選單（onMenu 回傳選單陣列；選了之後 onCommand 帶選項 id、type 2）。
-  // Shift 三選一：4＝左右都切換、2＝只用左、3＝只用右；DLL 沒有單選格式，用 checked 標目前那個
-  const shiftMenu = async (): Promise<number[]> => {
+  // 左、右 Shift 各一個開關：2＝左、3＝右，checked＝開著；沒有「切換中／英」（用左鍵點圖示）
+  const shiftMenu = async (): Promise<string> => {
     const items = (await call({ method: 'onMenu', id: 'windows-mode-icon' }))['return'] as Array<{
       id: number;
+      text: string;
       checked?: boolean;
     }>;
     check(
-      Array.isArray(items) && [2, 3, 4].every((id) => items.some((i) => i.id === id)),
-      '右鍵選單有三個 Shift 選項',
+      Array.isArray(items) &&
+        [2, 3, 5].every((id) => items.some((i) => i.id === id)) &&
+        !items.some((i) => i.id === 1 || i.id === 4),
+      `右鍵選單：查看學習資料＋左右兩個 Shift 開關，沒有切換中英（${JSON.stringify(items)}）`,
     );
-    return items.filter((i) => [2, 3, 4].includes(i.id) && i.checked).map((i) => i.id);
+    const on = (id: number): string => (items.find((i) => i.id === id)?.checked ? '1' : '0');
+    return on(2) + on(3);
   };
   const toggles = async (right: boolean): Promise<boolean> => {
     const r = !!(await shiftTap(right))['return'];
     if (r) await shiftTap(right); // 切回來，保持注音
     return r;
   };
-  check((await shiftMenu()).join() === '4', '預設勾「左右 Shift 都切換」');
+  check((await shiftMenu()) === '11', '預設左右兩個開關都勾');
   check((await toggles(false)) && (await toggles(true)), '預設左右 Shift 都切換');
-  // 只用右 Shift
-  noSession(await call({ method: 'onCommand', id: 3, type: 2 }), '選單：只用右 Shift');
-  check((await shiftMenu()).join() === '3', '選單改勾「只用右 Shift」');
+  // 關掉左 Shift
+  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：左 Shift 開關');
+  check((await shiftMenu()) === '01', '左 Shift 開關取消勾選');
   check(readFileSync(configFile, 'utf8').includes('"right"'), 'config.json 寫入 "right"');
-  check(!(await toggles(false)), '只用右 Shift 時左 Shift 不切換');
+  check(!(await toggles(false)), '左 Shift 關掉後不切換');
   check((await press('KeyA')).eaten, '左 Shift 後仍是注音');
   await press('Escape');
-  check(await toggles(true), '只用右 Shift 時右 Shift 切換');
-  // 只用左 Shift
-  noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：只用左 Shift');
-  check(!(await toggles(true)), '只用左 Shift 時右 Shift 不切換');
-  check(await toggles(false), '只用左 Shift 時左 Shift 切換');
+  check(await toggles(true), '右 Shift 仍切換');
+  // 再關掉右 Shift：兩邊都不切換
+  noSession(await call({ method: 'onCommand', id: 3, type: 2 }), '選單：右 Shift 開關');
+  check((await shiftMenu()) === '00', '兩個開關都取消');
+  check(readFileSync(configFile, 'utf8').includes('"none"'), 'config.json 寫入 "none"');
+  check(!(await toggles(false)) && !(await toggles(true)), '兩邊都關掉時 Shift 不切換');
   // 舊版設定檔的 "left" 照樣有效：onActivate 時重讀
   writeFileSync(configFile, '{"shiftToggle": "left"}');
   await call({ method: 'onActivate', isKeyboardOpen: true });
-  check((await shiftMenu()).join() === '2', '設定檔 "left" 讀進來');
+  check((await shiftMenu()) === '10', '設定檔 "left" 讀進來');
+  check(!(await toggles(true)) && (await toggles(false)), '"left" 只有左 Shift 切換');
   // 恢復左右都切換
-  noSession(await call({ method: 'onCommand', id: 4, type: 2 }), '選單：左右都切換');
+  noSession(await call({ method: 'onCommand', id: 3, type: 2 }), '選單：打開右 Shift');
+  check((await shiftMenu()) === '11', '兩個開關都勾回來');
   check((await toggles(false)) && (await toggles(true)), '恢復後左右 Shift 都切換');
 
   // 標點：組字區空時直接輸出全形

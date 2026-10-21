@@ -12,6 +12,16 @@ const MENU_PAGE: usize = 9;
 const STANDALONE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就";
 /// 送出時自動存的使用者詞最多幾個字（規則 3、4；同 engine.ts USER_PHRASE_MAX）
 const USER_PHRASE_MAX: usize = 6;
+/// 送出時自動學的詞，頭尾不能是這些字（規則 2–4；同 engine.ts PARTICLE_EDGE）：STANDALONE 加上語尾助詞
+const PARTICLE_EDGE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就嗎呢吧啊呀喔哦";
+/// 自動挖詞（規則 2）最多幾個字（同 engine.ts MINED_MAX）
+const MINED_MAX: usize = 4;
+
+/// 頭尾都不是 PARTICLE_EDGE 的字（同 engine.ts edgeOk）
+fn edge_ok(w: &str) -> bool {
+    let bad = |c: Option<char>| c.is_some_and(|c| PARTICLE_EDGE.contains(c));
+    !bad(w.chars().next()) && !bad(w.chars().last())
+}
 
 /// 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）
 const PUNCT: [(&str, &str); 14] = [
@@ -607,7 +617,8 @@ impl ImeEngine {
                     adapter.record_selection(&b.reading, &b.word, at);
                 }
             }
-            // 2) 造詞挖掘：連續 ≥2 個單字詞 → 新詞；3) 這串字裡有選過的字、或選過的多字詞 → 使用者詞
+            // 2) 造詞挖掘：連續 2–4 個單字詞、頭尾不是虛字 → 記一次，兩次送出都出現才入格；
+            // 3) 這串字裡有選過的字（頭尾不是虛字）、或選過的多字詞 → 使用者詞
             // ponytail: 長度取「連續單字」整串（同 TS）；要精確長度再加手動造詞鍵
             let picked: HashSet<(usize, &str)> = self
                 .fixed
@@ -619,8 +630,9 @@ impl ImeEngine {
             let flush =
                 |ops: &mut Vec<_>, chars: &mut String, rd: &mut Vec<String>, any: &mut bool| {
                     let n = chars.chars().count();
-                    // 選過的字太長的一串不存（多半是整句沒斷好）
-                    if n >= 2 && (!*any || n <= USER_PHRASE_MAX) {
+                    // 選過的字太長的一串不存、挖詞最多 MINED_MAX 字（多半是整句沒斷好）；頭尾是虛字的不存
+                    let max = if *any { USER_PHRASE_MAX } else { MINED_MAX };
+                    if n >= 2 && n <= max && edge_ok(chars) {
                         ops.push((*any, std::mem::take(chars), std::mem::take(rd)));
                     }
                     chars.clear();
@@ -667,22 +679,31 @@ impl ImeEngine {
                     continue;
                 }
                 let (w, r) = (&bd[i].word, &bd[i].reading);
+                // 合起來的詞頭尾是虛字就不存
                 if let Some(h) = host(i.checked_sub(1)) {
                     let h = &bd[h];
-                    ops.push((true, format!("{}{w}", h.word), [&h.reading[..], r].concat()));
+                    let word = format!("{}{w}", h.word);
+                    if edge_ok(&word) {
+                        ops.push((true, word, [&h.reading[..], r].concat()));
+                    }
                 } else if let Some(h) = host(Some(i + 1)) {
                     let h = &bd[h];
-                    ops.push((true, format!("{w}{}", h.word), [r, &h.reading[..]].concat()));
+                    let word = format!("{w}{}", h.word);
+                    if edge_ok(&word) {
+                        ops.push((true, word, [r, &h.reading[..]].concat()));
+                    }
                 }
             }
             let decoder = &mut self.decoder;
+            // 同一次送出裡重複出現的挖詞只算一次（挖詞要兩次送出都出現才入格，x2.rs MINED_MIN_FREQ）
+            let mut mined_now = HashSet::new();
             for (user, word, reading) in ops {
                 if user {
                     adapter.set_user_phrase(&word, &reading);
                     if !decoder.has_entry(&reading, &word) {
                         decoder.add_entry(&word, &[reading]);
                     }
-                } else if !decoder.has_entry(&reading, &word) {
+                } else if !decoder.has_entry(&reading, &word) && mined_now.insert(word.clone()) {
                     adapter.mine_word(&word, &reading);
                     for e in adapter.drain_pending() {
                         decoder.add_entry(&e.word, &e.readings);

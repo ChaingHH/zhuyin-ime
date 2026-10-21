@@ -16,6 +16,7 @@ mod decode;
 mod engine;
 mod keymap;
 mod l3;
+mod learned_web;
 mod lexicon;
 mod lm;
 mod pime;
