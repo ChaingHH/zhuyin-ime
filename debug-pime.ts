@@ -83,6 +83,7 @@ const child = spawn(be.exe, be.args, {
   cwd: be.cwd,
   env: {
     ZHUYIN_ADAPTER: 'off',
+    ZHUYIN_LOG: 'off',
     // 行為檢查會改設定檔（Shift 選項），不能碰使用者的 %APPDATA%\PIME\zhuyin\config.json
     ZHUYIN_CONFIG: configFile,
     ...process.env,
@@ -538,6 +539,29 @@ async function smoke(): Promise<void> {
   await press('Escape');
   check(!(await press('Numpad5')).eaten, '沒在組字時數字鍵盤放行');
   check(!(await press('NumpadAdd')).eaten, '沒在組字時數字鍵盤 + 放行');
+
+  // 表格邊界換頁：最右欄 → 到下一頁最左欄，最左欄 ← 回上一頁最右欄；只有第一頁最左欄的 ← 收回
+  for (const c of ['KeyU', 'Digit4']) await press(c); // ㄧˋ：候選超過一頁
+  await press('ArrowDown');
+  const p1 = (await press('ArrowRight')).last['candidateList'] as string[];
+  check(p1.length === 36, `ㄧˋ 第一頁滿 36 個（${p1.length}）`);
+  for (let i = 0; i < 3; i++) await press('ArrowRight');
+  const p2 = await press('ArrowRight');
+  check(
+    p2.last['candidateCursor'] === 0 && (p2.last['candidateList'] as string[])[0] !== p1[0],
+    '最右欄再 → 到下一頁最左欄',
+  );
+  const back = await press('ArrowLeft');
+  check(
+    back.last['candidateCursor'] === 3 &&
+      (back.last['candidateList'] as string[])[0] === p1[0] &&
+      cols(back) === undefined,
+    `下一頁最左欄 ← 回上一頁最右欄（反白 ${String(back.last['candidateCursor'])}）`,
+  );
+  for (let i = 0; i < 3; i++) await press('ArrowLeft');
+  check(cols(await press('ArrowLeft')) === 1, '第一頁最左欄 ← 收回成一欄');
+  await press('Escape');
+  await press('Escape');
 
   // 每個程式各有一份 DLL：程式 A 展開過表格，程式 B 啟用後，A 再開清單仍要送 1 欄（2026-10-21 清單變成橫的 1×9）
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);

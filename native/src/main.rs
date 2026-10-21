@@ -8,7 +8,8 @@
 //!   zhuyin-native pime                      PIME 後端（stdin/stdout，見 pime.rs）。資料預設在執行檔旁的 data\；
 //!                                           學習存 %APPDATA%\PIME\zhuyin\adapter.json（ZHUYIN_ADAPTER＝路徑或 off）；
 //!                                           設定檔 %APPDATA%\PIME\zhuyin\config.json（ZHUYIN_CONFIG＝路徑或 off，見 pime.rs）；
-//!                                           L3 預設開（ZHUYIN_L3=0 關）；閒置 ZHUYIN_IDLE_SECS 秒（預設 300）卸載模型
+//!                                           L3 預設開（ZHUYIN_L3=0 關）；閒置 ZHUYIN_IDLE_SECS 秒（預設 300）卸載模型；
+//!                                           stderr 寫到 %APPDATA%\PIME\zhuyin\backend.log（ZHUYIN_LOG＝路徑或 off）
 //! 對拍腳本：debug-native-parity.ts。ZHUYIN_A＝詞級權重（預設 1）。
 //! 資料目錄：ZHUYIN_DATA（預設 data），要有 models/lm.bo.bin、processed/lexicon.bin、processed/syllables.json。
 mod decode;
@@ -232,6 +233,16 @@ fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300.0);
+        // PIMELauncher 丟掉後端的 stderr：改寫到記錄檔，後端死掉（panic、結束）才查得到原因
+        match std::env::var("ZHUYIN_LOG") {
+            Ok(f) if f == "off" => {}
+            Ok(f) => pime::log_to_file(std::path::Path::new(&f)),
+            Err(_) => {
+                if let Ok(d) = std::env::var("APPDATA") {
+                    pime::log_to_file(&std::path::Path::new(&d).join("PIME/zhuyin/backend.log"));
+                }
+            }
+        }
         pime::serve(pime::Backend::new(pime::Config {
             data,
             adapter_file,

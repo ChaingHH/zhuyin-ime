@@ -25,6 +25,49 @@ extern "system" {
     fn HeapCompact(h: isize, flags: u32) -> usize;
     fn GetCurrentProcess() -> isize;
     fn SetProcessWorkingSetSize(p: isize, min: usize, max: usize) -> i32;
+    fn SetStdHandle(which: u32, h: isize) -> i32;
+    fn GetLocalTime(t: *mut [u16; 8]);
+}
+
+/// 現在的當地時間 "2026-10-21 13:11:42"
+fn now_str() -> String {
+    let mut t = [0u16; 8];
+    unsafe { GetLocalTime(&mut t) };
+    format!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t[0], t[1], t[3], t[4], t[5], t[6]
+    )
+}
+
+/// stderr（eprintln、panic 訊息）改寫到記錄檔。Rust 每次寫 stderr 都重新拿標準控制代碼，所以換掉就生效。
+/// 超過 1MB 先改名成 .old。打不開就照舊（stderr 被 PIMELauncher 丟掉）
+pub fn log_to_file(path: &std::path::Path) {
+    use std::os::windows::io::AsRawHandle;
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 1 << 20) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    let _ = path.parent().map(std::fs::create_dir_all);
+    let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // STD_ERROR_HANDLE = (DWORD)-12；檔案要活到行程結束
+    unsafe { SetStdHandle(-12i32 as u32, f.as_raw_handle() as isize) };
+    std::mem::forget(f);
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        eprintln!("[pime] {} panic：", now_str());
+        default(info);
+    }));
+    eprintln!(
+        "[pime] {} 啟動 pid {} {}",
+        now_str(),
+        std::process::id(),
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 const VK_SHIFT: usize = 0x10;
@@ -330,12 +373,12 @@ impl Backend {
     /// 所以在 filterKeyDown 的回應先送 candPerRow（沒有 edit session 也安全：updateUI 不碰 session），
     /// 同一個鍵的 onKeyDown 回應再帶候選清單，就會用新的欄數重畫
     fn table_layout(&mut self, k: &Key, r: &mut Map<String, Value>) {
-        // 清單時 →／Tab 展開、表格最左欄 ← 收回：這個鍵只換排法，不交給引擎（引擎的 ← → 是換欄）
+        // 清單時 →／Tab 展開、表格第一頁最左欄 ← 收回：這個鍵只換排法，不交給引擎（引擎的 ← → 是換欄）
         let first_col = self
             .eng
             .as_ref()
             .and_then(|e| e.state(true).menu)
-            .is_some_and(|m| m.cursor < TABLE_ROWS);
+            .is_some_and(|m| m.page == 0 && m.cursor < TABLE_ROWS);
         if self.menu_open() {
             match k.code.as_deref() {
                 Some("ArrowRight" | "Tab") if !self.table => {
@@ -1008,12 +1051,22 @@ pub fn serve(mut be: Backend) {
             Ok(l) => {
                 if let Some(s) = respond(&mut be, &l) {
                     if !write(s) {
+                        eprintln!("[pime] {} 結束：stdout 寫不出去", now_str());
                         break;
                     }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => be.on_timeout(),
-            Err(RecvTimeoutError::Disconnected) => break,
+            // 閒置卸載、寫學習檔也不能拖垮後端（同 respond）
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| be.on_timeout()));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                eprintln!(
+                    "[pime] {} 結束：stdin 關閉（PIMELauncher 結束或關掉後端）",
+                    now_str()
+                );
+                break;
+            }
         }
         if be.should_restart() {
             // 結束前把已經送來的請求處理完；有的話這輪不結束，下次再看
@@ -1025,7 +1078,10 @@ pub fn serve(mut be: Backend) {
                 }
             }
             if !pending {
-                eprintln!("[pime] 執行檔已更新，結束讓 PIMELauncher 開新版");
+                eprintln!(
+                    "[pime] {} 執行檔已更新，結束讓 PIMELauncher 開新版",
+                    now_str()
+                );
                 break;
             }
         }

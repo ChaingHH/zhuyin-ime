@@ -92,17 +92,29 @@ fn menu_move(m: &Menu, code: &str, size: usize) -> (usize, usize) {
             };
             (page * size, page)
         }
-        // 表格（一頁好幾欄，每欄 MENU_PAGE 個）：← → 移到左右那一欄的同一列；右邊那欄比較短就到它最後一個。
-        // 最左欄的 ← 由 PIME 拿去收回表格，不會進到這裡
-        "ArrowLeft" if size > MENU_PAGE && (m.sel - m.page * size) >= MENU_PAGE => {
-            (m.sel - MENU_PAGE, m.page)
-        }
-        "ArrowRight" if size > MENU_PAGE => {
-            let end = n.min((m.page + 1) * size);
-            let next_col =
-                (m.sel - m.page * size) / MENU_PAGE * MENU_PAGE + MENU_PAGE + m.page * size;
-            if next_col < end {
-                ((m.sel + MENU_PAGE).min(end - 1), m.page)
+        // 表格（一頁好幾欄，每欄 MENU_PAGE 個）：← → 移到左右那一欄的同一列，那欄比較短就到它最後一個。
+        // 本頁最右欄再 → 到下一頁最左欄（最後一頁回到第一頁）；最左欄再 ← 到上一頁最右欄。
+        // 第一頁最左欄的 ← 由 PIME 拿去收回表格，不會進到這裡
+        "ArrowLeft" | "ArrowRight" if size > MENU_PAGE => {
+            let lo = m.page * size;
+            let (col, row) = ((m.sel - lo) / MENU_PAGE, (m.sel - lo) % MENU_PAGE);
+            let page_end = |p: usize| n.min((p + 1) * size);
+            // 第 p 頁第 c 欄同一列（欄短就到最後一個）；那欄不存在回 None
+            let at = |p: usize, c: usize| {
+                let top = p * size + c * MENU_PAGE;
+                (c * MENU_PAGE < size && top < page_end(p))
+                    .then(|| (top + row).min(page_end(p) - 1))
+            };
+            if code == "ArrowRight" {
+                at(m.page, col + 1).map(|s| (s, m.page)).unwrap_or_else(|| {
+                    let p = (m.page + 1) % pages;
+                    (at(p, 0).unwrap(), p)
+                })
+            } else if col > 0 {
+                (at(m.page, col - 1).unwrap(), m.page)
+            } else if m.page > 0 {
+                // 上一頁是滿的
+                (at(m.page - 1, size / MENU_PAGE - 1).unwrap(), m.page - 1)
             } else {
                 (m.sel, m.page)
             }

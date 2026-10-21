@@ -189,15 +189,18 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | 選字視窗 | 空白、PageDown | 下一頁（反白移到該頁第一個） |
 | 選字視窗 | PageUp | 上一頁 |
 | 選字視窗 | Enter | 選反白的候選。選完游標跳到這段後面（下一個字或詞的開頭） |
-| 選字視窗 | 1–9 | 選本頁第 n 個 |
-| 選字視窗 | → 或 Tab | 展開成一列 9 個 |
-| 選字視窗 | ← | 收回成一欄 |
+| 選字視窗 | 1–9 | 選本頁第 n 個（表格：反白那一欄的第 n 個） |
+| 選字視窗 | → 或 Tab | 展開成表格：直的 9 個、橫的 4 欄，每欄由上往下 1–9 |
+| 表格 | ← → | 換到左右那一欄。最右欄再 → 到下一頁，最左欄再 ← 回上一頁 |
+| 表格 | ←（第一頁最左欄） | 收回成一欄 |
+| 組字中 | Ctrl／Alt 組合鍵（Ctrl+V…） | 先送出組字，再交給程式 |
+| 組字中 | 數字鍵盤的數字與 + − × ÷ . | 照原樣插進組字區 |
 | 選字視窗 | Esc、Backspace | 關閉視窗，不改字 |
 
 - 選字視窗的鍵位照微軟官方說明（[Microsoft Traditional Chinese IME](https://support.microsoft.com/help/5001290) 的 Bopomofo 選字視窗）：↓ 進入視窗、↓↑ 移動、空白翻頁、數字選、Enter 選反白。
 - 選了清單最後一項（注音本身），那個字就照打的注音送出，不會被學成詞。
 - 沒做的微軟注音功能：Shift＋數字的聯想詞、全形／半形。
-- 展開只是把同一頁的 9 個候選排成一列；PIME 的視窗一次只能畫一頁，顏色也固定用系統色。
+- PIME 的視窗一次只能畫一頁，顏色固定用系統色；表格最後一欄沒填滿時，空格會畫出「 . 」。
 - 打錯音、ㄣ／ㄥ 等模糊音會自動更正（L3，預設開）。
 
 ## 記憶體
@@ -234,6 +237,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 開發用的環境變數（後端不一定收得到 PIMELauncher 的環境變數，平常用設定檔）：`ZHUYIN_ADAPTER`（學習檔路徑或 `off`）、`ZHUYIN_CONFIG`（設定檔路徑或 `off`）、`ZHUYIN_IDLE_SECS`、`ZHUYIN_L3`。設定檔裡有的項目會蓋過環境變數。
 
 ## 疑難排解
+
+- 後端的記錄檔：`%APPDATA%\PIME\zhuyin\backend.log`（超過 1MB 改名成 `backend.log.old`）。每次啟動、結束（含原因）、載入／卸載模型、出錯（panic）都會記一行，有時間。打字當掉或字突然不見時，先看這個檔最後幾行。環境變數 `ZHUYIN_LOG`＝路徑或 `off`。
 
 - PIME 2.0 的啟動器平常**不寫 log**（背景模式把 log 丟掉），`%LOCALAPPDATA%\PIME\Log\PIMELauncher.log` 會是空的。
 - `PIMELauncher.exe /console` 可以顯示 log，但要先停掉正在跑的啟動器，那會讓所有程式當掉（見上面的警告）。**不要用。**要查後端的行為，在 repo 裡用 `debug-pime.ts` 直接驅動後端（不經 PIME）。
