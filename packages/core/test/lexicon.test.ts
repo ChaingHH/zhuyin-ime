@@ -26,7 +26,7 @@ describe('LexiconIndex', () => {
       expect(list(lex, ['ㄧˊ', 'ㄉㄧㄥˋ'])).toEqual(['一定']);
       expect(list(lex, ['ㄉㄧㄥˋ'])).toEqual([]);
       expect(list(lex, ['ㄅㄚ'])).toEqual([]);
-      expect([...lex.polySingle]).toEqual(['一']);
+      expect([...lex.polySingle]).toEqual([['一', 'ㄧ']]);
       expect(lex.maxSpan).toBe(2);
 
       lex.add(['ㄧ'], '醫');

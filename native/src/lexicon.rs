@@ -1,7 +1,7 @@
 //! 讀音 → 詞 索引 lexicon.bin 的唯讀移植（packages/core/src/lexicon.ts LexiconIndex.fromBytes）。
 //! 執行中新增的詞（使用者造詞、挖詞）放在疊加層，語意同 LexiconIndex.add：接在該讀音清單最後。
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub struct Lexicon {
     syl_id: HashMap<String, u16>,
@@ -15,7 +15,8 @@ pub struct Lexicon {
     slots: Vec<i32>,
     /// 第 i 個詞是不是破音單字（有多個讀音的單字）
     pub poly: Vec<bool>,
-    pub poly_set: HashSet<String>,
+    /// 破音單字 → 主讀音（詞典的第一個讀音）
+    pub poly_set: HashMap<String, String>,
     /// 疊加層：基本詞典沒有的詞（編號接在基本詞後面）
     added: Vec<String>,
     /// 加詞時查詞編號用：基本詞依字串排序的編號（第一次加詞才建，約 1MB）、疊加層的詞 → 編號
@@ -37,7 +38,7 @@ fn hash_ids(ids: &[u16]) -> u32 {
 impl Lexicon {
     pub fn load(path: &str) -> Result<Lexicon, String> {
         let buf = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        if &buf[..8] != b"ZYLEX001" {
+        if &buf[..8] != b"ZYLEX002" {
             return Err(format!("{path} 不是詞典索引格式"));
         }
         let hlen = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
@@ -75,14 +76,18 @@ impl Lexicon {
             .enumerate()
             .map(|(i, s)| (s.to_string(), i as u16))
             .collect();
-        let poly_set: HashSet<String> = lines("poly").iter().map(|s| s.to_string()).collect();
+        let poly_set: HashMap<String, String> = lines("poly")
+            .iter()
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(w, r)| (w.to_string(), r.to_string()))
+            .collect();
         let mut text = String::new();
         let mut woff = vec![0u32];
         let mut poly = vec![];
         for w in lines("words") {
             text.push_str(w);
             woff.push(text.len() as u32);
-            poly.push(w.chars().count() == 1 && poly_set.contains(w));
+            poly.push(w.chars().count() == 1 && poly_set.contains_key(w));
         }
         let rd: Vec<u16> = u16s("rd");
         let rd_off: Vec<u32> = u32s("rdOff");
@@ -144,7 +149,7 @@ impl Lexicon {
             Some(&p) => p,
             None => {
                 let w = self.word(i);
-                w.chars().count() == 1 && self.poly_set.contains(w)
+                w.chars().count() == 1 && self.poly_set.contains_key(w)
             }
         }
     }

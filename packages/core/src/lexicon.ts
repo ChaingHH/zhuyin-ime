@@ -9,7 +9,7 @@
  */
 import type { LexiconEntry } from './index.js';
 
-const MAGIC = 'ZYLEX001';
+const MAGIC = 'ZYLEX002';
 
 export class LexiconIndex {
   private readonly sylId = new Map<string, number>();
@@ -29,8 +29,8 @@ export class LexiconIndex {
     /** 第 k 個讀音的詞編號在 wl[wOff[k] .. wOff[k+1])，高頻在前 */
     private readonly wl: Uint32Array,
     private readonly wOff: Uint32Array,
-    /** 有多個讀音的單字（破音字） */
-    readonly polySingle: ReadonlySet<string>,
+    /** 有多個讀音的單字（破音字）→ 主讀音（詞典的第一個讀音，依 libchewing 讀音頻率排） */
+    readonly polySingle: ReadonlyMap<string, string>,
   ) {
     syllables.forEach((s, i) => this.sylId.set(s, i));
     const n = rdOff.length - 1;
@@ -66,10 +66,11 @@ export class LexiconIndex {
     const sylId = new Map<string, number>();
     const words: string[] = [];
     const wordId = new Map<string, number>();
-    const poly = new Set<string>();
+    const poly = new Map<string, string>();
     const pairs: Array<{ key: string; w: number; f: number }> = [];
     for (const e of entries) {
-      if ([...e.word].length === 1 && e.readings.length > 1) poly.add(e.word);
+      if ([...e.word].length === 1 && e.readings.length > 1 && !poly.has(e.word))
+        poly.set(e.word, e.readings[0]!.join(' '));
       let w = wordId.get(e.word);
       if (w === undefined) {
         w = words.length;
@@ -222,7 +223,7 @@ export class LexiconIndex {
     const parts: Record<string, Uint8Array> = {
       syllables: enc.encode(this.syllables.join('\n')),
       words: enc.encode(this.words.join('\n')),
-      poly: enc.encode([...this.polySingle].join('\n')),
+      poly: enc.encode([...this.polySingle].map(([w, r]) => `${w}\t${r}`).join('\n')),
       rd: bytes(this.rd),
       rdOff: bytes(this.rdOff),
       wl: bytes(this.wl),
@@ -273,7 +274,7 @@ export class LexiconIndex {
       u32('rdOff'),
       u32('wl'),
       u32('wOff'),
-      new Set(text('poly')),
+      new Map(text('poly').map((l) => l.split('\t') as [string, string])),
     );
   }
 }

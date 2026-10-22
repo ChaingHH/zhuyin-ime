@@ -50,6 +50,8 @@ export interface DecoderOptions {
   charIdf?: (ch: string) => number;
   /** 破音字單字的 log 罰分（破音字幾乎不以單字存在） */
   polyPenalty?: number;
+  /** 破音字單字用次要讀音時再加的 log 罰分 */
+  polyMinorPenalty?: number;
 }
 
 export interface WordBreakdown {
@@ -170,6 +172,7 @@ export class Decoder {
       idfBonus: opts.idfBonus ?? 0,
       charIdf: opts.charIdf ?? (() => 0),
       polyPenalty: opts.polyPenalty ?? 2.5,
+      polyMinorPenalty: opts.polyMinorPenalty ?? 6,
     };
   }
 
@@ -177,8 +180,8 @@ export class Decoder {
     return this.opts;
   }
 
-  /** 破音單字集合 */
-  get polySingleChars(): ReadonlySet<string> {
+  /** 破音單字 → 主讀音 */
+  get polySingleChars(): ReadonlyMap<string, string> {
     return this.lex.polySingle;
   }
 
@@ -367,8 +370,11 @@ export class Decoder {
                 ? this.partsLogProb(w, w1!, w2!)
                 : this.scorer.wordLogProb(w, w1!, w2!);
             // 破音字單字重罰：破音字幾乎不以單字存在
-            if (this.lex.polySingle.has(w) && [...w].length === 1) {
+            const main = this.lex.polySingle.get(w);
+            if (main !== undefined && [...w].length === 1) {
               lp -= this.opts.polyPenalty;
+              // 次要讀音（將讀 ㄑㄧㄤ）：LM 不分讀音，將的頻率幾乎全來自 ㄐㄧㄤ，要再罰；在詞裡（將進酒）不罰
+              if (capped[i]!.reading[0] !== main) lp -= this.opts.polyMinorPenalty;
             }
             lpws[i] = lp;
             lpcs[i] = this.opts.gamma === 0 ? 0 : this.scorer.charSequenceLogProb(w, charCtx);

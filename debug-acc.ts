@@ -205,3 +205,10 @@ if (mode === 'rrgap') {
     console.log(out.join(' | '));
   }
 }
+if (mode === 'minor') {
+  const c = cfg as unknown as Record<string, number>;
+  for (const p of [0, 2, 4, 6, 10]) {
+    c['polyMinorPenalty'] = p;
+    run(`polyMinor=${p}`);
+  }
+}

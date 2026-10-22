@@ -54,6 +54,8 @@ pub struct Decoder {
     pub gamma: f64,
     pub beam: usize,
     pub poly_penalty: f64,
+    /// 破音單字用次要讀音時再加的罰分
+    pub poly_minor_penalty: f64,
     pub entry_cap: usize,
     /// L3 更正讀音每個 key 取的最多候選詞數
     pub alt_entry_cap: usize,
@@ -145,7 +147,7 @@ impl Words<'_> {
             self.lex.is_poly(id)
         } else {
             let s = self.name(id);
-            s.chars().count() == 1 && self.lex.poly_set.contains(s)
+            s.chars().count() == 1 && self.lex.poly_set.contains_key(s)
         }
     }
 }
@@ -214,6 +216,7 @@ impl Decoder {
             gamma,
             beam: 200,
             poly_penalty: 2.5,
+            poly_minor_penalty: 6.0,
             entry_cap: 48,
             alt_entry_cap: 8,
             alt_single_only_if_empty: true,
@@ -335,6 +338,11 @@ impl Decoder {
                         // 破音字單字重罰：破音字幾乎不以單字存在
                         if words.poly(c.word) {
                             lp -= self.poly_penalty;
+                            // 次要讀音（將讀 ㄑㄧㄤ）再罰；在詞裡（將進酒）不罰
+                            let read = c.fix.as_ref().map_or(seq[pos].as_str(), |(_, s)| s.as_str());
+                            if self.lex.poly_set.get(name).is_some_and(|m| m != read) {
+                                lp -= self.poly_minor_penalty;
+                            }
                         }
                         lpws.push(lp);
                         lpcs.push(if gamma == 0.0 {
@@ -629,7 +637,7 @@ impl Decoder {
                         break;
                     }
                     let mut lp = self.lm.word_log_prob(&piece, &c1, &c2);
-                    if k - start == 1 && self.lex.poly_set.contains(&piece) {
+                    if k - start == 1 && self.lex.poly_set.contains_key(&piece) {
                         lp -= self.poly_penalty;
                     }
                     s += lp;
