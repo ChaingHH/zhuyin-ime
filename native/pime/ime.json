@@ -1,6 +1,6 @@
 {
   "name": "注音 (zhuyin-native)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "guid": "{64b60746-4570-4343-a34a-85c12f03a93a}",
   "locale": "zh-Hant-TW",
   "fallbackLocale": "zh-TW",
