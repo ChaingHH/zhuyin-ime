@@ -18,7 +18,7 @@
 - 和下面的萌典詞條、本專案從語料挖出的常用詞合併，丟掉不合法的注音。
 - 存成二進位索引（音節編號＋陣列）。
 
-修改的程式（可用來從原始資料重建）：https://github.com/q2927485-glitch/zhuyin-ime 的
+修改的程式（可用來從原始資料重建）：https://github.com/ChaingHH/zhuyin-ime 的
 packages/data-pipeline（src/sources/libchewing.ts、src/build/lexicon.ts）與 packages/core/src/lexicon.ts。
 原始資料可從上面的 libchewing-data 網址取得。
 

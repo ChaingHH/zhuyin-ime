@@ -7,7 +7,7 @@ Windows 的注音輸入法（大千鍵盤）。用語言模型整句選字；打
 
 需要：Windows 10 或 11（64 位元）。其他什麼都不用先裝。
 
-1. 到 [Releases](https://github.com/q2927485-glitch/zhuyin-ime/releases/latest) 下載 **`zhuyin-native-setup.exe`**。
+1. 到 [Releases](https://github.com/ChaingHH/zhuyin-ime/releases/latest) 下載 **`zhuyin-native-setup.exe`**。
 2. 雙擊它。Windows 問「要允許此應用程式變更您的裝置嗎？」時按「是」。
    - 電腦上沒有 PIME（輸入法框架，本輸入法跑在它上面）時，會自動一起裝好。
    - SmartScreen 擋下時，按「其他資訊」→「仍要執行」。
@@ -49,7 +49,7 @@ Windows 的注音輸入法（大千鍵盤）。用語言模型整句選字；打
 ## 常見問題
 
 - **登入後清單裡沒有它**：到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」，按「新增鍵盤」，選「注音 (zhuyin-native)」。
-- **切過去打不出字**：再登出登入一次。還是不行，把 `%APPDATA%\PIME\zhuyin\backend.log` 附在 [Issues](https://github.com/q2927485-glitch/zhuyin-ime/issues) 回報。
+- **切過去打不出字**：再登出登入一次。還是不行，把 `%APPDATA%\PIME\zhuyin\backend.log` 附在 [Issues](https://github.com/ChaingHH/zhuyin-ime/issues) 回報。
 - 完整的按鍵表、設定檔與疑難排解：[docs/PIME-INSTALL.md](docs/PIME-INSTALL.md)。
 
 ## 授權與資料來源
