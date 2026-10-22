@@ -48,6 +48,8 @@ Setup.exe 做的事：
 
 記錄檔在 `C:\ProgramData\zhuyin-native-uninstall.log`，不會隨解除安裝刪掉。
 
+真的移除之後，會問「也要解除安裝 PIME 嗎？」（預設「否」）。選「是」就開 PIME 自己的 `Uninstall.exe`。PIME 的解除安裝會停掉 PIMELauncher，所以 PIME 版本早於 2.0.0-beta2 時不執行，改請使用者登出再登入後從「設定」移除（見 `install.ps1` 檔頭警告）。
+
 安裝包附 `THIRD-PARTY-NOTICES.txt`（萌典出處、libchewing 的 LGPL 聲明與修改說明）和 `LICENSE-LGPL-2.1.txt`，會裝進 `PIME\zhuyin\`。
 
 沒有用 MSI：MSI 的元件模型和修復、回復機制，不適合「改 PIME 的 `backends.json`、執行 `regsvr32`」這種安裝；WiX 也比較重。

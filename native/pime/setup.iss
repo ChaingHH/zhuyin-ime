@@ -98,6 +98,35 @@ begin
     Result := True;
 end;
 
+{ PIME 的解除安裝程式會停掉 PIMELauncher。2.0.0-beta2 以前的 DLL 連不上啟動器時，載入它的程式（Explorer）會一直當掉，
+  所以只在 beta2 以上直接執行（同 install.ps1 的 Pime-VersionOk；ponytail: 只擋已知會當的 1.x 與 2.0.0-beta） }
+function PimeVersionOk(): Boolean;
+var
+  V: AnsiString;
+begin
+  Result := LoadStringFromFile(ExpandConstant('{commonpf32}\PIME\version.txt'), V);
+  V := Trim(V);
+  Result := Result and (V <> '2.0.0-beta') and (Copy(V, 1, 2) <> '1.');
+end;
+
+{ 移除本輸入法之後，問要不要也移除 PIME（預設「否」：PIME 上可能還有別的輸入法） }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
+  Pime: String;
+begin
+  Pime := ExpandConstant('{commonpf32}\PIME\Uninstall.exe');
+  if (CurUninstallStep <> usPostUninstall) or not FileExists(Pime) then exit;
+  if SuppressibleMsgBox('「注音 (zhuyin-native)」已移除。' + #13#10 + #13#10 +
+    '也要解除安裝 PIME（輸入法框架）嗎？' + #13#10 +
+    '用 PIME 的其他輸入法（新酷音、小麥注音等）也會一起移除。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) <> IDYES then exit;
+  if not PimeVersionOk() then
+    MsgBox('這一版 PIME 太舊，執行中移除可能讓程式當掉。' + #13#10 +
+      '請登出再登入後，到「設定 > 應用程式 > 已安裝的應用程式」解除安裝 PIME。', mbInformation, MB_OK)
+  else if not Exec(Pime, '', '', SW_SHOW, ewNoWait, Code) then
+    MsgBox('無法執行 PIME 的解除安裝程式。請到「設定 > 應用程式 > 已安裝的應用程式」解除安裝 PIME。', mbError, MB_OK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Code: Integer;
