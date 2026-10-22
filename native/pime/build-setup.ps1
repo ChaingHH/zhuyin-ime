@@ -1,7 +1,8 @@
 ﻿# 做出單一 Setup.exe（dist\zhuyin-native-setup.exe），給沒有 repo、沒有 Rust 的人用。一般權限即可：
 #   1. cargo build --release
 #   2. install.ps1 -Stage dist（組出 dist\zhuyin\）
-#   3. Inno Setup 6 的 ISCC.exe 編 setup.iss
+#   3. 下載內附的 PIME 安裝檔（native\pime\vendor\，驗 SHA-256）
+#   4. Inno Setup 6 的 ISCC.exe 編 setup.iss
 # 只組檔案、編安裝程式，不動這台電腦的 PIME。build-setup.cmd 會呼叫這支。
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -26,6 +27,15 @@ try {
   if (Test-Path (Join-Path $dist 'zhuyin')) { Remove-Item -Recurse -Force (Join-Path $dist 'zhuyin') }
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'install.ps1') -Stage $dist -Data $data
   if ($LASTEXITCODE -ne 0) { Done $false '組出安裝檔失敗。' }
+
+  # 內附的 PIME 官方安裝檔（setup.iss 在對方沒有 PIME 時靜默安裝）。沒有就下載，雜湊對不上就不編
+  $pime = Join-Path $here 'vendor\PIME-2.0.0-beta3-setup.exe'
+  $pimeHash = '73D86806C1C21416F67266D8BECAF0A14D3C260E20AF316BD4EBE871FDBC95B5'
+  if (-not (Test-Path $pime)) {
+    New-Item -ItemType Directory -Force (Split-Path $pime) | Out-Null
+    Invoke-WebRequest -UseBasicParsing -OutFile $pime 'https://github.com/EasyIME/PIME/releases/download/v2.0.0-beta3/PIME-2.0.0-beta3-setup.exe'
+  }
+  if ((Get-FileHash $pime).Hash -ne $pimeHash) { Done $false "$pime 的 SHA-256 不對，刪掉再執行一次。" }
 
   $iscc = @(
     (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source,

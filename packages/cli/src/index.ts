@@ -172,7 +172,8 @@ async function main(): Promise<void> {
       let baseline: 'classic' | 'bigram' | undefined;
       if (process.argv.includes('--baseline')) {
         const v = process.argv[process.argv.indexOf('--baseline') + 1];
-        if (v !== 'classic' && v !== 'bigram') throw new Error('--baseline 只能是 classic 或 bigram');
+        if (v !== 'classic' && v !== 'bigram')
+          throw new Error('--baseline 只能是 classic 或 bigram');
         baseline = v;
       }
       const a = argNum(['-a']);

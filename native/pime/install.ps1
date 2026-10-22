@@ -12,6 +12,7 @@
 # Explorer 的 DLL 一呼叫就找不到後端，一秒當一次直到登出（2026-10-20 12:05）。只留本專案改由 -Keyboard only 調整使用者的鍵盤清單。
 # 同樣的理由，-Uninstall 只在沒人用 zhuyin 時才改 backends.json、regsvr32、刪檔
 #   .\install.ps1 -From <目錄>    用已經組好的 zhuyin\ 資料夾安裝（Setup.exe 用；不需要 repo 與 Rust）
+#   -WaitReady <秒>              -Keyboard only 先等 PIME 啟動器讀到 zhuyin 最多這麼久（Setup.exe 寫的 RunOnce 登入時用）
 #   -Log <檔案>                   把輸出寫進記錄檔（install.cmd 提權執行時用，原視窗再顯示出來）
 # 一般使用者請直接雙擊同目錄的 install.cmd／uninstall.cmd／rollback.cmd（docs/PIME-INSTALL.md）
 # 參數：-Pime PIME 安裝目錄、-Data 本專案 data\ 目錄（要有 lm.bo.bin、lexicon.bin、syllables.json）
@@ -31,6 +32,7 @@ param(
   [switch]$Rollback,
   [ValidateSet('only', 'remove')][string]$Keyboard = '',
   [string]$From = '',
+  [int]$WaitReady = 0,
   [string]$Log = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -254,6 +256,8 @@ if ($Stage) {
 }
 
 if ($Keyboard -eq 'only') {
+  # 登入時 RunOnce 和 PIMELauncher（HKLM Run）一起啟動，先後不定
+  for ($i = 0; $i -lt $WaitReady -and -not ((Pime-Tip) -and (Launcher-Ready)); $i++) { Start-Sleep 1 }
   if (Set-Keyboard 'only') { Write-Host '鍵盤清單：PIME 的輸入法只留「注音 (zhuyin-native)」（要其他的可到「設定」加回）' }
   Finish
 }

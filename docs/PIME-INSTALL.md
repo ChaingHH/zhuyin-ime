@@ -2,9 +2,11 @@
 
 把本專案的 Rust 引擎裝成 PIME 的一個輸入法。技術細節與量測見 `docs/MEMORY.md` §6。
 
-## 最簡單：雙擊 install.cmd
+一般使用者用 Releases 的 `zhuyin-native-setup.exe` 就好（見 [README](../README.md)）。本文件給從原始碼安裝、做 Setup.exe 的人。
 
-1. 在檔案總管打開 `C:\Users\q2927\Desktop\vscode\type\native\pime\`。
+## 從原始碼：雙擊 install.cmd
+
+1. 在檔案總管打開 repo 的 `native\pime\`。
 2. 雙擊 **`install.cmd`**。
    - 它會先建置執行檔（要有 Rust；一般權限）。
    - 接著 Windows 跳出「使用者帳戶控制」視窗，按「是」。只有安裝這一步用系統管理員權限。
@@ -30,10 +32,14 @@
 要給別人安裝（對方不需要 repo、Rust）時，做一個 `zhuyin-native-setup.exe`：
 
 1. 安裝 [Inno Setup 6](https://jrsoftware.org/isdl.php)。它的安裝程式能不能不用系統管理員權限、只裝給自己，沒有查證；編譯本身（`ISCC.exe`）不需要系統管理員權限。
-2. 雙擊 `native\pime\build-setup.cmd`：建置 → 組出 `native\pime\dist\zhuyin\` → 編出 `native\pime\dist\zhuyin-native-setup.exe`。沒裝 Inno Setup 時只會組好檔案並說明。
-3. 把 `zhuyin-native-setup.exe` 給對方。對方要先裝好 PIME 2.0；執行時會要系統管理員權限，結束時跳出結果，之後登出再登入。第一次安裝要自己到「設定」加入鍵盤（Setup.exe 不改鍵盤清單）。
+2. 雙擊 `native\pime\build-setup.cmd`：建置 → 組出 `native\pime\dist\zhuyin\` → 下載 PIME v2.0.0-beta3 官方安裝檔到 `native\pime\vendor\`（驗 SHA-256，不進 git）→ 編出 `native\pime\dist\zhuyin-native-setup.exe`。沒裝 Inno Setup 時只會組好檔案並說明。
+3. 把 `zhuyin-native-setup.exe` 給對方（或上傳到 GitHub Releases）。執行時會要系統管理員權限，結束時跳出結果，之後登出再登入。
 
-Setup.exe 只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，所以安全規則完全一樣。它在 `C:\ProgramData\zhuyin-native-setup\` 留一份 `install.ps1` 與檔案副本，給「新增或移除程式」裡的解除安裝用。
+Setup.exe 做的事：
+
+- 對方沒有 PIME（找不到 `backends.json`）：先用內附的 PIME 安裝檔 `/S` 靜默安裝。已經有 PIME 就不動它（執行中更新 PIME 會停掉啟動器，見 `install.ps1` 檔頭警告）。
+- 第一次安裝（`backends.json` 裡還沒有 zhuyin）：在提權帳號的 HKCU `RunOnce` 寫一筆，登入時跑 `install.ps1 -Keyboard only -WaitReady 120`，等啟動器讀到 zhuyin 後把它加進鍵盤清單。用別的管理員帳號提權時會寫到那個帳號，使用者要自己到「設定」加入。
+- 其餘只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，所以安全規則完全一樣。它在 `C:\ProgramData\zhuyin-native-setup\` 留一份 `install.ps1` 與檔案副本，給「新增或移除程式」裡的解除安裝用。
 
 解除安裝也分兩次，和 `uninstall.cmd` 一樣：
 

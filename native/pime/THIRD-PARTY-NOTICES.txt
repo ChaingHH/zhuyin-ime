@@ -42,3 +42,13 @@ lm.bo.bin 是從下列語料統計出來的詞與字的出現機率，不含語�
 - Hugging Face wikimedia/wikipedia 中文維基百科（經 OpenCC s2twp 轉成繁體中文）
 
 各語料的授權以其 dataset card 為準。
+
+
+4. PIME（輸入法框架，安裝程式內附）
+----------------------------------
+
+- 來源：https://github.com/EasyIME/PIME （v2.0.0-beta3 官方安裝檔 PIME-2.0.0-beta3-setup.exe，未修改）
+- 著作權：Hong Jen-Yee 與 PIME 貢獻者
+- 授權：LGPL 2.0（PIME 本體），內含元件的授權見 PIME 安裝目錄的 LICENSE.txt。
+  原始碼：https://github.com/EasyIME/PIME/tree/v2.0.0-beta3
+- 本輸入法的安裝程式只在電腦上沒有 PIME 時，用 /S 靜默執行上面這個安裝檔。

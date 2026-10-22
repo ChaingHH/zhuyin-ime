@@ -489,7 +489,8 @@ export class Decoder {
       out.push(m);
     }
     // 固定段的詞走不通（不在候選）時整個格斷掉：不帶固定段重解，畫面才不會變空
-    if (out.length === 0 && fixed.length > 0) return this.decode(sequence, { ...callOpts, fixed: [] });
+    if (out.length === 0 && fixed.length > 0)
+      return this.decode(sequence, { ...callOpts, fixed: [] });
     return out;
   }
 

@@ -97,6 +97,8 @@ describe('解碼器 N-best 與固定段', () => {
 
   it('固定段越界或走不通時不帶固定段重解，不回空', () => {
     expect(dec.decode(obs, { fixed: [{ pos: 1, len: 5, word: '驗' }] }).length).toBeGreaterThan(0);
-    expect(dec.decode(obs, { fixed: [{ pos: 0, len: 1, word: '沒有' }] }).length).toBeGreaterThan(0);
+    expect(dec.decode(obs, { fixed: [{ pos: 0, len: 1, word: '沒有' }] }).length).toBeGreaterThan(
+      0,
+    );
   });
 });

@@ -22,3 +22,8 @@ data/kev/**/*.jsonl
 # Rust 原型
 native/target/
 native/pime/dist/
+
+# 實驗輸出與內附的 PIME 安裝檔
+data/*.txt
+data/ime-bench/
+native/pime/vendor/

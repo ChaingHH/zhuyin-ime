@@ -48,22 +48,17 @@ export async function loadRuntime(opts: RuntimeOptions = {}): Promise<LoadedRunt
 
 async function buildRuntime(opts: RuntimeOptions): Promise<LoadedRuntime> {
   // ZHUYIN_LM 可指定模型檔。預設依序找：shrink.ts 打包的退回式模型 lm.bo.bin、pack.ts 的計數模型
-  // lm.bin、train.ts 的 lm.tsv、舊 lm.json。有設剪枝／量化環境變數時跳過兩個 .bin（設定在打包時就固定了）；
+  // lm.bin、train.ts 的 lm.tsv。有設剪枝／量化環境變數時跳過兩個 .bin（設定在打包時就固定了）；
   // 基線與 IDF 要讀計數，跳過 lm.bo.bin。
   const models = path.join(REPO, 'data', 'models');
   const custom = LM_ENV_KEYS.some((k) => process.env[k] !== undefined);
   const needCounts = opts.baseline !== undefined || (opts.idfBonus ?? 0) > 0;
   const lmFile =
     process.env['ZHUYIN_LM'] ??
-    [
-      ...(custom || needCounts ? [] : ['lm.bo.bin']),
-      ...(custom ? [] : ['lm.bin']),
-      'lm.tsv',
-      'lm.json',
-    ]
+    [...(custom || needCounts ? [] : ['lm.bo.bin']), ...(custom ? [] : ['lm.bin']), 'lm.tsv']
       .map((f) => path.join(models, f))
       .find((f) => existsSync(f)) ??
-    path.join(models, 'lm.json');
+    path.join(models, 'lm.tsv');
   const sylFile = path.join(REPO, 'data', 'processed', 'syllables.json');
 
   const [lm, lexicon, sylRaw] = await Promise.all([

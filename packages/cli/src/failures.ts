@@ -22,10 +22,7 @@ function diffMark(ref: string[], out: string[]): string {
   return m;
 }
 
-async function showFailures(
-  file: string,
-  limit: number,
-): Promise<void> {
+async function showFailures(file: string, limit: number): Promise<void> {
   const { decoder } = await loadRuntime();
   const samples = await loadEvalSamples(file);
   const domain = file.includes('written') ? '書面' : '口語';
