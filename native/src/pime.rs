@@ -298,6 +298,8 @@ pub struct Backend {
     owner: String,
     /// 單按 Shift：按下 Shift 後到放開前沒有按別的鍵
     shift_alone: bool,
+    /// 組字中切換了模式、還沒重畫組字區（遊戲常沒有 onKeyUp）：下一個鍵在 onKeyDown 補畫
+    stale: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
     shift_toggle: &'static str,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
@@ -337,6 +339,7 @@ impl Backend {
             win8: true,
             owner: String::new(),
             shift_alone: false,
+            stale: false,
             shift_toggle: "both",
             table: false,
             layout_key: false,
@@ -735,19 +738,18 @@ impl Backend {
         if let Some(e) = self.eng.as_mut() {
             e.clear();
         }
+        self.stale = false;
         r.insert("compositionString".into(), json!(""));
         r.insert("showCandidates".into(), json!(false));
     }
 
-    /// 只換模式、更新語言列圖示。沒有 edit session 的回應（onCommand）只能用這個：
-    /// PIME 的 DLL 在沒有 session 時收到 showMessage 會解參考空指標，宿主程式直接當掉
+    /// 只換模式、更新語言列圖示。沒有 edit session 的回應（onCommand、filterKeyUp）只能用這個：
+    /// PIME 的 DLL 在沒有 session 時收到 showMessage 會解參考空指標，宿主程式直接當掉。
+    /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文；
+    /// 打到一半的注音切英文時丟掉（toggle_mode）
     fn flip_mode(&mut self, r: &mut Map<String, Value>) {
         if let Some(e) = self.eng.as_mut() {
-            e.mode = if self.mode == Mode::Zhuyin {
-                Mode::English
-            } else {
-                Mode::Zhuyin
-            };
+            e.toggle_mode();
         }
         self.mode = if self.mode == Mode::Zhuyin {
             Mode::English
@@ -757,27 +759,16 @@ impl Backend {
         self.mode_button(r, "changeButton");
     }
 
-    /// 單按 Shift（onKeyUp，有 edit session）：換模式（只換語言列圖示，不跳提示）。
-    /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文
-    fn toggle(&mut self, r: &mut Map<String, Value>) {
+    /// 組字中切換後重畫組字區（要 edit session）：只剩半個注音、被丟掉的話清掉畫面上的組字
+    fn redraw(&mut self, r: &mut Map<String, Value>) {
+        self.stale = false;
         let cols = self.cols();
-        // 引擎沒載入就沒有組字，只換模式
-        if let Some(e) = self.eng.as_mut() {
-            let was = e.is_composing();
-            e.toggle_mode();
-            if e.is_composing() {
-                Self::show(r, &e.state(true), cols);
-            } else if was {
-                // 組字區只有打到一半的注音，切英文後丟掉了：清掉畫面上的組字
+        match self.eng.as_ref().filter(|e| e.is_composing()) {
+            Some(e) => Self::show(r, &e.state(true), cols),
+            None => {
                 r.insert("compositionString".into(), json!(""));
             }
         }
-        self.mode = if self.mode == Mode::Zhuyin {
-            Mode::English
-        } else {
-            Mode::Zhuyin
-        };
-        self.mode_button(r, "changeButton");
     }
 
     fn filter_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
@@ -794,7 +785,8 @@ impl Backend {
         if matches!(k.vk, 0x11 | 0x12 | 0x5b | 0x5c | 0xa2..=0xa5) {
             return false;
         }
-        if self.composing() {
+        // 切換後沒拿到 onKeyUp：畫面上還是舊組字，攔下這個鍵到 onKeyDown 補畫
+        if self.composing() || self.stale {
             self.table_layout(k, r);
             return true;
         }
@@ -805,6 +797,13 @@ impl Backend {
     }
 
     fn on_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
+        if self.stale {
+            self.redraw(r);
+            // 組字區已空（半個注音切英文時丟掉）：清掉畫面後按鍵照沒在組字時的規則，交給程式
+            if !self.composing() && !self.filter_key_down(k, r) {
+                return false;
+            }
+        }
         // Ctrl／Alt 組合鍵（Ctrl+V 貼上、Ctrl+Z、Ctrl+S…）：先送出組字（同 Enter），按鍵交給應用程式。
         // DLL 先套用回應（commitString）再看 return，所以應用程式收到按鍵時字已經在文件裡
         if k.ctrl_alt {
@@ -965,20 +964,28 @@ impl Backend {
             "onKeyDown" => Some(self.on_key_down(&key_of(msg), &mut r)),
             "filterKeyUp" => {
                 let k = key_of(msg);
-                let toggle = k.vk as usize == VK_SHIFT && self.shift_alone;
-                self.shift_alone = false;
-                // 沒在組字：這裡就切換，Shift 放開照樣傳給程式。遊戲等程式常給不了 onKeyUp 要的
-                // 同步讀寫 edit session（libIME2 TextService::OnKeyUp），攔下來的話不會切換、程式還收不到放開。
-                // 組字中才攔下，到 onKeyUp 重畫組字區
-                if toggle && !self.composing() {
+                let is_shift = k.vk as usize == VK_SHIFT;
+                let toggle = is_shift && self.shift_alone;
+                // 只有 Shift 放開才重設：快打注音時常是「按 Shift → 才放開前一個注音鍵 → 放開 Shift」，
+                // 前一個鍵的放開不算按了別的鍵，否則打字中按 Shift 切不過去（同網頁測試台）
+                if is_shift {
+                    self.shift_alone = false;
+                }
+                // 一律在這裡切換：遊戲等程式常給不了 onKeyUp 要的同步讀寫 edit session
+                // （libIME2 TextService::OnKeyUp），在 onKeyUp 才切換的話組字中切不過去。
+                // 沒在組字：Shift 放開照樣傳給程式。組字中才攔下，到 onKeyUp 重畫組字區；
+                // 沒拿到 onKeyUp 就在下一個鍵補畫（stale）
+                if toggle {
+                    let composing = self.composing();
                     self.flip_mode(&mut r);
-                    Some(false)
+                    self.stale = composing;
+                    Some(composing)
                 } else {
-                    Some(toggle)
+                    Some(false)
                 }
             }
             "onKeyUp" => {
-                self.toggle(&mut r);
+                self.redraw(&mut r);
                 Some(true)
             }
             // 語言列圖示：左鍵＝id 1，右鍵選單選項＝選單的 id。這裡沒有 edit session：

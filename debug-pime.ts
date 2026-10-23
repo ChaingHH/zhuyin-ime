@@ -277,7 +277,13 @@ const press = async (
 };
 // 單按 Shift：down 放行；沒在組字時 up 也放行、在 filterKeyUp 切換，組字中 up 攔下並在 onKeyUp 切換
 // right：右 Shift（掃描碼 0x36）
-const shiftTap = async (right = false): Promise<Record<string, unknown>> => {
+// rollover：Shift 按著時才放開這個鍵（快打時前一個注音鍵常晚放開）。
+// keyUp=false：模擬遊戲，DLL 拿不到 edit session，不會送 onKeyUp
+const shiftTap = async (
+  right = false,
+  rollover?: string,
+  keyUp = true,
+): Promise<Record<string, unknown>> => {
   const ev = {
     charCode: 0,
     keyCode: 0x10,
@@ -287,9 +293,14 @@ const shiftTap = async (right = false): Promise<Record<string, unknown>> => {
   };
   keyStates[0x10] = 0x80;
   await call({ method: 'filterKeyDown', ...ev, keyStates });
+  if (rollover) {
+    const [keyCode, charCode] = keyOf(rollover);
+    const up = await call({ method: 'filterKeyUp', ...ev, keyCode, charCode, scanCode: 0, keyStates });
+    check(!up['return'], `Shift 按著時放開 ${rollover} 不該被攔下`);
+  }
   keyStates[0x10] = 0;
   const f = await call({ method: 'filterKeyUp', ...ev, keyStates });
-  return f['return'] ? call({ method: 'onKeyUp', ...ev, keyStates }) : f;
+  return f['return'] && keyUp ? call({ method: 'onKeyUp', ...ev, keyStates }) : f;
 };
 const check = (ok: boolean, what: string): void => {
   if (!ok) throw new Error(`行為檢查失敗：${what}`);
@@ -401,6 +412,34 @@ async function smoke(): Promise<void> {
   const half = await shiftTap();
   check(half['compositionString'] === '', '只有半個注音時切英文：清掉組字');
   check(!(await press('KeyK', 'k')).eaten, '接著的英文直接放行');
+  await shiftTap();
+  // 快打：按 ㄋ → 按 Shift → 才放開 ㄋ → 放開 Shift，照樣切換並丟掉半個注音
+  await press('KeyS');
+  const roll = await shiftTap(false, 'KeyS');
+  check(roll['compositionString'] === '', 'Shift 按著時放開前一個注音鍵：照樣切換');
+  check(!(await press('KeyK', 'k')).eaten, '快打切換後英文直接放行');
+  await shiftTap();
+  // 遊戲：沒有 onKeyUp。切換在 filterKeyUp 就生效，下一個鍵清掉畫面上的半個注音後放行
+  await press('KeyS');
+  await shiftTap(false, undefined, false);
+  const g = await press('KeyK', 'k');
+  check(
+    g.eaten && g.last['compositionString'] === '' && g.last['return'] === false,
+    `遊戲裡切英文：下一個鍵清掉半個注音並放行（${JSON.stringify(g.last)}）`,
+  );
+  check(!(await press('KeyK', 'k')).eaten, '遊戲裡切英文後英文直接放行');
+  await shiftTap(false, undefined, false); // 沒在組字，不需要 onKeyUp
+  check((await press('KeyA')).eaten, '遊戲裡切回注音');
+  await press('Escape');
+  // 遊戲：已成字的組字中切英文，英文照樣併進組字區
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await shiftTap(false, undefined, false);
+  const ge = await press('KeyK', 'k');
+  check(
+    ge.eaten && [...String(ge.last['compositionString'])].length === 2,
+    '遊戲裡組字中切英文：英文併進組字區',
+  );
+  await press('Escape');
   await shiftTap();
   for (const c of ['KeyS', 'KeyU', 'Digit3', 'KeyC']) await press(c); // ㄋㄧˇ＋ㄏ
   const mixed = await shiftTap();
