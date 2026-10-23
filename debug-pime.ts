@@ -275,7 +275,7 @@ const press = async (
   }
   return { out, last, eaten: !!f['return'], filter: f };
 };
-// 單按 Shift：down 放行、up 攔下並在 onKeyUp 切換
+// 單按 Shift：down 放行；沒在組字時 up 也放行、在 filterKeyUp 切換，組字中 up 攔下並在 onKeyUp 切換
 // right：右 Shift（掃描碼 0x36）
 const shiftTap = async (right = false): Promise<Record<string, unknown>> => {
   const ev = {
@@ -328,7 +328,10 @@ async function smoke(): Promise<void> {
     return on(2) + on(3);
   };
   const toggles = async (right: boolean): Promise<boolean> => {
-    const r = !!(await shiftTap(right))['return'];
+    const t = await shiftTap(right);
+    const r = 'changeButton' in t;
+    // 沒在組字：Shift 放開要傳給程式（遊戲等程式給不了 onKeyUp 的 edit session）
+    if (r && t['return']) throw new Error('行為檢查失敗：沒在組字時 Shift 放開被攔下');
     if (r) await shiftTap(right); // 切回來，保持注音
     return r;
   };

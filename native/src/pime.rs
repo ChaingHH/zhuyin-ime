@@ -967,7 +967,15 @@ impl Backend {
                 let k = key_of(msg);
                 let toggle = k.vk as usize == VK_SHIFT && self.shift_alone;
                 self.shift_alone = false;
-                Some(toggle)
+                // 沒在組字：這裡就切換，Shift 放開照樣傳給程式。遊戲等程式常給不了 onKeyUp 要的
+                // 同步讀寫 edit session（libIME2 TextService::OnKeyUp），攔下來的話不會切換、程式還收不到放開。
+                // 組字中才攔下，到 onKeyUp 重畫組字區
+                if toggle && !self.composing() {
+                    self.flip_mode(&mut r);
+                    Some(false)
+                } else {
+                    Some(toggle)
+                }
             }
             "onKeyUp" => {
                 self.toggle(&mut r);
