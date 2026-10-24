@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
 import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
@@ -60,6 +60,7 @@ const keyOf = (code: string): [number, number] => {
     Comma: [0xbc, 0x2c],
     Period: [0xbe, 0x2e],
     Slash: [0xbf, 0x2f],
+    BracketLeft: [0xdb, 0x5b],
     Enter: [0x0d, 0x0d],
     Escape: [0x1b, 0x1b],
     ArrowDown: [0x28, 0],
@@ -371,8 +372,23 @@ async function smoke(): Promise<void> {
   check((await shiftMenu()) === '11', '兩個開關都勾回來');
   check((await toggles(false)) && (await toggles(true)), '恢復後左右 Shift 都切換');
 
-  // 標點：組字區空時直接輸出全形
-  check((await press('Comma', '<')).out === '，', 'Shift+, → ，');
+  // 標點：Shift 打半形，注音模式的 Ctrl＋原按鍵打全形；組字區空時直接輸出
+  const withMods = async (mods: number[], code: string, char?: string) => {
+    for (const m of mods) keyStates[m] = 0x80;
+    const r = await press(code, char);
+    for (const m of mods) keyStates[m] = 0;
+    return r;
+  };
+  check((await press('Comma', '<')).out === '<', 'Shift+, → <');
+  check((await withMods([0x11], 'Comma')).out === '，', 'Ctrl+, → ，');
+  check((await withMods([0x11, 0x10], 'BracketLeft')).out === '『', 'Ctrl+Shift+[ → 『');
+  check(!(await withMods([0x11], 'KeyC')).eaten, 'Ctrl+C 交給程式');
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c); // ㄋㄧˇ
+  await withMods([0x11], 'Period');
+  check((await press('Enter')).out.endsWith('。'), '組字中 Ctrl+. 插入 。');
+  await shiftTap(false);
+  check(!(await withMods([0x11], 'Comma')).eaten, '英文模式 Ctrl+, 交給程式');
+  await shiftTap(false);
   // Esc 取消組字
   await press('Digit1');
   check((await press('Escape')).last['compositionString'] === '', 'Esc 清空組字區');
@@ -390,6 +406,23 @@ async function smoke(): Promise<void> {
     `2 選第二候選 ${want}`,
   );
   check((await press('Enter')).out === want, 'Enter 送出選的字');
+  // 使用紀錄：選單打開 → 選字後送出寫一行（picks 有這次的選字）→ 清除刪掉檔案
+  const usageFile = join(tmpdir(), 'usage.jsonl');
+  rmSync(usageFile, { force: true });
+  noSession(await call({ method: 'onCommand', id: 7, type: 2 }), '選單：記錄使用情形');
+  check(readFileSync(configFile, 'utf8').includes('"usageLog": true'), 'config.json 寫入 usageLog');
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  await press('Digit2');
+  const logged = (await press("Enter")).out;
+  const rec = JSON.parse(readFileSync(usageFile, 'utf8').trim().split('\n').pop()!);
+  check(
+    rec.out === logged && rec.syl === "ㄋㄧˇ" && rec.picks.length === 1 && rec.picks[0].to === logged && rec.keys === 5,
+    `使用紀錄一行（${JSON.stringify(rec)}）`,
+  );
+  noSession(await call({ method: 'onCommand', id: 8, type: 2 }), '選單：清除使用紀錄');
+  check(!existsSync(usageFile), '清除使用紀錄刪掉檔案');
+  noSession(await call({ method: 'onCommand', id: 7, type: 2 }), '選單：關掉使用紀錄');
   // 組字中單按 Shift：不送出，切英文；英文併進組字區，空白整段送出；組字區空了就放行字母
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   const sw = await shiftTap();

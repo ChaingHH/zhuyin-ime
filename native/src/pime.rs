@@ -3,14 +3,14 @@
 //! init、onActivate／onDeactivate、filterKeyDown／onKeyDown／filterKeyUp／onKeyUp、onCommand、
 //! onKeyboardStatusChanged、onCompositionTerminated、close；回應帶 compositionString、
 //! compositionCursor、commitString、candidateList、showCandidates、candidateCursor、return。
-//! 按鍵行為照網頁測試台（packages/cli/web/index.html）：單按 Shift 切換注音／英文、Enter 送出、
+//! 按鍵行為（原本照已封存的網頁測試台）：單按 Shift 切換注音／英文、Enter 送出、
 //! ↓ 開選字視窗、數字選字、←→ 移游標、Esc 取消；沒在組字時編輯鍵交給應用程式；
-//! 組字中按 Ctrl／Alt 組合鍵（Ctrl+V…）先送出組字再交給應用程式。
+//! 組字中按 Ctrl／Alt 組合鍵（Ctrl+V…）先送出組字再交給應用程式；注音模式的 Ctrl＋標點鍵打全形標點（engine.rs ctrl_punct）。
 //!
 //! 記憶體跟著使用走（docs/MEMORY.md §6）：PIMELauncher 在第一次有 client 用到這個後端時才開行程，
 //! 之後不會關，行程結束 1 秒後還會自動重開。所以行程常駐、引擎不常駐：第一個要組字的按鍵才載入
 //! 引擎，閒置 ZHUYIN_IDLE_SECS 秒（預設 300）沒按鍵、或最後一個 client 停用時卸載。
-use crate::engine::{EngineState, ImeEngine, Mode};
+use crate::engine::{ctrl_punct, EngineState, ImeEngine, Mode};
 use crate::{decode, l3, learned_web, lexicon, lm, x2};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -80,8 +80,12 @@ const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 /// 右鍵選單：用瀏覽器開學習資料（learned.html）
 const ID_SHOW_LEARNED: i64 = 5;
-/// 右鍵選單：注音模式的標點也用半形（config.json 的 halfWidth）
-const ID_HALF_WIDTH: i64 = 6;
+// id 6 是舊版的「標點用半形」，不再用
+/// 右鍵選單：使用紀錄開關（config.json 的 usageLog）、刪掉紀錄檔
+const ID_USAGE_LOG: i64 = 7;
+const ID_CLEAR_USAGE: i64 = 8;
+/// 使用紀錄超過這個大小就丟掉舊的一半
+const USAGE_MAX_BYTES: u64 = 10 << 20;
 const LEARNED_HTML: &str = include_str!("learned.html");
 
 #[link(name = "shell32")]
@@ -213,6 +217,9 @@ struct Key {
     key: Option<String>,
     vk: u32,
     ctrl_alt: bool,
+    /// 只按著 Ctrl（沒有 Alt：Ctrl+Alt 是 AltGr）
+    ctrl: bool,
+    shift: bool,
     /// 這個 Shift 是右邊那顆
     right_shift: bool,
 }
@@ -233,6 +240,8 @@ fn key_of(msg: &Value) -> Key {
             .flatten(),
         vk,
         ctrl_alt: down(VK_CONTROL) || down(VK_MENU),
+        ctrl: down(VK_CONTROL) && !down(VK_MENU),
+        shift: down(VK_SHIFT),
         right_shift: msg["scanCode"].as_u64() == Some(SCAN_RSHIFT) || down(VK_RSHIFT),
     }
 }
@@ -304,8 +313,8 @@ pub struct Backend {
     stale: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
     shift_toggle: &'static str,
-    /// 注音模式的標點用半形：config.json 的 "halfWidth"
-    half_width: bool,
+    /// 使用紀錄（config.json 的 "usageLog"，預設關）：每次送出往設定檔旁的 usage.jsonl 加一行
+    usage: bool,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
     /// 這個鍵（filterKeyDown 決定）只是展開／收回表格，onKeyDown 不交給引擎
@@ -345,7 +354,7 @@ impl Backend {
             shift_alone: false,
             stale: false,
             shift_toggle: "both",
-            half_width: false,
+            usage: false,
             table: false,
             layout_key: false,
             sent_cols: HashMap::new(),
@@ -377,15 +386,15 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、halfWidth、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
         let (l, r) = shift_sides(s.get("shiftToggle").and_then(Value::as_str).unwrap_or(""));
         self.shift_toggle = shift_name(l, r);
-        self.half_width = s.get("halfWidth").and_then(Value::as_bool).unwrap_or(false);
+        self.usage = s.get("usageLog").and_then(Value::as_bool).unwrap_or(false);
         if let Some(e) = self.eng.as_mut() {
-            e.half_width = self.half_width;
+            e.usage = self.usage;
         }
         if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = secs(secs_v, 300.0);
@@ -616,6 +625,46 @@ impl Backend {
         }
     }
 
+    /// 使用紀錄檔：設定檔旁的 usage.jsonl（%APPDATA%\PIME\zhuyin\usage.jsonl）
+    fn usage_file(&self) -> Option<PathBuf> {
+        Some(self.cfg.settings_file.as_ref()?.with_file_name("usage.jsonl"))
+    }
+
+    /// 把引擎累積的使用紀錄附加到檔案；超過 USAGE_MAX_BYTES 就只留後一半（暫存檔＋改名）
+    fn flush_usage(&mut self) {
+        let Some(lines) = self
+            .eng
+            .as_mut()
+            .filter(|e| !e.usage_lines.is_empty())
+            .map(|e| std::mem::take(&mut e.usage_lines))
+        else {
+            return;
+        };
+        let Some(f) = self.usage_file() else {
+            return;
+        };
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let ok = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&f)
+            .and_then(|mut h| h.write_all(text.as_bytes()));
+        if ok.is_err() {
+            eprintln!("[pime] 無法寫入 {}", f.display());
+            return;
+        }
+        if std::fs::metadata(&f).is_ok_and(|m| m.len() > USAGE_MAX_BYTES) {
+            if let Ok(all) = std::fs::read_to_string(&f) {
+                let half = all.len() / 2;
+                let cut = all[half..].find('\n').map_or(all.len(), |i| half + i + 1);
+                let tmp = f.with_extension("jsonl.tmp");
+                if std::fs::write(&tmp, &all[cut..]).is_ok() {
+                    let _ = std::fs::rename(&tmp, &f);
+                }
+            }
+        }
+    }
+
     /// 需要時才載入引擎
     fn engine(&mut self) -> Option<&mut ImeEngine> {
         if self.eng.is_none() && !self.gave_up() {
@@ -624,7 +673,7 @@ impl Backend {
             match r {
                 Ok(Ok((mut eng, save_ok))) => {
                     eng.mode = self.mode;
-                    eng.half_width = self.half_width;
+                    eng.usage = self.usage;
                     self.eng = Some(eng);
                     self.save_ok = save_ok;
                     eprintln!("[pime] 載入引擎 {:?}", t.elapsed());
@@ -802,8 +851,15 @@ impl Backend {
         }
         !self.gave_up()
             && self.mode == Mode::Zhuyin
-            && !k.ctrl_alt
-            && k.code.as_deref().is_some_and(starts_composition)
+            && (self.ctrl_punct(k).is_some()
+                || !k.ctrl_alt && k.code.as_deref().is_some_and(starts_composition))
+    }
+
+    /// 注音模式的 Ctrl＋標點鍵 → 全形標點；英文模式的 Ctrl 組合照常交給應用程式
+    fn ctrl_punct(&self, k: &Key) -> Option<&'static str> {
+        (self.mode == Mode::Zhuyin && k.ctrl)
+            .then(|| ctrl_punct(k.code.as_deref()?, k.shift))
+            .flatten()
     }
 
     fn on_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
@@ -813,6 +869,18 @@ impl Backend {
             if !self.composing() && !self.filter_key_down(k, r) {
                 return false;
             }
+        }
+        if let Some(p) = self.ctrl_punct(k) {
+            let cols = self.cols();
+            let Some(eng) = self.engine() else {
+                return false;
+            };
+            let st = eng.on_punct(p);
+            if let Some(t) = &st.text {
+                Self::commit_text(r, t);
+            }
+            Self::show(r, &st, cols);
+            return true;
         }
         // Ctrl／Alt 組合鍵（Ctrl+V 貼上、Ctrl+Z、Ctrl+S…）：先送出組字（同 Enter），按鍵交給應用程式。
         // DLL 先套用回應（commitString）再看 return，所以應用程式收到按鍵時字已經在文件裡
@@ -1013,12 +1081,17 @@ impl Backend {
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     Some(ID_SHOW_LEARNED) => self.show_learned(),
-                    Some(ID_HALF_WIDTH) => {
-                        self.half_width = !self.half_width;
+                    Some(ID_USAGE_LOG) => {
+                        self.usage = !self.usage;
                         if let Some(e) = self.eng.as_mut() {
-                            e.half_width = self.half_width;
+                            e.usage = self.usage;
                         }
-                        self.write_setting("halfWidth", json!(self.half_width));
+                        self.write_setting("usageLog", json!(self.usage));
+                    }
+                    Some(ID_CLEAR_USAGE) => {
+                        if let Some(f) = self.usage_file() {
+                            let _ = std::fs::remove_file(f);
+                        }
                     }
                     _ => {}
                 }
@@ -1036,7 +1109,8 @@ impl Backend {
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
                         {"id": 0, "text": ""},
-                        {"id": ID_HALF_WIDTH, "text": "標點用半形", "checked": self.half_width},
+                        {"id": ID_USAGE_LOG, "text": "記錄使用情形（只存在本機）", "checked": self.usage},
+                        {"id": ID_CLEAR_USAGE, "text": "清除使用紀錄"},
                     ]),
                 );
                 None
@@ -1232,6 +1306,7 @@ fn respond(be: &mut Backend, line: &str) -> Option<String> {
             r.insert("seqNum".into(), msg["seqNum"].clone());
             r
         });
+    be.flush_usage();
     Some(format!("PIME_MSG|{client}|{}", Value::Object(reply)))
 }
 

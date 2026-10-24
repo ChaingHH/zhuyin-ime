@@ -4,6 +4,7 @@ use crate::decode::{is_literal, DecodeOptions, DecodePath, Decoder, FixedSpan};
 use crate::l3::{Channel, Hypothesis};
 use crate::slots::CompositionBuffer;
 use crate::x2::UserAdapter;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 const UNK: &str = "\u{25A1}";
@@ -23,25 +24,34 @@ fn edge_ok(w: &str) -> bool {
     !bad(w.chars().next()) && !bad(w.chars().last())
 }
 
-/// 注音模式的全形標點，鍵為 KeyboardEvent.key（美式鍵盤）
-const PUNCT: [(&str, &str); 14] = [
-    ("<", "，"),
-    (">", "。"),
-    ("?", "？"),
-    (":", "："),
-    ("\"", "；"),
-    ("!", "！"),
-    ("[", "「"),
-    ("]", "」"),
-    ("{", "『"),
-    ("}", "』"),
-    ("(", "（"),
-    (")", "）"),
-    ("\\", "、"),
-    ("~", "～"),
+/// 注音模式的全形標點：Ctrl＋原按鍵（KeyboardEvent.code，美式鍵盤）。不加 Ctrl 打出半形（SHIFTED 或交給應用程式）。
+/// 『』沒有不加 Shift 的鍵，用 Ctrl+Shift+[ ]
+const CTRL_PUNCT: [(&str, &str); 12] = [
+    ("Comma", "，"),
+    ("Period", "。"),
+    ("Slash", "？"),
+    ("Semicolon", "："),
+    ("Quote", "；"),
+    ("Digit1", "！"),
+    ("BracketLeft", "「"),
+    ("BracketRight", "」"),
+    ("Digit9", "（"),
+    ("Digit0", "）"),
+    ("Backslash", "、"),
+    ("Backquote", "～"),
 ];
-/// 美式鍵盤要按 Shift 才打得出的符號：不在 PUNCT（或設定只用半形）就原樣輸出，不必切英文（同 engine.ts）
+/// 美式鍵盤要按 Shift 才打得出的符號：注音模式原樣（半形）輸出，不必切英文
 const SHIFTED: &str = "!@#$%^&*()_+{}|:\"<>?~";
+
+/// Ctrl（+Shift）＋code 對應的全形標點
+pub fn ctrl_punct(code: &str, shift: bool) -> Option<&'static str> {
+    match (code, shift) {
+        ("BracketLeft", true) => Some("『"),
+        ("BracketRight", true) => Some("』"),
+        (_, true) => None,
+        _ => CTRL_PUNCT.iter().find(|(c, _)| *c == code).map(|(_, v)| *v),
+    }
+}
 
 pub struct MenuView {
     pub items: Vec<String>,
@@ -164,8 +174,6 @@ pub struct ImeEngine {
     pub adapter: Option<UserAdapter>,
     pub channel: Option<Channel>,
     pub mode: Mode,
-    /// 注音模式的標點也用半形（Shift+, 打出 , 而不是 ，）
-    pub half_width: bool,
     /// X2 的時鐘（毫秒）；None＝系統時間
     pub clock: Option<f64>,
     last: Vec<DecodePath>,
@@ -174,6 +182,12 @@ pub struct ImeEngine {
     menu: Option<Menu>,
     /// 選字視窗一頁幾個（預設 MENU_PAGE；PIME 表格展開時是好幾行）
     page_size: usize,
+    /// 使用紀錄：開著時每次送出往 usage_lines 加一行 JSON（寫檔由宿主做，見 usage_record）
+    pub usage: bool,
+    pub usage_lines: Vec<String>,
+    /// 這次組字按了幾個鍵、幾次退格（使用紀錄用）
+    keys: usize,
+    backspaces: usize,
 }
 
 impl ImeEngine {
@@ -184,13 +198,16 @@ impl ImeEngine {
             adapter,
             channel: None,
             mode: Mode::Zhuyin,
-            half_width: false,
             clock: None,
             last: vec![],
             last_seq: vec![],
             fixed: vec![],
             menu: None,
             page_size: MENU_PAGE,
+            usage: false,
+            usage_lines: vec![],
+            keys: 0,
+            backspaces: 0,
         }
     }
 
@@ -218,6 +235,10 @@ impl ImeEngine {
     }
 
     fn decode_with_adapter(&self) -> Vec<DecodePath> {
+        self.decode_fixed(&self.fixed)
+    }
+
+    fn decode_fixed(&self, fixed: &[FixedSpan]) -> Vec<DecodePath> {
         let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
         let at = self.now();
@@ -241,7 +262,7 @@ impl ImeEngine {
                 n_best: 4,
                 modifier: adapt.map(|_| &modifier as &dyn Fn(&str, usize, usize) -> f64),
                 alternatives: alts.as_deref(),
-                fixed: &self.fixed,
+                fixed,
             },
         );
         // 同樣的字、不同斷詞只留分數最高的那條
@@ -522,6 +543,8 @@ impl ImeEngine {
 
     /// 一次按鍵。code＝KeyboardEvent.code，key＝KeyboardEvent.key（標點、英文模式用）
     pub fn on_key(&mut self, code: &str, key: Option<&str>) -> EngineState {
+        self.keys += 1;
+        self.backspaces += (code == "Backspace") as usize;
         if self.menu.is_some() {
             return self.on_menu_key(code);
         }
@@ -550,10 +573,7 @@ impl ImeEngine {
             self.clear();
             return self.state(true);
         }
-        let full = key
-            .filter(|_| !self.half_width)
-            .and_then(|k| PUNCT.iter().find(|(p, _)| *p == k).map(|(_, v)| *v));
-        let punct = full.or(key.filter(|k| k.len() == 1 && SHIFTED.contains(*k)));
+        let punct = key.filter(|k| k.len() == 1 && SHIFTED.contains(*k));
         // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
         let numpad = code
             .strip_prefix("Numpad")
@@ -584,6 +604,21 @@ impl ImeEngine {
         self.after_edit(legal, before)
     }
 
+    /// 直接打一個標點（Ctrl 組合的全形標點）：組字區空就輸出，否則插在游標處；
+    /// 選字視窗開著或有打到一半的注音時不收（同 on_key 的標點）
+    pub fn on_punct(&mut self, lit: &str) -> EngineState {
+        self.keys += 1;
+        if self.menu.is_some() || !self.comp.pending_display().is_empty() {
+            return self.state(true);
+        }
+        if self.comp.is_empty() {
+            return Self::direct(Some(lit.to_string()));
+        }
+        let before = self.cursor();
+        let ok = self.comp.push_literal(lit);
+        self.after_edit(ok, before)
+    }
+
     /// 組字區改過之後：已完成音節序列有變就平移選字、重解碼。before：編輯前的游標
     fn after_edit(&mut self, legal: bool, before: usize) -> EngineState {
         let seq = self.comp.sequence().to_vec();
@@ -611,6 +646,12 @@ impl ImeEngine {
         let chosen = candidates.get(k.min(candidates.len().saturating_sub(1)));
         let text = chosen.map_or(String::new(), |p| p.text());
         let at = self.now();
+        if self.usage {
+            if let Some(chosen) = chosen {
+                let line = self.usage_record(chosen, at);
+                self.usage_lines.push(line);
+            }
+        }
         if let (Some(adapter), Some(chosen)) = (self.adapter.as_mut().filter(|a| a.enabled), chosen)
         {
             // 選了注音本身（清單最後一項）的段落：和原樣字元一樣不學，免得注音變成使用者詞（同 TS）
@@ -723,8 +764,61 @@ impl ImeEngine {
         text.replace(UNK, "")
     }
 
+    /// 使用紀錄的一行（每次送出）：
+    /// t 時間（毫秒）、syl 實際打出的音節（打錯照記）、top1 沒選字時的第一名、out 送出的字、
+    /// picks 用 ↓ 改過的段落（pos／len 是音節位置，from 是 top1 在那段的字）、
+    /// l3 被 L3 改掉讀音的音節 [觀察, 採用]、bs 退格次數、keys 按鍵數
+    fn usage_record(&self, chosen: &DecodePath, at: f64) -> String {
+        let seq = self.comp.sequence();
+        // 有選字時另外解碼一次（不帶選字）才知道原本的第一名
+        let top = (!self.fixed.is_empty())
+            .then(|| self.decode_fixed(&[]).into_iter().next())
+            .flatten();
+        let top = top.as_ref().unwrap_or(chosen);
+        let span_text = |p: &DecodePath, pos: usize, len: usize| {
+            let mut at = 0;
+            let mut out = String::new();
+            for b in &p.breakdown {
+                let n = b.reading.len();
+                if at < pos + len && at + n > pos {
+                    out += &b.word;
+                }
+                at += n;
+            }
+            out
+        };
+        let picks: Vec<Value> = self
+            .fixed
+            .iter()
+            .map(|f| json!({"pos": f.pos, "len": f.len, "from": span_text(top, f.pos, f.len), "to": f.word}))
+            .collect();
+        let mut l3 = vec![];
+        let mut pos = 0;
+        for b in &chosen.breakdown {
+            for (j, r) in b.reading.iter().enumerate() {
+                if seq.get(pos + j).is_some_and(|o| o != r) {
+                    l3.push(json!([seq[pos + j], r]));
+                }
+            }
+            pos += b.reading.len();
+        }
+        json!({
+            "t": at as u64,
+            "syl": seq.join(" "),
+            "top1": top.text().replace(UNK, ""),
+            "out": chosen.text().replace(UNK, ""),
+            "picks": picks,
+            "l3": l3,
+            "bs": self.backspaces,
+            "keys": self.keys,
+        })
+        .to_string()
+    }
+
     /// 清空組字區，不送出、不學習
     pub fn clear(&mut self) {
+        self.keys = 0;
+        self.backspaces = 0;
         self.comp.reset();
         self.last.clear();
         self.last_seq.clear();

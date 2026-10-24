@@ -110,28 +110,6 @@ export interface LoadOptions {
   mph?: boolean;
 }
 
-/** 剪枝／量化設定的環境變數；runtime 與 pack.ts 共用，有設任何一個時 runtime 改讀 tsv。 */
-export const LM_ENV_KEYS = [
-  'ZHUYIN_LM_MIN_BI',
-  'ZHUYIN_LM_MIN_TRI',
-  'ZHUYIN_LM_QUANT',
-  'ZHUYIN_LM_FP',
-  'ZHUYIN_LM_LOAD',
-  'ZHUYIN_LM_MPH',
-] as const;
-
-/** 預設 bi>=2 tri>=4 q=8、最小完美雜湊（docs/MEMORY.md：大表 109MB、句 −0.1／0、比開放定址快）。fp／load 只在 MPH=0 時有作用。 */
-export function lmOptionsFromEnv(env: Record<string, string | undefined>): LoadOptions {
-  return {
-    minBi: Number(env['ZHUYIN_LM_MIN_BI'] ?? 2),
-    minTri: Number(env['ZHUYIN_LM_MIN_TRI'] ?? 4),
-    quant: Number(env['ZHUYIN_LM_QUANT'] ?? 8) as 0 | QuantBits,
-    fp: Number(env['ZHUYIN_LM_FP'] ?? 40) as Fingerprint,
-    load: Number(env['ZHUYIN_LM_LOAD'] ?? 0.75),
-    mph: (env['ZHUYIN_LM_MPH'] ?? '1') === '1',
-  };
-}
-
 /**
  * 一筆 n-gram 計數併入索引。order：1=uni、2=bi（"w1 w2"）、3=tri（"w1 w2\tw"）。
  * 依賴 .tsv 段落順序：同一專家的二元先於三元。

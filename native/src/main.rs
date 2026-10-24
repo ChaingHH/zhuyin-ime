@@ -4,12 +4,16 @@
 //!                                           一設定一行程，用環境變數換設定：ZHUYIN_GAMMA、ZHUYIN_POLY、ZHUYIN_POLY_MINOR、
 //!                                           ZHUYIN_BEAM、ZHUYIN_NBEST（預設 4）；ZHUYIN_LM＝模型檔（預設 data/models/lm.bo.bin）；
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
+//!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個）；
 //!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
 //!   zhuyin-native keys <out>                L1/L2：評測句的大千按鍵 → 音節序列
 //!   zhuyin-native l3 <in> <out> <s>         L3：解碼 debug-native-parity.ts 倒出的有錯輸入
 //!   zhuyin-native replay <events> <out> [adapter-out]
 //!                                           引擎：重播按鍵（ZHUYIN_CLOCK、ZHUYIN_ADAPTER、ZHUYIN_L3）
+//!   zhuyin-native usage <usage.jsonl> [eval-out]
+//!                                           看使用紀錄（PIME 右鍵選單「記錄使用情形」）：錯誤率、最常改的字、L3 更正；
+//!                                           eval-out 寫成評測集格式（音節照實際打的），ZHUYIN_EVAL=<檔> eval 可以跑
 //!   zhuyin-native pime                      PIME 後端（stdin/stdout，見 pime.rs）。資料預設在執行檔旁的 data\；
 //!                                           學習存 %APPDATA%\PIME\zhuyin\adapter.json（ZHUYIN_ADAPTER＝路徑或 off）；
 //!                                           設定檔 %APPDATA%\PIME\zhuyin\config.json（ZHUYIN_CONFIG＝路徑或 off，見 pime.rs）；
@@ -29,7 +33,7 @@ mod pime;
 mod slots;
 mod x2;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 #[repr(C)]
@@ -212,6 +216,61 @@ fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
     out
 }
 
+/// 使用紀錄的統計（格式見 engine.rs usage_record）
+fn usage_report(file: &str, eval_out: Option<&str>) {
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
+    let recs: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let (mut chars, mut keys, mut bs, mut picks, mut right) = (0, 0, 0, 0, 0);
+    let mut fixes: HashMap<String, usize> = HashMap::new();
+    let mut l3: HashMap<String, usize> = HashMap::new();
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
+    for r in &recs {
+        chars += s(&r["out"]).chars().count();
+        keys += r["keys"].as_u64().unwrap_or(0);
+        bs += r["bs"].as_u64().unwrap_or(0);
+        right += (r["top1"] == r["out"]) as usize;
+        for p in r["picks"].as_array().into_iter().flatten() {
+            picks += 1;
+            *fixes.entry(format!("{} → {}", s(&p["from"]), s(&p["to"]))).or_default() += 1;
+        }
+        for c in r["l3"].as_array().into_iter().flatten() {
+            *l3.entry(format!("{} → {}", s(&c[0]), s(&c[1]))).or_default() += 1;
+        }
+    }
+    let pct = |a: f64, b: f64| 100.0 * a / b.max(1.0);
+    println!(
+        "{} 次送出、{chars} 字、{keys} 鍵\n不用改就對 {:.1}%\n選字修正 {picks} 次（每 100 字 {:.2} 次）\n退格每 100 鍵 {:.1} 次\nL3 更正 {} 個音節",
+        recs.len(),
+        pct(right as f64, recs.len() as f64),
+        pct(picks as f64, chars as f64),
+        pct(bs as f64, keys as f64),
+        l3.values().sum::<usize>(),
+    );
+    let top = |m: HashMap<String, usize>, title: &str| {
+        let mut v: Vec<_> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        println!("\n{title}");
+        for (k, n) in v.iter().take(20) {
+            println!("  {n}\t{k}");
+        }
+    };
+    top(fixes, "最常改的字（原本 → 改成）");
+    top(l3, "L3 更正（打的 → 採用）");
+    if let Some(out) = eval_out {
+        // 評測集格式：第一行中繼資料，之後每句 text＋syllables
+        let mut lines = vec![serde_json::json!({"source": file}).to_string()];
+        for r in &recs {
+            let syl: Vec<&str> = r["syl"].as_str().unwrap_or("").split(' ').collect();
+            lines.push(serde_json::json!({"text": r["out"], "syllables": syl}).to_string());
+        }
+        std::fs::write(out, lines.join("\n") + "\n").unwrap();
+        eprintln!("{} 句 -> {out}", recs.len());
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let is_pime = args.get(1).map(String::as_str) == Some("pime");
@@ -264,6 +323,10 @@ fn main() {
                     .map(|d| std::path::Path::new(&d).join("PIME/zhuyin/config.json")),
             },
         }));
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("usage") {
+        usage_report(&args[2], args.get(3).map(String::as_str));
         return;
     }
     let a: f64 = std::env::var("ZHUYIN_A").map_or(1.0, |s| s.parse().unwrap());
@@ -319,8 +382,10 @@ fn main() {
                 }
             });
             let mut fails = vec![];
-            let files = ["eval/colloquial.jsonl", "eval/written.jsonl", "eval/mixed.jsonl"];
-            for f in files {
+            let files = std::env::var("ZHUYIN_EVAL").unwrap_or_else(|_| {
+                "eval/colloquial.jsonl,eval/written.jsonl,eval/mixed.jsonl".into()
+            });
+            for f in files.split(',') {
                 let samples = load_samples(f);
                 let n = samples.len();
                 // 句準分 dev（偶數句）／test（奇數句）
