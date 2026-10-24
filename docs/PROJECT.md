@@ -211,7 +211,8 @@ Score = Σ_詞 [ a·logP_word(w | 前兩詞)
 - 標點：Shift 組合打出半形（`SHIFTED`）；注音模式的 Ctrl＋原按鍵打全形（`ctrl_punct`，例如 Ctrl+, → ，、Ctrl+[ → 「、Ctrl+Shift+[ → 『）。英文模式的 Ctrl 組合交給應用程式。
 - ↓ 開選字視窗，選的詞成為之後解碼的固定段（`fixed`）。
 - `commit(k)`：送出第 k 個候選，觸發 X2 學習。X2 學的是 `breakdown.reading`（L3 更正後的讀音），不是打錯的觀察讀音。
-- 使用紀錄（右鍵選單「記錄使用情形」，預設關）：每次送出往 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行，欄位見 `engine.rs` `usage_record`；超過 10MB 丟掉舊的一半。`zhuyin-native usage <檔>` 統計。
+- 學習資料頁（右鍵選單「學習資料與使用紀錄…」，`learned_web.rs`、`learned.html`）：刪除學到的詞、學習開關（關掉時加分歸零、使用者詞與挖詞從解碼器拿掉）、使用紀錄開關與統計（`usage.rs`）、全部清除。
+- 使用紀錄（學習資料頁的開關，預設關）：每次送出往 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行，欄位見 `engine.rs` `usage_record`；超過 10MB 丟掉舊的一半。`zhuyin-native usage <檔>` 統計。
 - PIME 協定的限制（不能停 PIMELauncher、每則請求都要回 seqNum 等）見 CLAUDE.md。
 
 **`noise.rs`**：在按鍵層級注入錯誤（鄰鍵 60%、漏按 20%、多按 20%；認知錯誤中模糊音 70%、聲調 30%），再走真正的 L2，得到「打錯後的音節序列」。用固定種子的 mulberry32 亂數，可重現。

@@ -1,5 +1,6 @@
 //! 學習資料頁的本機網頁服務（pime.rs show_learned）。瀏覽器開檔案沒辦法回頭改後端的資料，
-//! 所以右鍵選單「查看學習資料」開 http://127.0.0.1:<port>/?t=<token>：每次載入都拿最新的資料，頁面上的刪除送 POST /delete。
+//! 所以右鍵選單「學習資料與使用紀錄」開 http://127.0.0.1:<port>/?t=<token>：每次載入都拿最新的資料，頁面上的刪除送 POST /delete，
+//! 開關與清除送 POST /action。
 //! 資料與刪除都交給主迴圈處理（引擎、學習資料只在主執行緒），這裡只收發 HTTP。
 //! 安全：只綁 127.0.0.1；每個請求都要帶隨機 token（128 bit，OS 亂數）；Host 必須是 127.0.0.1:<port>
 //! （擋 DNS rebinding）；POST 的 Origin 必須是這個頁面自己（擋別的網頁送表單）。
@@ -34,6 +35,8 @@ pub enum WebReq {
     Page,
     /// 刪除：{"kind": "phrase"|"seq"|"global", "word": …, "reading": …}；回 JSON
     Delete(serde_json::Value),
+    /// 開關與清除：{"op": "learning"|"usage", "on": bool}、{"op": "clearUsage"|"clearAll"}；回 JSON
+    Action(serde_json::Value),
 }
 
 /// 交給主迴圈的請求；主迴圈把回應送回 reply
@@ -193,7 +196,7 @@ fn handle(
         ("POST", "/close") if same_origin => {
             respond(&mut s, "200 OK", "text/plain", "ok").map(|_| Event::Close)
         }
-        ("POST", "/delete") => {
+        ("POST", "/delete" | "/action") => {
             if !same_origin {
                 return respond(&mut s, "403 Forbidden", "text/plain", "bad origin")
                     .map(|_| Event::Other);
@@ -208,7 +211,12 @@ fn handle(
                 return respond(&mut s, "400 Bad Request", "text/plain", "bad json")
                     .map(|_| Event::Other);
             };
-            match ask(WebReq::Delete(v)) {
+            let req = if path == "/delete" {
+                WebReq::Delete(v)
+            } else {
+                WebReq::Action(v)
+            };
+            match ask(req) {
                 Some(j) => respond(&mut s, "200 OK", "application/json", &j),
                 None => respond(
                     &mut s,

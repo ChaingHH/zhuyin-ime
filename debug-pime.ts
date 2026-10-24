@@ -406,23 +406,26 @@ async function smoke(): Promise<void> {
     `2 選第二候選 ${want}`,
   );
   check((await press('Enter')).out === want, 'Enter 送出選的字');
-  // 使用紀錄：選單打開 → 選字後送出寫一行（picks 有這次的選字）→ 清除刪掉檔案
+  // 使用紀錄（開關與清除在學習資料頁，見 debug-learned-web.ts）：設定檔打開 → 選字後送出寫一行（picks 有這次的選字）
   const usageFile = join(tmpdir(), 'usage.jsonl');
   rmSync(usageFile, { force: true });
-  noSession(await call({ method: 'onCommand', id: 7, type: 2 }), '選單：記錄使用情形');
-  check(readFileSync(configFile, 'utf8').includes('"usageLog": true'), 'config.json 寫入 usageLog');
+  const setUsage = async (on: boolean) => {
+    const cfg = JSON.parse(readFileSync(configFile, 'utf8'));
+    writeFileSync(configFile, JSON.stringify({ ...cfg, usageLog: on }));
+    await call({ method: 'onActivate', isKeyboardOpen: true });
+  };
+  await setUsage(true);
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   await press('ArrowDown');
   await press('Digit2');
-  const logged = (await press("Enter")).out;
+  const logged = (await press('Enter')).out;
   const rec = JSON.parse(readFileSync(usageFile, 'utf8').trim().split('\n').pop()!);
   check(
-    rec.out === logged && rec.syl === "ㄋㄧˇ" && rec.picks.length === 1 && rec.picks[0].to === logged && rec.keys === 5,
+    rec.out === logged && rec.syl === 'ㄋㄧˇ' && rec.picks.length === 1 && rec.picks[0].to === logged && rec.keys === 5,
     `使用紀錄一行（${JSON.stringify(rec)}）`,
   );
-  noSession(await call({ method: 'onCommand', id: 8, type: 2 }), '選單：清除使用紀錄');
-  check(!existsSync(usageFile), '清除使用紀錄刪掉檔案');
-  noSession(await call({ method: 'onCommand', id: 7, type: 2 }), '選單：關掉使用紀錄');
+  await setUsage(false);
+  rmSync(usageFile, { force: true });
   // 組字中單按 Shift：不送出，切英文；英文併進組字區，空白整段送出；組字區空了就放行字母
   for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
   const sw = await shiftTap();

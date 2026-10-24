@@ -3,7 +3,7 @@
 // 從右鍵選單開學習資料頁，檢查安全限制（token、Host、Origin），刪掉這個詞，再打一次確認學習沒了、檔案也存了。
 //   ZHUYIN_DATA=data npx tsx debug-learned-web.ts
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -140,6 +140,36 @@ check(!(await http('GET', url)).text.includes('"狀態欄"'), '重新整理後�
 const saved = readFileSync(adapterFile, 'utf8');
 check(!saved.includes('"狀態欄"'), 'adapter.json 已存檔、沒有這個詞');
 check((await typeZt()) === before, `刪掉後打回學習前的樣子（${before}）`);
+
+// 開關與清除（POST /action）：學習關掉＝已學到的也不用，打開就回來；使用紀錄；全部清除
+const act = (o: Record<string, unknown>, headers: Record<string, string> = { Origin: origin }) =>
+  http('POST', `${origin}/action?t=${token}`, { 'Content-Type': 'application/json', ...headers }, JSON.stringify(o));
+const actOk = async (o: Record<string, unknown>) => JSON.parse((await act(o)).text).ok === true;
+check((await act({ op: 'usage', on: true }, {})).status === 403, '沒有 Origin 的 action 拒絕');
+const relearn = async () => {
+  for (const c of ZT) await press(c);
+  await press('ArrowDown');
+  await press('Digit3');
+  await press('Enter');
+};
+await relearn();
+check((await typeZt()) === '狀態欄', '再學一次「狀態欄」');
+check(await actOk({ op: 'learning', on: false }), '關掉學習');
+check(readFileSync(join(dir, 'config.json'), 'utf8').includes('"learning": false'), 'config.json 寫入 learning: false');
+check((await typeZt()) === before, `學習關掉後已學到的不用（${before}）`);
+check(await actOk({ op: 'learning', on: true }), '打開學習');
+check((await typeZt()) === '狀態欄', '學習打開後「狀態欄」回來');
+check(await actOk({ op: 'usage', on: true }), '打開使用紀錄');
+await typeZt();
+const usageFile = join(dir, 'usage.jsonl');
+check(existsSync(usageFile), '送出後寫出 usage.jsonl');
+check((await http('GET', url)).text.includes('"commits":1'), '頁面顯示使用紀錄統計');
+await http('POST', `${origin}/close?t=${token}`, { Origin: origin }); // 這次 GET 算一個頁面，關掉，下面的頁面數才對
+check(await actOk({ op: 'clearAll' }), '全部清除');
+check(!existsSync(usageFile), '全部清除刪掉使用紀錄');
+check(!readFileSync(adapterFile, 'utf8').includes('"狀態欄"'), '全部清除後 adapter.json 沒有學到的詞');
+check((await typeZt()) === before, '全部清除後打回學習前的樣子');
+check(await actOk({ op: 'usage', on: false }), '關掉使用紀錄');
 
 // 關分頁就停：頁面 pagehide 送 POST /close；開著的頁面數歸零、3 秒內沒有新的頁面就停。上面 GET 過兩次頁面＝兩個頁面
 const close = () => http('POST', `${origin}/close?t=${token}`, { Origin: origin });

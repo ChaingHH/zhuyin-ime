@@ -1,12 +1,13 @@
 <!doctype html>
-<!-- 右鍵選單「查看學習資料」開的頁面（pime.rs show_learned）。後端把學習資料換進下面的 DATA、
-     本機網頁服務的 token 換進 TOKEN（learned_web.rs），刪除送 POST /delete。
+<!-- 右鍵選單「學習資料與使用紀錄」開的頁面（pime.rs show_learned）。後端把學習資料換進下面的 DATA、
+     開關狀態與使用紀錄統計換進 STATE、本機網頁服務的 token 換進 TOKEN（learned_web.rs）；
+     刪除送 POST /delete，開關與清除送 POST /action。
      服務開不起來時是唯讀的檔案版（TOKEN 是空字串，不顯示刪除鈕）。 -->
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>注音學習資料</title>
+<title>學習資料與使用紀錄</title>
 <style>
   :root {
     --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #2563eb; --bar: #dbeafe;
@@ -45,12 +46,37 @@
   td.act button:disabled { opacity: .5; cursor: default; }
   .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 8px 16px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.on { opacity: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  .card h2 { font-size: 16px; margin: 0 0 6px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .card p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+  .card ol { margin: 6px 0 0; padding-left: 20px; font-size: 14px; }
+  label.sw { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: normal; cursor: pointer; }
+  label.sw input { width: 18px; height: 18px; accent-color: var(--accent); }
+  button.danger { font: inherit; font-size: 13px; border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 4px 12px; border-radius: 5px; cursor: pointer; }
+  button.danger:hover { border-color: #dc2626; color: #dc2626; }
+  .clearall { margin: 0 0 24px; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+  h2.sec { font-size: 18px; margin: 8px 0 12px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>注音學習資料</h1>
+  <h1>學習資料與使用紀錄</h1>
   <p class="sub" id="sub"></p>
+  <div class="cards">
+    <section class="card">
+      <h2>學習 <label class="sw"><input type="checkbox" id="learning"> 開啟</label></h2>
+      <p>記住你選過的字詞、常打的詞，之後優先出現。資料就是下面的列表。</p>
+      <p id="learningNote">關掉時不學新的，已學到的也暫停使用；資料保留，打開就恢復。</p>
+    </section>
+    <section class="card">
+      <h2>使用紀錄 <label class="sw"><input type="checkbox" id="usage"> 開啟</label></h2>
+      <p>每次送出記一行：打的注音、原本猜的字、送出的字、改過的段落。用來找出實際打字時錯在哪裡，不影響選字。</p>
+      <div id="usageInfo"></div>
+    </section>
+  </div>
+  <div class="clearall"><button class="danger" id="clearAll">全部清除</button><span>刪掉學習資料和使用紀錄（只存在這台電腦，不會上傳）</span></div>
+  <h2 class="sec">學到的字詞</h2>
   <div class="stats" id="stats"></div>
   <div class="bar">
     <div class="tabs" role="tablist" id="tabs"></div>
@@ -62,6 +88,7 @@
 <div class="toast" id="toast" role="status"></div>
 <script>
 const DATA = /*DATA*/null;
+const STATE = /*STATE*/null;
 const TOKEN = /*TOKEN*/"";
 const d = DATA || {};
 const fmt = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { hour12: false }) : '');
@@ -187,6 +214,83 @@ document.getElementById('t').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-i]');
   if (b) del(Number(b.dataset.i), b);
 });
+// 開關與清除（POST /action）。唯讀快照（沒有 TOKEN）只顯示狀態
+const st = STATE || {};
+async function action(body) {
+  const res = await fetch(`/action?t=${TOKEN}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await res.json();
+  if (!j.ok) throw new Error('沒有成功');
+}
+function usageInfo() {
+  const u = st.usageSummary;
+  const el = document.getElementById('usageInfo');
+  if (!u || !u.commits) {
+    el.innerHTML = '<p>目前沒有紀錄。</p>';
+    return;
+  }
+  const pct = (a, b) => ((100 * a) / Math.max(1, b)).toFixed(1);
+  el.innerHTML =
+    `<p>${u.commits} 次送出、${u.chars} 字（${(st.usageBytes / 1024).toFixed(0)} KB）。` +
+    `不用改就對 ${pct(u.right, u.commits)}%，每 100 字改 ${pct(u.picks, u.chars)} 次。</p>` +
+    (u.topFixes.length
+      ? `<p>最常改的字：</p><ol>${u.topFixes.slice(0, 5).map(([k, n]) => `<li>${esc(k)}（${n} 次）</li>`).join('')}</ol>`
+      : '') +
+    (TOKEN ? '<p><button class="danger" id="clearUsage">刪除使用紀錄</button></p>' : '');
+}
+const learningBox = document.getElementById('learning');
+const usageBox = document.getElementById('usage');
+learningBox.checked = st.learning !== false;
+usageBox.checked = !!st.usage;
+learningBox.disabled = !TOKEN || !!st.learningLocked;
+usageBox.disabled = !TOKEN;
+if (st.learningLocked) document.getElementById('learningNote').textContent = '學習檔讀不懂，這次暫停學習（原檔不動）。';
+if (!TOKEN) document.querySelector('.clearall').hidden = true;
+usageInfo();
+for (const [box, op, on, off] of [
+  [learningBox, 'learning', '學習已開啟', '學習已關閉，已學到的暫停使用'],
+  [usageBox, 'usage', '使用紀錄已開啟', '使用紀錄已關閉（已有的紀錄還在）'],
+]) {
+  box.onchange = async () => {
+    try {
+      await action({ op, on: box.checked });
+      toast(box.checked ? on : off);
+    } catch (e) {
+      box.checked = !box.checked;
+      toast(`沒有改成：${e.message}（輸入法可能重開過，從右鍵選單再開一次）`);
+    }
+  };
+}
+document.getElementById('usageInfo').addEventListener('click', async (e) => {
+  if (e.target.id !== 'clearUsage' || !confirm('刪除所有使用紀錄？')) return;
+  try {
+    await action({ op: 'clearUsage' });
+    st.usageSummary = null;
+    usageInfo();
+    toast('已刪除使用紀錄');
+  } catch (err) {
+    toast(`刪除失敗：${err.message}`);
+  }
+});
+document.getElementById('clearAll').onclick = async () => {
+  if (!confirm('刪掉所有學習資料和使用紀錄？刪了就不能復原。')) return;
+  try {
+    await action({ op: 'clearAll' });
+    for (const t of TABS) t.rows.splice(0);
+    st.usageSummary = null;
+    usageInfo();
+    document.getElementById('stats').innerHTML = TABS.map(
+      (t) => `<div class="stat"><b>${t.rows.length}</b><span>${t.name}</span></div>`,
+    ).join('');
+    render();
+    toast('已全部清除');
+  } catch (err) {
+    toast(`清除失敗：${err.message}`);
+  }
+};
 render();
 </script>
 </body>

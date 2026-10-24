@@ -30,10 +30,11 @@ mod lexicon;
 mod lm;
 mod noise;
 mod pime;
+mod usage;
 mod slots;
 mod x2;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Instant;
 
 #[repr(C)]
@@ -216,58 +217,33 @@ fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
     out
 }
 
-/// 使用紀錄的統計（格式見 engine.rs usage_record）
+/// `usage` 指令：印出使用紀錄的統計（usage.rs），eval_out 寫成評測集格式
 fn usage_report(file: &str, eval_out: Option<&str>) {
     let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
-    let recs: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let (mut chars, mut keys, mut bs, mut picks, mut right) = (0, 0, 0, 0, 0);
-    let mut fixes: HashMap<String, usize> = HashMap::new();
-    let mut l3: HashMap<String, usize> = HashMap::new();
-    let s = |v: &serde_json::Value| v.as_str().unwrap_or("").to_string();
-    for r in &recs {
-        chars += s(&r["out"]).chars().count();
-        keys += r["keys"].as_u64().unwrap_or(0);
-        bs += r["bs"].as_u64().unwrap_or(0);
-        right += (r["top1"] == r["out"]) as usize;
-        for p in r["picks"].as_array().into_iter().flatten() {
-            picks += 1;
-            *fixes.entry(format!("{} → {}", s(&p["from"]), s(&p["to"]))).or_default() += 1;
-        }
-        for c in r["l3"].as_array().into_iter().flatten() {
-            *l3.entry(format!("{} → {}", s(&c[0]), s(&c[1]))).or_default() += 1;
-        }
-    }
+    let s = usage::summary(&text);
+    let n = |k: &str| s[k].as_f64().unwrap_or(0.0);
     let pct = |a: f64, b: f64| 100.0 * a / b.max(1.0);
     println!(
-        "{} 次送出、{chars} 字、{keys} 鍵\n不用改就對 {:.1}%\n選字修正 {picks} 次（每 100 字 {:.2} 次）\n退格每 100 鍵 {:.1} 次\nL3 更正 {} 個音節",
-        recs.len(),
-        pct(right as f64, recs.len() as f64),
-        pct(picks as f64, chars as f64),
-        pct(bs as f64, keys as f64),
-        l3.values().sum::<usize>(),
+        "{} 次送出、{} 字、{} 鍵\n不用改就對 {:.1}%\n選字修正 {} 次（每 100 字 {:.2} 次）\n退格每 100 鍵 {:.1} 次\nL3 更正 {} 個音節",
+        s["commits"],
+        s["chars"],
+        s["keys"],
+        pct(n("right"), n("commits")),
+        s["picks"],
+        pct(n("picks"), n("chars")),
+        pct(n("backspaces"), n("keys")),
+        s["l3"],
     );
-    let top = |m: HashMap<String, usize>, title: &str| {
-        let mut v: Vec<_> = m.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (key, title) in [("topFixes", "最常改的字（原本 → 改成）"), ("topL3", "L3 更正（打的 → 採用）")] {
         println!("\n{title}");
-        for (k, n) in v.iter().take(20) {
-            println!("  {n}\t{k}");
+        for p in s[key].as_array().into_iter().flatten() {
+            println!("  {}\t{}", p[1], p[0].as_str().unwrap_or(""));
         }
-    };
-    top(fixes, "最常改的字（原本 → 改成）");
-    top(l3, "L3 更正（打的 → 採用）");
+    }
     if let Some(out) = eval_out {
-        // 評測集格式：第一行中繼資料，之後每句 text＋syllables
-        let mut lines = vec![serde_json::json!({"source": file}).to_string()];
-        for r in &recs {
-            let syl: Vec<&str> = r["syl"].as_str().unwrap_or("").split(' ').collect();
-            lines.push(serde_json::json!({"text": r["out"], "syllables": syl}).to_string());
-        }
-        std::fs::write(out, lines.join("\n") + "\n").unwrap();
-        eprintln!("{} 句 -> {out}", recs.len());
+        let ev = usage::to_eval(&text, file);
+        std::fs::write(out, &ev).unwrap();
+        eprintln!("{} 句 -> {out}", ev.lines().count() - 1);
     }
 }
 

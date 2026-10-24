@@ -78,12 +78,10 @@ const ID_MODE: i64 = 1;
 /// 右鍵選單：左、右 Shift 各一個開關（打勾＝單按會切換中英）。id 4 是舊版的「左右都切換」，不再用
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
-/// 右鍵選單：用瀏覽器開學習資料（learned.html）
+/// 右鍵選單：用瀏覽器開學習資料與使用紀錄的頁面（learned.html；開關與清除都在頁面上）
 const ID_SHOW_LEARNED: i64 = 5;
 // id 6 是舊版的「標點用半形」，不再用
-/// 右鍵選單：使用紀錄開關（config.json 的 usageLog）、刪掉紀錄檔
-const ID_USAGE_LOG: i64 = 7;
-const ID_CLEAR_USAGE: i64 = 8;
+// id 7、8 是 1.0.2 的「記錄使用情形」「清除使用紀錄」，已移到頁面上，不再用
 /// 使用紀錄超過這個大小就丟掉舊的一半
 const USAGE_MAX_BYTES: u64 = 10 << 20;
 const LEARNED_HTML: &str = include_str!("learned.html");
@@ -315,6 +313,8 @@ pub struct Backend {
     shift_toggle: &'static str,
     /// 使用紀錄（config.json 的 "usageLog"，預設關）：每次送出往設定檔旁的 usage.jsonl 加一行
     usage: bool,
+    /// 學習（X2，config.json 的 "learning"，預設開）：關掉時不學、已學到的也不用（ImeEngine::set_learning）
+    learning: bool,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
     /// 這個鍵（filterKeyDown 決定）只是展開／收回表格，onKeyDown 不交給引擎
@@ -355,6 +355,7 @@ impl Backend {
             stale: false,
             shift_toggle: "both",
             usage: false,
+            learning: true,
             table: false,
             layout_key: false,
             sent_cols: HashMap::new(),
@@ -386,15 +387,21 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、learning、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
         let (l, r) = shift_sides(s.get("shiftToggle").and_then(Value::as_str).unwrap_or(""));
         self.shift_toggle = shift_name(l, r);
         self.usage = s.get("usageLog").and_then(Value::as_bool).unwrap_or(false);
+        self.learning = s.get("learning").and_then(Value::as_bool).unwrap_or(true);
+        let save_ok = self.save_ok;
         if let Some(e) = self.eng.as_mut() {
             e.usage = self.usage;
+            // 學習檔讀不懂時一直關著（load），不跟設定
+            if save_ok {
+                e.set_learning(self.learning);
+            }
         }
         if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = secs(secs_v, 300.0);
@@ -494,9 +501,21 @@ impl Backend {
             .map(|a| a.to_json())
             .or_else(|| std::fs::read_to_string(self.cfg.adapter_file.as_ref()?).ok())
             .unwrap_or_else(|| "null".into());
+        // ponytail: 每次開頁面都讀整個紀錄檔（最多 10MB）算統計，在主迴圈上；慢了再改成背景算或快取
+        let log = self
+            .usage_file()
+            .and_then(|f| std::fs::read_to_string(f).ok());
+        let state = json!({
+            "learning": self.learning,
+            "learningLocked": !self.save_ok,
+            "usage": self.usage,
+            "usageBytes": log.as_ref().map_or(0, String::len),
+            "usageSummary": log.as_deref().map(crate::usage::summary),
+        });
         // 嵌在 <script> 裡：拆開 "</" 才不會被當成 </script>
         LEARNED_HTML
             .replacen("/*DATA*/null", &data.replace("</", "<\\/"), 1)
+            .replacen("/*STATE*/null", &state.to_string().replace("</", "<\\/"), 1)
             .replacen("/*TOKEN*/\"\"", &json!(token).to_string(), 1)
     }
 
@@ -547,11 +566,75 @@ impl Backend {
         hit && write_atomic(&f, &a.to_json())
     }
 
+    /// 學習資料頁的開關與清除（learned_web 的 POST /action）
+    fn web_action(&mut self, v: &Value) -> bool {
+        let on = v["on"].as_bool();
+        match (v["op"].as_str().unwrap_or(""), on) {
+            ("learning", Some(on)) => {
+                if !self.save_ok {
+                    return false;
+                }
+                self.learning = on;
+                if let Some(e) = self.eng.as_mut() {
+                    e.set_learning(on);
+                }
+                self.write_setting("learning", json!(on));
+            }
+            ("usage", Some(on)) => {
+                self.usage = on;
+                if let Some(e) = self.eng.as_mut() {
+                    e.usage = on;
+                }
+                self.write_setting("usageLog", json!(on));
+            }
+            ("clearUsage", _) => self.clear_usage(),
+            // 全部清除：使用紀錄、學習資料（換成空的；讀不懂的舊檔也蓋掉）、唯讀快照 learned.html
+            ("clearAll", _) => {
+                self.clear_usage();
+                let Some(f) = self.cfg.adapter_file.clone() else {
+                    return false;
+                };
+                let mut fresh = x2::UserAdapter::new();
+                fresh.enabled = self.learning;
+                if let Some(e) = self.eng.as_mut() {
+                    if let Some(old) = e.adapter.as_mut() {
+                        for x in old.take_entries() {
+                            e.decoder.remove_entry(&x.word, &x.readings);
+                        }
+                    }
+                    e.adapter = Some(fresh);
+                    e.clear();
+                    self.save_ok = true;
+                    self.save_adapter();
+                    self.dirty = false;
+                } else if write_atomic(&f, &x2::UserAdapter::new().to_json()) {
+                    self.save_ok = true;
+                } else {
+                    return false;
+                }
+                let _ = std::fs::remove_file(f.with_file_name("learned.html"));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// 刪掉使用紀錄檔與還沒寫出的紀錄
+    fn clear_usage(&mut self) {
+        if let Some(e) = self.eng.as_mut() {
+            e.usage_lines.clear();
+        }
+        if let Some(f) = self.usage_file() {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
     /// 網頁服務的請求（主迴圈呼叫）
     fn web(&mut self, a: learned_web::Ask) {
         let out = match &a.req {
             learned_web::WebReq::Page => self.learned_page(&a.token),
             learned_web::WebReq::Delete(v) => json!({ "ok": self.delete_learned(v) }).to_string(),
+            learned_web::WebReq::Action(v) => json!({ "ok": self.web_action(v) }).to_string(),
         };
         let _ = a.reply.send(out);
     }
@@ -674,6 +757,9 @@ impl Backend {
                 Ok(Ok((mut eng, save_ok))) => {
                     eng.mode = self.mode;
                     eng.usage = self.usage;
+                    if save_ok && !self.learning {
+                        eng.set_learning(false);
+                    }
                     self.eng = Some(eng);
                     self.save_ok = save_ok;
                     eprintln!("[pime] 載入引擎 {:?}", t.elapsed());
@@ -1081,18 +1167,6 @@ impl Backend {
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     Some(ID_SHOW_LEARNED) => self.show_learned(),
-                    Some(ID_USAGE_LOG) => {
-                        self.usage = !self.usage;
-                        if let Some(e) = self.eng.as_mut() {
-                            e.usage = self.usage;
-                        }
-                        self.write_setting("usageLog", json!(self.usage));
-                    }
-                    Some(ID_CLEAR_USAGE) => {
-                        if let Some(f) = self.usage_file() {
-                            let _ = std::fs::remove_file(f);
-                        }
-                    }
                     _ => {}
                 }
                 None
@@ -1104,13 +1178,10 @@ impl Backend {
                 r.insert(
                     "return".into(),
                     json!([
-                        {"id": ID_SHOW_LEARNED, "text": "查看學習資料"},
+                        {"id": ID_SHOW_LEARNED, "text": "學習資料與使用紀錄…"},
                         {"id": 0, "text": ""},
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
-                        {"id": 0, "text": ""},
-                        {"id": ID_USAGE_LOG, "text": "記錄使用情形（只存在本機）", "checked": self.usage},
-                        {"id": ID_CLEAR_USAGE, "text": "清除使用紀錄"},
                     ]),
                 );
                 None

@@ -186,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 |---|---|---|
 | 任何時候 | 單按 Shift | 切換注音／英文。組字中按：先送出，再切換。可設成只用左邊或只用右邊的 Shift（見「設定」） |
 | 任何時候 | 點工作列的「注／英」圖示 | 切換注音／英文。組字中點不切換（先 Enter 送出或 Esc 取消） |
-| 任何時候 | 右鍵點「注／英」圖示 | 選單：「查看學習資料」用瀏覽器開學到的詞，每一列可以「刪除」（馬上生效、馬上存檔；刪使用者詞會連同它的選字次數一起刪）。頁面由後端在本機開的小網頁服務提供（只有本機連得到、網址帶隨機密碼；分頁全部關掉幾秒後就停，萬一瀏覽器沒通知，最多 3 分鐘也會停）；開不起來時退回唯讀的 `%APPDATA%\PIME\zhuyin\learned.html`；「左 Shift 切換中英」「右 Shift 切換中英」兩個開關，點一下切換打勾（打勾＝單按那顆 Shift 會切換中英）；「記錄使用情形」開關與「清除使用紀錄」（見「使用紀錄」） |
+| 任何時候 | 右鍵點「注／英」圖示 | 選單：「學習資料與使用紀錄…」用瀏覽器開一個頁面（見「學習資料與使用紀錄」）：學到的詞每一列可以「刪除」（馬上生效、馬上存檔；刪使用者詞會連同它的選字次數一起刪），也有學習、使用紀錄兩個開關和「全部清除」。頁面由後端在本機開的小網頁服務提供（只有本機連得到、網址帶隨機密碼；分頁全部關掉幾秒後就停，萬一瀏覽器沒通知，最多 3 分鐘也會停）；開不起來時退回唯讀的 `%APPDATA%\PIME\zhuyin\learned.html`；「左 Shift 切換中英」「右 Shift 切換中英」兩個開關，點一下切換打勾（打勾＝單按那顆 Shift 會切換中英） |
 | 注音模式 | Shift＋標點鍵 | 打半形符號（Shift+, → `<`、Shift+/ → `?`、Shift+5 → `%`…），組字中插在游標處 |
 | 注音模式 | Ctrl＋標點鍵 | 打全形標點：Ctrl+, → ，、Ctrl+. → 。、Ctrl+/ → ？、Ctrl+; → ：、Ctrl+' → ；、Ctrl+1 → ！、Ctrl+[ → 「、Ctrl+] → 」、Ctrl+Shift+[ → 『、Ctrl+Shift+] → 』、Ctrl+9 → （、Ctrl+0 → ）、Ctrl+\ → 、、Ctrl+` → ～。這些組合在注音模式不會傳給程式（例如 VS Code 的 Ctrl+[ 縮排），切到英文模式就照常 |
 | 組字中 | 大千鍵位 | 打注音；空白＝一聲 |
@@ -222,7 +222,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 設定
 
-設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 開關與「記錄使用情形」也是寫進這個檔。
+設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 開關、學習資料頁的兩個開關也是寫進這個檔。
 
 ```json
 {
@@ -237,7 +237,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | 項目 | 預設 | 作用 |
 |---|---|---|
 | `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊、`"none"` 都不切換（用左鍵點圖示切換）。關掉的那邊單按不做事；其他值當 `"both"` |
-| `usageLog` | `false` | `true`：記錄使用情形（見「使用紀錄」）。右鍵選單「記錄使用情形」切換 |
+| `learning` | `true` | `false`：關掉學習。不學新的，已學到的也暫停使用（資料保留）。學習資料頁的「學習」開關切換 |
+| `usageLog` | `false` | `true`：記錄使用情形。學習資料頁的「使用紀錄」開關切換 |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
 | `candFontName` | `"Microsoft JhengHei UI"` | 選字視窗的字型（1–31 字元的字型名） |
@@ -246,13 +247,24 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 學習檔在同一個目錄的 `adapter.json`。1.0.1 以前的 `halfWidth` 設定已拿掉：注音模式的 Shift 組合一律打半形，全形改用 Ctrl 組合。
 
-## 使用紀錄
+## 學習資料與使用紀錄
 
-用來找出自己實際打字時錯在哪裡，預設關閉。右鍵點「注／英」圖示，勾「記錄使用情形（只存在本機）」打開。
+右鍵點「注／英」圖示 →「學習資料與使用紀錄…」，在瀏覽器裡管理兩種資料。兩種都只存在這台電腦，不會上傳。
+
+| | 學習資料 | 使用紀錄 |
+|---|---|---|
+| 做什麼 | 記住選過的字詞、常打的詞，之後優先出現 | 記下每次送出的經過，用來找出打字時錯在哪裡；不影響選字 |
+| 預設 | 開 | 關 |
+| 關掉時 | 不學新的，已學到的也暫停使用；資料保留，打開就恢復 | 不再記錄；已有的紀錄還在 |
+| 檔案 | `%APPDATA%\PIME\zhuyin\adapter.json` | `%APPDATA%\PIME\zhuyin\usage.jsonl` |
+| 刪除 | 每一列的「刪除」 | 「刪除使用紀錄」 |
+
+頁面最上面的「全部清除」一次刪掉兩種資料（連同唯讀快照 `learned.html`），刪了不能復原。
+
+使用紀錄的細節：
 
 - 打開後，每次送出在 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行：時間、打出的注音、輸入法原本猜的字、最後送出的字、用 ↓ 改過的段落、自動更正（L3）改掉的注音、按鍵數、退格次數。
 - 紀錄裡有你打過的所有文字，只存在這台電腦，不會上傳。超過 10MB 時丟掉舊的一半。
-- 右鍵選單「清除使用紀錄」直接刪掉檔案。
 - 看統計（要 repo）：`native\target\release\zhuyin-native.exe usage %APPDATA%\PIME\zhuyin\usage.jsonl`，印出不用改就對的比例、每 100 字改幾次、最常改的字、L3 更正。
 - 看不到的：送出之後才在程式裡刪掉重打的錯字。
 

@@ -376,6 +376,18 @@ impl UserAdapter {
         out
     }
 
+    /// 所有使用者詞與挖詞的詞條（關掉學習時從解碼器拿掉）；清空注入紀錄，再打開時 drain_pending 重新給
+    pub fn take_entries(&mut self) -> Vec<Entry> {
+        self.injected.clear();
+        self.phrases
+            .iter()
+            .map(|(w, p)| Entry {
+                word: w.clone(),
+                readings: p.readings.clone(),
+            })
+            .collect()
+    }
+
     /// 項目數：(讀音×詞, 全域詞, 使用者詞, 挖詞)
     pub fn stats(&self) -> (usize, usize, usize, usize) {
         let seq = self.by_seq.values().map(IndexMap::len).sum();

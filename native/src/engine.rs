@@ -367,6 +367,24 @@ impl ImeEngine {
         self.select(next, false);
     }
 
+    /// 學習開關：關掉時不學新的、已學到的也不用（加分歸零，使用者詞與挖詞從解碼器拿掉）；打開就放回去
+    pub fn set_learning(&mut self, on: bool) {
+        let Some(a) = self.adapter.as_mut().filter(|a| a.enabled != on) else {
+            return;
+        };
+        a.enabled = on;
+        if on {
+            for e in a.drain_pending() {
+                self.decoder.add_entry(&e.word, &e.readings);
+            }
+        } else {
+            for e in a.take_entries() {
+                self.decoder.remove_entry(&e.word, &e.readings);
+            }
+        }
+        self.redecode();
+    }
+
     fn redecode(&mut self) {
         self.last = if self.comp.sequence().is_empty() {
             vec![]
