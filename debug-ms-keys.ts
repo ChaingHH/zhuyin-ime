@@ -2,7 +2,7 @@
 // npx tsx debug-ms-keys.ts <out.tsv>   每行：集\t正解\tVK,VK,...
 import { writeFileSync } from 'node:fs';
 import { syllableToKeyCodes } from './packages/core/src/keymap.js';
-import { loadEvalSamples } from './packages/cli/src/runtime.js';
+import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
 
 const VK: Record<string, number> = {
   Space: 0x20,

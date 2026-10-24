@@ -4,33 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Platform-agnostic Zhuyin (Bopomofo) IME core in TypeScript. Goal: add the channel model `P(K|S)` (fuzzy sounds, typo correction) and a modern language model `P(H)` that existing Zhuyin IMEs lack, modelled on Microsoft Pinyin's feature set. Code comments and docs are in Traditional Chinese.
+Zhuyin (Bopomofo) IME. Goal: add the channel model `P(K|S)` (fuzzy sounds, typo correction) and a modern language model `P(H)` that existing Zhuyin IMEs lack, modelled on Microsoft Pinyin's feature set. The engine is Rust (`native/`, runs as a PIME backend); TypeScript (npm workspaces) builds the data and models it reads. Code comments and docs are in Traditional Chinese.
 
 ## Commands
 
-npm workspaces monorepo, Node >= 20, ESM (`"type": "module"`, NodeNext resolution — relative imports need `.js` suffix).
-
 ```bash
+cd native && cargo build --release   # the engine
+ZHUYIN_DATA=data native/target/release/zhuyin-native.exe eval   # accuracy; run from repo root (see below)
+
 npm install
 npm run build                      # tsc -b over all packages (project references)
 npm test                           # vitest run, all packages
-npx vitest run packages/core/test/x2.test.ts   # single file
+npx vitest run packages/core/test/lexicon.test.ts   # single file
 npx vitest run -t "name substring"             # single test by name
 npm run lint                       # eslint flat config (eslint.config.js): js + typescript-eslint recommended
 npm run format                     # prettier (single quotes, width 100, trailing commas)
 ```
 
+TS side: Node >= 20, ESM (`"type": "module"`, NodeNext resolution — relative imports need `.js` suffix).
+
 - Unused function params must be prefixed `_` to pass lint.
-- Workspace packages resolve each other through `dist/` (`main: dist/index.js`). Run `npm run build` before running any `tsx` script that imports `@zhuyin/*`, or it picks up stale output.
-- In a git worktree without its own `node_modules/@zhuyin/*`, `@zhuyin/*` resolves up to the **main checkout's** packages, so tests silently run the main checkout's build. Link the worktree's packages first (PowerShell: `New-Item -ItemType Junction -Path node_modules\@zhuyin\core -Target packages\core`, same for lm, data-pipeline, cli).
+- Workspace packages resolve each other through `dist/` (`main: dist/index.js`). Run `npm run build` before running any `tsx` script that imports `@zhuyin/*`, or it picks up stale output. If `tsc -b` reports exports missing that are in the source, delete `packages/*/dist` and `packages/*/tsconfig.tsbuildinfo` (stale build info skips emit).
+- In a git worktree without its own `node_modules/@zhuyin/*`, `@zhuyin/*` resolves up to the **main checkout's** packages, so tests silently run the main checkout's build. Link the worktree's packages first (PowerShell: `New-Item -ItemType Junction -Path node_modules\@zhuyin\core -Target packages\core`, same for lm, data-pipeline).
 
 ### Data and models (needed before eval / interactive use)
 
 ```bash
-npm run data:lexicon               # download moedict + libchewing → data/processed/lexicon.jsonl
+npm run data:lexicon               # download moedict + libchewing → data/processed/lexicon.jsonl + lexicon.bin
 npm run data:corpus                # PTT colloquial + written samples → data/processed/corpus/
 npx tsx packages/data-pipeline/src/cli.ts syllables   # data/processed/syllables.json
 npx tsx packages/data-pipeline/src/cli.ts evalset     # eval/*.jsonl; run from repo root (relative paths)
+npx tsx packages/data-pipeline/src/cli.ts lexbin      # lexicon.jsonl → lexicon.bin only
 
 # 正式模型（大語料）：PTT 全量 + 維基 1.5 億字 → data/models/lm.tsv（約 1GB，訓練約 17 分鐘）
 python packages/data-pipeline/scripts/extract-wiki.py 0 data/raw/wiki/wiki_full.jsonl
@@ -38,66 +42,59 @@ CORPUS_OUT=data/processed/corpus-big2 WIKI_FILE=data/raw/wiki/wiki_full.jsonl np
 NODE_OPTIONS=--max-old-space-size=34000 npx tsx packages/lm/src/train.ts data/processed/corpus-big2 data/models/lm.tsv
 ```
 
-`data/raw`, `data/models`, `data/user` are gitignored.
+`data/raw`, `data/models`, `data/user` are gitignored. The engine reads `data/models/lm.bo.bin`, `data/processed/lexicon.bin`, `data/processed/syllables.json`.
 
 - `train.ts` 輸出逐行 `.tsv`（`section\tcount\tkey`），不是 JSON：大模型超過 V8 單一字串上限。`LanguageModel.load` 兩種都讀。
-- runtime 預設依序找 `data/models/lm.bo.bin`、`lm.bin`、`lm.tsv`；`ZHUYIN_LM=<path>` 可覆寫。基線（`--baseline`）與 `--idf` 要計數，會跳過 `lm.bo.bin`。
-- `lm.bo.bin`（預設模型）：退回式模型（`packages/lm/src/backoff.ts` `BackoffLM`），存好算完的 KN 機率與退回權重，查詢不算 KN、沒有小 Map。`NODE_OPTIONS=--max-old-space-size=12000 npx tsx packages/lm/src/shrink.ts [保留筆數百萬=12]`（約 4 分鐘）從 lm.tsv 建：加權差異剪枝（Seymore–Rosenfeld）、重算退回權重、8 位元均勻碼本、16 位元指紋，四表權重 `LM_SHRINK_WEIGHTS` 預設 1:1:2:2。預設 12M 筆：大表 46MB、RSS 115MB、句 76.1／79.4（計數模型 lm.bin 220MB、76.4／79.8）。表裡 0 代表「沒存」：機率欄不能量化成 0（P≈1 會被當成沒存），一元表的鍵要含 `cont`（EOS 只在那裡）。實驗台 `debug-shrink.ts`（全模型與分數只算一次，多組設定）、`debug-bo-diff.ts`（沿正解逐詞比 KN 與退回式機率）。
-- 常駐（PIME、網頁測試台）要用 `node --max-semi-space-size=4 --max-old-space-size=128`：打字 300 句後 RSS 315 → 146MB，延遲不變（`debug-latency.ts`；`.claude/launch.json` 已加）。old-space 64 時 heap 會用到 57MB，太貼近。
-- 詞典索引：`core/src/lexicon.ts` `LexiconIndex`（音節編號＋typed array），runtime 快取成 `data/processed/lexicon.bin`（比 lexicon.jsonl 舊或讀取失敗就從 jsonl 重建，寫入走暫存檔＋改名；沒有 jsonl 時直接讀 bin），載入 27ms、不解析 JSONL。解碼結果與舊 Map 索引逐位元相同。`ZHUYIN_LM_*` 剪枝／量化變數（`LM_ENV_KEYS`）只讓 LM 跳過 `lm.bo.bin`／`lm.bin`，不影響 `lexicon.bin`。
-- `lm.bin`：`npx tsx packages/lm/src/pack.ts [lm.tsv] [lm.bin]`（約 40–70 秒，吃同樣的環境變數，`lmOptionsFromEnv`）把剪枝量化後的模型存成二進位（約 125MB）。載入約 1 秒；表陣列直接 view 到檔案 buffer。重新訓練 lm.tsv 或改預設後要重新打包。
-- 二元／三元表是 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map：載入 tsv 時用開放定址 `HashTable` 累加，量化時預設轉成最小完美雜湊 `PerfectTable`（每鍵 16-bit 指紋＋8-bit 值＋約 4 bit 位移值，沒有探測）。改回 Map 會讓每次 major GC 掃描數千萬物件（實測每句 +700ms 延遲）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
-- `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。`CORPUS_EN=1`：英文詞換成類別符號 `EN_CLASS`（``，`core/src/decode.ts`）、中英之間的空白不斷句，含英文的片段每 200 個留一個到 `mixed-heldout.txt`（不訓練）；第二個參數 0＝只建 PTT。中英評測集 `eval/mixed.jsonl`（`scripts/build-mixed-eval.ts`，`eval --mixed`）。解碼器把含拉丁字母的原樣 token 當 `EN_CLASS` 查 LM（`lmToken`／Rust `is_english`），輸出原字。數字見 docs/MEMORY.md §7。
-- X2 選字加成的鍵是該詞自己的讀音（`modifierFor(seq.slice(pos, pos+len), w)`；以前傳整句，bySeq 從沒生效）。學習模擬 `debug-x2-learn.ts`。
-- 英文模式（TS `ImeEngine`、Rust `engine.rs`）：切換不送出組字區；組字中打的字母、數字併進游標前的英文 token（`CompositionBuffer.appendEnglish`），前面的中文跟著重解碼；英文模式下空白、標點才整段送出；退格一次退一個字母。`EngineState.cursor` 是字數（英文 token 照長度）。
+- `lm.bo.bin`（引擎唯一讀的模型）：退回式模型（`packages/lm/src/backoff.ts` `BackoffLM`），存好算完的 KN 機率與退回權重，查詢不算 KN。`NODE_OPTIONS=--max-old-space-size=12000 npx tsx packages/lm/src/shrink.ts [保留筆數百萬=12]`（約 4 分鐘）從 lm.tsv 建：加權差異剪枝（Seymore–Rosenfeld）、重算退回權重、8 位元均勻碼本、16 位元指紋，四表權重 `LM_SHRINK_WEIGHTS` 預設 1:1:2:2。預設 12M 筆：大表 46MB、句 76.1／79.4（計數模型 lm.bin 220MB、76.4／79.8）。表裡 0 代表「沒存」：機率欄不能量化成 0（P≈1 會被當成沒存），一元表的鍵要含 `cont`（EOS 只在那裡）。比較不同設定：各建一個 bo.bin，`ZHUYIN_LM=<檔> zhuyin-native eval`；`debug-bo-diff.ts` 沿正解逐詞比 KN 與退回式機率。
+- 詞典索引：`core/src/lexicon.ts` `LexiconIndex`（音節編號＋typed array，格式 `ZYLEX002`）；`data-pipeline` 的 `lexbin`（`src/build/lexbin.ts`，`data:lexicon` 最後一步）從 lexicon.jsonl 建 `lexicon.bin`，寫入走暫存檔＋改名。Rust `native/src/lexicon.rs` 唯讀。
+- `lm.bin`（`packages/lm/src/pack.ts`）、`lmOptionsFromEnv` 的 `ZHUYIN_LM_*` 剪枝／量化變數只給 TS 的計數模型用；TS 引擎封存後沒有程式讀 lm.bin。
+- 二元／三元表是 typed array 雜湊表（`packages/lm/src/hashtable.ts`），不是 JS Map（改回 Map 會讓每次 major GC 掃描數千萬物件）。訓練（`train.ts`）仍用 Map，需要 `--max-old-space-size=34000`。
+- `build-big-corpus.ts` 取「連續中文字片段」而非整句清洗，並丟掉包含任何評測句的片段（防洩漏）。`CORPUS_EN=1`：英文詞換成類別符號 `EN_CLASS`（``，`core/src/index.ts`）、中英之間的空白不斷句，含英文的片段每 200 個留一個到 `mixed-heldout.txt`（不訓練）；第二個參數 0＝只建 PTT。中英評測集 `eval/mixed.jsonl`（`scripts/build-mixed-eval.ts`）。解碼器把含拉丁字母的原樣 token 當 `EN_CLASS` 查 LM（`decode.rs` `is_english`），輸出原字。數字見 docs/MEMORY.md §7。
 - `LM_TOKEN_PENALTY`（預設 14）必須大於高頻單字的 log(freq)，否則訓練斷詞會把詞切成單字。
 - 挖詞：`npx tsx packages/data-pipeline/scripts/mine-words.ts [lm.tsv] [lexicon.jsonl] [mined.jsonl]`（約 3 分鐘）從 lm.tsv 的詞計數挖常用複合詞 → `data/processed/mined.jsonl`（provenance=mined），`npm run data:lexicon` 合併進詞典；之後要重訓 lm.tsv、重建 lm.bo.bin 新詞才有機率。門檻與數字見 docs/MEMORY.md §7。
-- `debug-acc.ts`：一次載入、多組設定的實驗台；dev=偶數句、test=奇數句，另列 N-best oracle。
-- 剪枝／量化（`lmOptionsFromEnv`，預設 `bi>=2 tri>=4 q=8 MPH=1`）：`ZHUYIN_LM_MIN_BI`／`_MIN_TRI`（計數低於此值不存，上下文總量仍含被剪部分）、`_QUANT=0|8|16`（對數碼本）、`_MPH=0|1`（完美雜湊）；`_FP=32|40|48`、`_LOAD` 只在 `MPH=0` 時有用。預設：RSS 約 250MB、大表 109MB、句 76.4／79.8（原始模型 76.7／80.4，要用設 `ZHUYIN_LM_MIN_BI=1 ZHUYIN_LM_MIN_TRI=1 ZHUYIN_LM_QUANT=0`）。實驗台 `debug-prune.ts`（一設定一行程）；`ZHUYIN_NO_USER=1` 不載入 adapter.json。
 - 記憶體分析、微軟注音／PIME 的宿主方式、縮小方案：見 `docs/MEMORY.md`。安裝到 PIME 的教學：`docs/PIME-INSTALL.md`。
-- `native/`：引擎的 Rust 移植（L1–L5、L3、X2、`ImeEngine`，加上 PIME 後端協定 `native/src/pime.rs`），讀同樣的 `lm.bo.bin`／`lexicon.bin`／`adapter.json`，打字中私有記憶體 13MB（模型是記憶體映射）。`cd native && cargo build --release`；`ZHUYIN_DATA=<data> native/target/release/zhuyin-native.exe eval|dump|keys|l3|replay`（從 repo 根目錄跑，用法見 `native/src/main.rs` 檔頭）。PIME：`zhuyin-native pime` 走 stdin/stdout 協定，`lm.bo.bin` 用記憶體映射，第一個組字鍵才載入引擎、閒置 `ZHUYIN_IDLE_SECS`（預設 300）秒或最後一個 client 停用就卸載（`debug-pime-idle.ts` 量記憶體與重新載入延遲）；設定檔 `%APPDATA%\PIME\zhuyin\config.json`（`shiftToggle`／`idleSecs`／`l3`／`halfWidth`）；`onCommand`、`onMenu` 等沒有 edit session 的回應不能帶 `showMessage`（PIME 的 DLL 會解參考空指標、宿主程式當掉）；每則帶 seqNum 的請求（含 close）都要回同一個 seqNum：PIMELauncher（beta3 的 Rust 版）15 秒沒收到回應就殺掉後端重開（2026-10-21 不回 close，每關一個程式 15 秒後打字就斷掉）；PIME 的 DLL 在 RPC 失敗（啟動器停了、2 秒沒回、後端死掉）時會讓所有用著它的程式當掉（Explorer 一秒一次），所以**絕不停 PIMELauncher**、後端每則請求都要很快回且不能在處理中結束；`install.ps1` 用改名取代覆寫、不停 PIME、**不從 `backends.json` 拿掉其他後端**（2026-10-20 這樣做讓 Explorer 連續當機；「只留本專案」由 `run.ps1` 改使用者的鍵盤清單），`-Rollback` 換回 `zhuyin.prev\`；`debug-pime.ts` 會依 DLL 的讀法檢查每則回應的格式與時間；`ZHUYIN_DATA=<data> npx tsx debug-pime.ts zhuyin` 先做行為檢查（含點圖示、右鍵選單、選字反白、表格展開、清單最後一項是注音、選字後游標、視窗外 ↑ 換字、只用左／右 Shift）再打 1500 句；隨機按鍵壓力測試 `ZHUYIN_DATA=data npx tsx debug-pime-fuzz.ts [按鍵數] [種子]`（stderr 有 panicked 就算失敗）；使用者文件 `docs/PIME-INSTALL.md`；安裝檔與 `install.ps1` 在 `native/pime/`；使用者雙擊 `install.cmd`／`uninstall.cmd`／`rollback.cmd`（`run.ps1`：一般權限建置、只把 `install.ps1` 提權、記錄檔顯示結果），`build-setup.cmd` 用 Inno Setup 編單一 Setup.exe（`install.ps1 -From`）；`run.ps1 stage` 只組檔案不動系統，可拿來測（不要自己執行安裝）。改 TS 的 L1–L5／X2／engine 時要同步改 Rust，並用 `debug-native-parity.ts` 對拍（輸出應逐位元組相同，見 docs/MEMORY.md「Rust 引擎」）。
-- 已量過、不要重試：開放定址 fp=32 句 −1.5／−2.6（查不到的鍵約 0.7% 誤中）；load 0.9 慢約 25%；q6／q4 有損；mmap 對雜湊表無效（10 句內讀到 91–100% 的頁，`debug-pages.ts` 只支援 `MPH=0`）。記憶體：`loadRuntime` 載入後在外層做 last-resort GC（`releaseHeap`；在內層做時詞典原文還活著，回收不到）；打字中 V8 會把 heap 撐到約 490MB（存活約 80MB），常駐宿主要在閒置時呼叫 `releaseHeap`（55ms），`web.ts` 停打 3 秒後呼叫。拆解腳本 `debug-mem.ts`、`debug-lexmem.ts`；兩個專家的貢獻 `debug-expert.ts`；逐鍵延遲 `debug-latency.ts`。
-- 解碼器的配置量（每鍵 9.5 → 3.7MB，打字中 RSS 733 → 431MB，延遲與 CPU 約砍半）：LM 查詢用 `get2`／`get3` 分段雜湊（不組 `"c1 c2"` 字串，雜湊值與整串相同）；`decode` 先算分數，狀態清單由 `insert` 維持「由高到低、最多 nBest、同分排後」（等同原本穩定排序取前 nBest），同組同詞只算一次鍵與尾字；全域 beam 用 `pruneBeam`（`Float64Array` 排序找門檻，同分依桶迭代順序保留），位置上超過 2×beam 就先剪並記 `floors`，之後嚴格低於門檻的路徑不建。改 `decode` 前後要用 `debug-decode-dump.ts` 比對 1500 句前 4 名＋分數（目前逐位元相同），配置量用 `debug-alloc.ts`（`ALLOC_MODE=nochar|dummy` 做對照）。heap 上限（`--max-old-space-size=256`）改動後效益很小（431 → 420MB），160MB 以下會在解析 lexicon.jsonl 時當掉。
-- 和其他輸入法比較（數字見 `docs/MEMORY.md`）：PIME 新酷音／小麥注音用 `npx tsx debug-pime.ts chewing|mcbopomofo [N]` 直接驅動 PIME 後端（模擬 TSF DLL 的 stdin/stdout 協定，不佔鍵盤；新酷音會學進 `%APPDATA%\PIME\chewing\chewing.sqlite3`，跑前先刪）。微軟注音只能走 GUI：`debug-ms-keys.ts` 產生大千 VK 序列，`debug-ime-bench.ps1 -Ime ms` 包住 `debug-ms-bopomofo.ps1`（SendInput 打進自己的 WinForms 文字框；要 IMM `ImmSetOpenStatus` 才會進中文模式、`timeBeginPeriod(1)` 才跑得快；前景被搶就中止；PIME 在這個文字框裡收不到按鍵），會佔用鍵盤，使用者不在電腦前才能跑；`debug-ms-compare.ts` 計分。
+- 已量過、不要重試：開放定址 fp=32 句 −1.5／−2.6（查不到的鍵約 0.7% 誤中）；load 0.9 慢約 25%；q6／q4 有損；mmap 對 TS 的雜湊表無效（10 句內讀到 91–100% 的頁）。
 
-### CLI testbench (`packages/cli`)
+### Engine (`native/`)
 
-```bash
-node packages/cli/dist/index.js type                 # interactive: space-separated KeyboardEvent.code per line
-node packages/cli/dist/index.js web [--port 8787] [--no-l3]  # browser testbench: type with the real keyboard (Dachen); ←→ move the cursor, ↓ opens the candidate menu for words ending at the cursor, a chosen word becomes a hard `fixed` span in later decodes; Shift+punctuation (`PUNCT` in `engine.ts`, keyed by `KeyboardEvent.key`) and Space with no pending zhuyin output directly on an empty composition, otherwise become literal tokens inserted at the composition cursor (`CompositionBuffer.pushLiteral`; the buffer owns the cursor and inserts/deletes there, the engine remaps `fixed` spans across edits with `remapper`; the decoder emits tokens with no bopomofo as-is and no word spans them, `isLiteralToken`; X2 skips them); Esc (menu closed) cancels the composition; the page is one focusable but non-editable editor (`tabindex`, not `contenteditable`: an editable element wakes the OS IME, which then fights the page) whose text and caret the page manages itself; the composition is an inline `#ime` span at the caret (Microsoft Bopomofo style); `GET /stats` feeds the page's perf bar; on commit, a picked word (or the run of single chars containing a picked char, or a picked single char joined to the adjacent multi-char word, ≤4 chars, not for `STANDALONE` pronouns/particles) is saved as a manual user phrase, since a once-selected mined word otherwise loses to the LM (OOV word ≈ −28 vs X2 boost ≤ 2.2)
-npx tsx debug-l3.ts [keyErr] [cogErr] [scales]   # L3 eval: clean + X3-injected noisy input, L3 off vs cost scales
-node packages/cli/dist/index.js replay <keys.jsonl>
-node packages/cli/dist/index.js eval [-n N] [-a A] [-g GAMMA] [--idf X] [--baseline classic|bigram]
-node packages/cli/dist/index.js sweep [-n N]         # grid over a × gamma on colloquial set
-```
+L1–L5、L3、X2、`ImeEngine`（`engine.rs`）、PIME 後端協定（`pime.rs`）；打字中私有記憶體 13MB（`lm.bo.bin` 記憶體映射）。指令從 repo 根目錄跑，`ZHUYIN_DATA=<data>`（預設 `data`），用法見 `native/src/main.rs` 檔頭：
 
-`eval` scores sentence/char accuracy on `eval/colloquial.jsonl` + `eval/written.jsonl`. `--baseline classic` mimics libchewing (word unigram only), `bigram` mimics McBopomofo. Root-level `debug-*.ts` are throwaway investigation scripts (`npx tsx debug-xxx.ts`) that reach into `packages/*/src` directly.
+- `eval [fails-out]`：`eval/colloquial`、`written`、`mixed` 的句準（dev＝偶數句／test＝奇數句）、字準、N-best oracle、延遲。一設定一行程，用環境變數換設定：`ZHUYIN_A`（預設 1）、`ZHUYIN_GAMMA`、`ZHUYIN_POLY`、`ZHUYIN_POLY_MINOR`、`ZHUYIN_BEAM`、`ZHUYIN_NBEST`、`ZHUYIN_LM`；L3：`ZHUYIN_NOISE=key,cog`（`noise.rs` 注入合成錯誤，每句種子 1000+i）配 `ZHUYIN_L3=1` 或 `ZHUYIN_L3_SCALE=s`（代價 × s，另有 `_NASAL`、`_MAXALTS`），會多印「有錯的句子」與涵蓋率。不讀 adapter.json。
+- `dump`、`keys`、`l3`、`replay`：倒 N-best、L1/L2 按鍵、L3 解碼、重播按鍵事件。
+- 英文模式：切換不送出組字區；組字中打的字母、數字併進游標前的英文 token（`slots.rs` `append_english`），前面的中文跟著重解碼；英文模式下空白、標點才整段送出；退格一次退一個字母。`EngineState.cursor` 是字數（英文 token 照長度）。
+- X2 選字加成的鍵是該詞自己的讀音（以前傳整句，bySeq 從沒生效）。
 
-### 已封存：L6 神經重排、L7 防閃動
+PIME：`zhuyin-native pime` 走 stdin/stdout 協定，第一個組字鍵才載入引擎、閒置 `ZHUYIN_IDLE_SECS`（預設 300）秒或最後一個 client 停用就卸載（`debug-pime-idle.ts` 量記憶體與重新載入延遲）；設定檔 `%APPDATA%\PIME\zhuyin\config.json`（`shiftToggle`／`idleSecs`／`l3`／`halfWidth`）；`onCommand`、`onMenu` 等沒有 edit session 的回應不能帶 `showMessage`（PIME 的 DLL 會解參考空指標、宿主程式當掉）；每則帶 seqNum 的請求（含 close）都要回同一個 seqNum：PIMELauncher（beta3 的 Rust 版）15 秒沒收到回應就殺掉後端重開（2026-10-21 不回 close，每關一個程式 15 秒後打字就斷掉）；PIME 的 DLL 在 RPC 失敗（啟動器停了、2 秒沒回、後端死掉）時會讓所有用著它的程式當掉（Explorer 一秒一次），所以**絕不停 PIMELauncher**、後端每則請求都要很快回且不能在處理中結束；`install.ps1` 用改名取代覆寫、不停 PIME、**不從 `backends.json` 拿掉其他後端**（2026-10-20 這樣做讓 Explorer 連續當機；「只留本專案」由 `run.ps1` 改使用者的鍵盤清單），`-Rollback` 換回 `zhuyin.prev\`；`debug-pime.ts` 會依 DLL 的讀法檢查每則回應的格式與時間；`ZHUYIN_DATA=<data> npx tsx debug-pime.ts zhuyin [N]` 先做行為檢查（含點圖示、右鍵選單、選字反白、表格展開、清單最後一項是注音、選字後游標、視窗外 ↑ 換字、只用左／右 Shift）再打 N（預設 1500）句；隨機按鍵壓力測試 `ZHUYIN_DATA=data npx tsx debug-pime-fuzz.ts [按鍵數] [種子]`（stderr 有 panicked 就算失敗）；使用者文件 `docs/PIME-INSTALL.md`；安裝檔與 `install.ps1` 在 `native/pime/`；使用者雙擊 `install.cmd`／`uninstall.cmd`／`rollback.cmd`（`run.ps1`：一般權限建置、只把 `install.ps1` 提權、記錄檔顯示結果），`build-setup.cmd` 用 Inno Setup 編單一 Setup.exe（`install.ps1 -From`）；`run.ps1 stage` 只組檔案不動系統，可拿來測（不要自己執行安裝）。
 
-git tag `archive/l6-l7`（`git checkout archive/l6-l7` 取回）。內容：`packages/rerank`（BERT PLL、`RerankWorker`、Kev 客戶端）、`ImeEngine` 的 `RerankHooks`／`stickBonus`、web 的 L6 切換與 SSE、eval 的 `--rerank`／`--kev`。封存原因：依賴與模型太肥（transformers＋onnxruntime、`data/models/hf` 391MB、Kev venv 7.6GB）。要點：Kev（`runs/zy-choice16k` w=3）80.4/89.0%；BERT 要 fp32、要在 worker 跑；防閃動用軟加分（硬鎖前綴掉 5–6 點）。Kev 伺服器、訓練資料、BERT 模型與 Qwen 權重已於 2026-10-16 刪除，要重做得重新下載與訓練。
+和其他輸入法比較（數字見 `docs/MEMORY.md`）：PIME 新酷音／小麥注音用 `npx tsx debug-pime.ts chewing|mcbopomofo [N]` 直接驅動 PIME 後端（模擬 TSF DLL 的 stdin/stdout 協定，不佔鍵盤；新酷音會學進 `%APPDATA%\PIME\chewing\chewing.sqlite3`，跑前先刪）。微軟注音只能走 GUI：`debug-ms-keys.ts` 產生大千 VK 序列，`debug-ime-bench.ps1 -Ime ms` 包住 `debug-ms-bopomofo.ps1`（SendInput 打進自己的 WinForms 文字框；要 IMM `ImmSetOpenStatus` 才會進中文模式、`timeBeginPeriod(1)` 才跑得快；前景被搶就中止；PIME 在這個文字框裡收不到按鍵），會佔用鍵盤，使用者不在電腦前才能跑。
+
+Root-level `debug-*.ts` are investigation scripts (`npx tsx debug-xxx.ts`) that reach into `packages/*/src` directly.
+
+### 已封存
+
+- **TS 引擎**：git tag `archive/ts-engine`（2026-10-24）。內容：`core` 的 `decode.ts`／`l3.ts`／`x2.ts`／`slots.ts`、`packages/cli`（`ImeEngine`、`runtime.ts`、網頁測試台、`eval`／`sweep`／`--baseline classic|bigram`／`--idf`、`noise.ts`）、對拍腳本 `debug-native-parity.ts`、實驗台 `debug-acc`／`debug-shrink`／`debug-prune`／`debug-decode-dump`／`debug-alloc`／`debug-latency`／`debug-mem`／`debug-l3`／`debug-x2-*`／`debug-user-phrase`／`debug-ms-compare` 等。Rust 註解裡的「同 engine.ts／decode.ts」指的是這個 tag 裡的檔案。封存時兩邊輸出逐位元組相同；`zhuyin-native eval` 的數字與 TS `eval`／`debug-l3.ts` 逐項相同（TS 解碼器預設 a=0.8，對照時設 `ZHUYIN_A=0.8`）。
+- **L6 神經重排、L7 防閃動**：git tag `archive/l6-l7`。內容：`packages/rerank`（BERT PLL、`RerankWorker`、Kev 客戶端）、`ImeEngine` 的 `RerankHooks`／`stickBonus`、web 的 L6 切換與 SSE、eval 的 `--rerank`／`--kev`。封存原因：依賴與模型太肥（transformers＋onnxruntime、`data/models/hf` 391MB、Kev venv 7.6GB）。要點：Kev（`runs/zy-choice16k` w=3）80.4/89.0%；BERT 要 fp32、要在 worker 跑；防閃動用軟加分（硬鎖前綴掉 5–6 點）。Kev 伺服器、訓練資料、BERT 模型與 Qwen 權重已於 2026-10-16 刪除，要重做得重新下載與訓練。
 
 ## Architecture
 
 Layered pipeline (layer names appear throughout comments):
 L0 key events → L1 keymap → L2 slot composition → L3 hypothesis expansion (motor/cognitive channels) → L4 lattice → L5 decode (L6 neural rerank / L7 display hysteresis archived, see above), plus cross-cutting X1 domain prior, X2 user adaptation, X3 telemetry.
 
-| Package | Role |
+| Part | Role |
 |---|---|
-| `@zhuyin/core` | Pure, zero-IO pipeline. `keymap.ts` (L1, Dachen layout), `slots.ts` (L2 `CompositionBuffer`), `decode.ts` (L4+L5 `Decoder`), `x2.ts` (`UserAdapter`) |
-| `@zhuyin/lm` | n-gram LM training (`train.ts`, unigram-DP word segmentation) and runtime `LanguageModel` |
-| `@zhuyin/data-pipeline` | Source download → cleaning → lexicon / syllables / corpus / eval set. Source URLs, licenses and revisions live in `src/config.ts` |
-| `@zhuyin/cli` | Wires everything together; `runtime.ts#loadRuntime` is the one place that loads lexicon + LM + syllables + adapter and builds the `Decoder` |
+| `native/` | The engine. `keymap.rs` (L1, Dachen), `slots.rs` (L2 `CompositionBuffer`), `l3.rs` (L3 `Channel`), `decode.rs` (L4+L5 `Decoder`), `x2.rs` (`UserAdapter`), `engine.rs` (`ImeEngine`), `pime.rs`, `learned_web.rs`, `noise.rs` (X3 synthetic errors for eval) |
+| `@zhuyin/core` | Shared TS types and tables: syllable parts, `LexiconEntry`／`Provenance`, `keymap.ts` (`syllableToKeyCodes` for test drivers), `lexicon.ts` (`LexiconIndex` → lexicon.bin), `nontrad.ts`, `EN_CLASS` |
+| `@zhuyin/lm` | n-gram LM training (`train.ts`, unigram-DP word segmentation), `shrink.ts` → lm.bo.bin |
+| `@zhuyin/data-pipeline` | Source download → cleaning → lexicon / lexicon.bin / syllables / corpus / eval set. Source URLs, licenses and revisions live in `src/config.ts` |
 
-Key design points (from comments in `decode.ts`):
+Key design points (from comments in `decode.rs`):
 
 - Decoder score is **log-linear**: `Σ a·logP_word(w|prev 2 words) + γ·logP_char(chars|prev 2 chars)`, plus a sentence-end term `P(EOS|last 2)`. Do not convert to linear interpolation (between the word and char experts; *within* each n-gram, interpolated Kneser-Ney is the default — it beat stupid backoff by ~12 points sentence accuracy).
-- Heteronym single chars: `polyPenalty` 2.5 on every poly single char, plus `polyMinorPenalty` 6 when it is used with a non-main reading (main = first reading in the lexicon, ordered by libchewing per-reading freq; stored in `lexicon.bin` `poly` as `字\t讀音`, format `ZYLEX002`). The LM is reading-agnostic, so without it ㄑㄧㄤ gave 將 (freq from ㄐㄧㄤ) over 槍. Inside words (將進酒) no penalty. Eval +2.3 / +2.2 sentence (`debug-acc.ts minor`).
+- Heteronym single chars: `poly_penalty` 2.5 on every poly single char, plus `poly_minor_penalty` 6 when it is used with a non-main reading (main = first reading in the lexicon, ordered by libchewing per-reading freq; stored in `lexicon.bin` `poly` as `字\t讀音`). The LM is reading-agnostic, so without it ㄑㄧㄤ gave 將 (freq from ㄐㄧㄤ) over 槍. Inside words (將進酒) no penalty. Eval +2.3 / +2.2 sentence.
 - N-best uses list-Viterbi (K partial paths per two-word state), not "last two words differ".
-- `core` depends on the LM only through the structural `Scorer` interface; baselines in `runtime.ts` swap in alternate `Scorer`s.
-- L3 (`core/src/l3.ts` `Channel`): expands each observed syllable into legal intended syllables with a cost (adjacent key, extra/missed key, adjacent tone key, fuzzy pairs ㄣㄥ/ㄓㄗ/…, wrong tone; ㄣ/ㄥ has its own lower cost `nasal` = 3.5 so ㄧㄣ ㄍㄞ → 應該, other fuzzy pairs 15); defaults are ×3 the original costs because a wrong correction is worse than none (×1.5 turned typed 文檔 into 存檔, `debug-l3-probe.ts`); one edit per syllable, at most one corrected syllable per word. Decoder adds `chTerm` = −cost and records `reading`. Single-syllable corrections only apply when the observed syllable has no lexicon entries (`altSingleOnlyIfEmpty`): enabling them recovers ~7 more points on noisy input but makes decoding 5–8× slower. Evaluated only on synthetic errors (`cli/src/noise.ts`, shares the adjacency/fuzzy tables with L3 → optimistic); there is no real typing log. X2 learns from `breakdown.reading`, not the observed (typo) syllables.
-- Words added at runtime (`Decoder.addEntry`: user phrases, mined words) that the word LM doesn't know (`Scorer.knowsWord`) get the best word-level score of a split into known words (`partsLogProb` / `parts_log_prob`, 2–6 chars), not the unknown-word penalty (~−31); the manual-phrase boost (+8) goes on top. Without it a picked phrase like 狀態欄 never wins (docs/MEMORY.md §7「狀態欄」, `debug-user-phrase.ts`).
-- `UserAdapter` (X2) state persists to `data/user/adapter.json`; user phrases are also added live via `decoder.addEntry`. Bounded by `X2_LIMITS` (10k seq records, 10k global, 5k mined, 20k manual hard cap; decayed count < 0.025 is dropped; `compact` on load and every 2,000 new entries): the file plateaus near 2MB, ~17ms per save (docs/MEMORY.md「X2 學習資料的成長」, `debug-x2-growth.ts`). `x2.rs` must stay byte-identical (`debug-native-parity.ts replay`). Learning on commit is strict since 2026-10-21 (the user's data was full of mis-segmented fragments): mined words are 2–4 chars and enter the decoder only after showing up in `MINED_MIN_FREQ` = 2 separate commits; mined runs, picked runs and rule-4 joins whose first or last char is in `PARTICLE_EDGE` (STANDALONE + 嗎呢吧啊呀喔哦) are not learned. PIME's right-click「查看學習資料」serves a page from a loopback server (`native/src/learned_web.rs`: token, Host and Origin checks; stops 3 s after the last tab sends `/close` on pagehide, or after 3 min without the page's 60 s `/ping`) whose delete buttons call `delete_learned` (adapter `remove_phrase`／`remove_selection`, `Decoder::remove_entry`, save at once); end-to-end check `debug-learned-web.ts`.
+- L3 (`l3.rs` `Channel`): expands each observed syllable into legal intended syllables with a cost (adjacent key, extra/missed key, adjacent tone key, fuzzy pairs ㄣㄥ/ㄓㄗ/…, wrong tone; ㄣ/ㄥ has its own lower cost `nasal` = 3.5 so ㄧㄣ ㄍㄞ → 應該, other fuzzy pairs 15); defaults are ×3 the original costs because a wrong correction is worse than none (×1.5 turned typed 文檔 into 存檔); one edit per syllable, at most one corrected syllable per word. Decoder adds −cost and records `reading`. Single-syllable corrections only apply when the observed syllable has no lexicon entries (`alt_single_only_if_empty`): enabling them recovers ~7 more points on noisy input but makes decoding 5–8× slower. Evaluated only on synthetic errors (`noise.rs`, shares the adjacency/fuzzy tables with L3 → optimistic); there is no real typing log. X2 learns from `breakdown.reading`, not the observed (typo) syllables.
+- Words added at runtime (`Decoder::add_entry`: user phrases, mined words) that the word LM doesn't know get the best word-level score of a split into known words (`parts_log_prob`, 2–6 chars), not the unknown-word penalty (~−31); the manual-phrase boost (+8) goes on top. Without it a picked phrase like 狀態欄 never wins (docs/MEMORY.md §7「狀態欄」).
+- `UserAdapter` (X2) state persists to `%APPDATA%\PIME\zhuyin\adapter.json`; user phrases are also added live via `add_entry`. Bounded (10k seq records, 10k global, 5k mined, 20k manual hard cap; decayed count < 0.025 is dropped; compact on load and every 2,000 new entries): the file plateaus near 2MB, ~17ms per save (docs/MEMORY.md「X2 學習資料的成長」). Learning on commit is strict since 2026-10-21 (the user's data was full of mis-segmented fragments): mined words are 2–4 chars and enter the decoder only after showing up in `MINED_MIN_FREQ` = 2 separate commits; mined runs, picked runs and rule-4 joins whose first or last char is in `PARTICLE_EDGE` (`engine.rs`: STANDALONE + 嗎呢吧啊呀喔哦) are not learned. On commit, a picked word (or the run of single chars containing a picked char, or a picked single char joined to the adjacent multi-char word, ≤4 chars) is saved as a manual user phrase, since a once-selected mined word otherwise loses to the LM. PIME's right-click「查看學習資料」serves a page from a loopback server (`learned_web.rs`: token, Host and Origin checks; stops 3 s after the last tab sends `/close` on pagehide, or after 3 min without the page's 60 s `/ping`) whose delete buttons call `delete_learned` (adapter `remove_phrase`／`remove_selection`, `Decoder::remove_entry`, save at once); end-to-end check `debug-learned-web.ts`.
 
 ## Data licensing constraints
 

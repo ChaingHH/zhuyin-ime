@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "data:lexicon": "tsx src/cli.ts download && tsx src/cli.ts lexicon",
+    "data:lexicon": "tsx src/cli.ts download && tsx src/cli.ts lexicon && tsx src/cli.ts lexbin",
     "data:corpus": "tsx src/cli.ts corpus"
   },
   "dependencies": {

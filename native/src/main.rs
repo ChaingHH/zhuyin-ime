@@ -1,5 +1,10 @@
 //! 注音輸入法引擎的 Rust 移植（docs/MEMORY.md「Rust 引擎」）。
-//!   zhuyin-native eval                      評測句準（eval/colloquial.jsonl、eval/written.jsonl）
+//!   zhuyin-native eval [fails-out]          評測（eval/colloquial、written、mixed）：句準（dev＝偶數句／test＝奇數句）、
+//!                                           字準、N-best oracle、延遲；fails-out 寫出答錯的句子。
+//!                                           一設定一行程，用環境變數換設定：ZHUYIN_GAMMA、ZHUYIN_POLY、ZHUYIN_POLY_MINOR、
+//!                                           ZHUYIN_BEAM、ZHUYIN_NBEST（預設 4）；ZHUYIN_LM＝模型檔（預設 data/models/lm.bo.bin）；
+//!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
+//!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
 //!   zhuyin-native keys <out>                L1/L2：評測句的大千按鍵 → 音節序列
 //!   zhuyin-native l3 <in> <out> <s>         L3：解碼 debug-native-parity.ts 倒出的有錯輸入
@@ -19,6 +24,7 @@ mod l3;
 mod learned_web;
 mod lexicon;
 mod lm;
+mod noise;
 mod pime;
 mod slots;
 mod x2;
@@ -262,7 +268,8 @@ fn main() {
     }
     let a: f64 = std::env::var("ZHUYIN_A").map_or(1.0, |s| s.parse().unwrap());
     let t0 = Instant::now();
-    let lm = lm::BackoffLm::load(&format!("{data}/models/lm.bo.bin")).unwrap();
+    let lm_file = std::env::var("ZHUYIN_LM").unwrap_or_else(|_| format!("{data}/models/lm.bo.bin"));
+    let lm = lm::BackoffLm::load(&lm_file).unwrap();
     let lex = lexicon::Lexicon::load(&format!("{data}/processed/lexicon.bin")).unwrap();
     let mut dec = decode::Decoder::new(lm, lex, a, 0.5);
     let legal = load_legal(&data);
@@ -271,32 +278,124 @@ fn main() {
 
     let t1 = Instant::now();
     let mut done = 0;
-    let plain = |n_best| decode::DecodeOptions {
-        n_best,
-        ..Default::default()
-    };
     match args.get(1).map(String::as_str) {
         Some("eval") => {
-            for f in [
-                "eval/colloquial.jsonl",
-                "eval/written.jsonl",
-                "eval/mixed.jsonl",
-            ] {
+            let env = |k: &str| std::env::var(k).ok().map(|v| v.parse::<f64>().unwrap());
+            if let Some(v) = env("ZHUYIN_GAMMA") {
+                dec.gamma = v;
+            }
+            if let Some(v) = env("ZHUYIN_POLY") {
+                dec.poly_penalty = v;
+            }
+            if let Some(v) = env("ZHUYIN_POLY_MINOR") {
+                dec.poly_minor_penalty = v;
+            }
+            if let Some(v) = env("ZHUYIN_BEAM") {
+                dec.beam = v as usize;
+            }
+            let n_best = env("ZHUYIN_NBEST").map_or(4, |v| v as usize);
+            // ZHUYIN_L3_SCALE＝s：開 L3、代價＝初始值 × s（同 l3 指令）；ZHUYIN_L3：開 L3、預設代價
+            let ch = match env("ZHUYIN_L3_SCALE") {
+                Some(s) => {
+                    let mut o = scaled(s);
+                    if let Some(v) = env("ZHUYIN_L3_NASAL") {
+                        o.nasal = v;
+                    }
+                    if let Some(v) = env("ZHUYIN_L3_MAXALTS") {
+                        o.max_alts = v as usize;
+                    }
+                    Some(l3::Channel::new(legal.clone(), o))
+                }
+                None => std::env::var("ZHUYIN_L3")
+                    .is_ok_and(|v| v != "0")
+                    .then(|| l3::Channel::new(legal.clone(), Default::default())),
+            };
+            // ZHUYIN_NOISE＝key,cog：注入錯誤；每句固定種子 1000+i，每個設定看到同一組錯誤
+            let noise = std::env::var("ZHUYIN_NOISE").ok().map(|v| {
+                let p: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect();
+                noise::NoiseOptions {
+                    key: p[0],
+                    cognitive: p[1],
+                }
+            });
+            let mut fails = vec![];
+            let files = ["eval/colloquial.jsonl", "eval/written.jsonl", "eval/mixed.jsonl"];
+            for f in files {
                 let samples = load_samples(f);
-                let ok = samples
-                    .iter()
-                    .filter(|s| {
-                        dec.decode(&s.syllables, &plain(4))
-                            .first()
-                            .is_some_and(|p| p.text() == s.text)
-                    })
-                    .count();
-                done += samples.len();
-                println!(
-                    "{f}: 句準 {:.2}%（{ok}/{}）",
-                    100.0 * ok as f64 / samples.len() as f64,
-                    samples.len()
+                let n = samples.len();
+                // 句準分 dev（偶數句）／test（奇數句）
+                let (mut ok, mut oracle, mut changed) = ([0usize; 2], 0, 0);
+                let (mut char_ok, mut char_total) = (0, 0);
+                let (mut err, mut hit) = (0, 0);
+                let mut lat = vec![];
+                for (i, s) in samples.iter().enumerate() {
+                    let obs = match &noise {
+                        Some(o) => noise::inject_noise(
+                            &s.syllables,
+                            &legal,
+                            o,
+                            &mut noise::Rng::new(1000 + i as u32),
+                        ),
+                        None => s.syllables.clone(),
+                    };
+                    if obs != s.syllables {
+                        changed += 1;
+                    }
+                    let alts: Option<Vec<_>> =
+                        ch.as_ref().map(|c| obs.iter().map(|x| c.expand(x)).collect());
+                    // 涵蓋率：注入錯誤的音節裡，正確音節出現在展開裡的比例（L3 的上限）
+                    if let (Some(alts), true) = (&alts, obs.len() == s.syllables.len()) {
+                        for (j, o) in obs.iter().enumerate() {
+                            if *o != s.syllables[j] {
+                                err += 1;
+                                hit += alts[j].iter().any(|h| h.syl == s.syllables[j]) as usize;
+                            }
+                        }
+                    }
+                    let o = decode::DecodeOptions {
+                        n_best,
+                        alternatives: alts.as_deref(),
+                        ..Default::default()
+                    };
+                    let t = Instant::now();
+                    let paths = dec.decode(&obs, &o);
+                    lat.push(t.elapsed().as_secs_f64() * 1000.0);
+                    let out = paths.first().map_or(String::new(), |p| p.text());
+                    // 逐字比較用 code point；沒有結果也算進分母
+                    let r: Vec<char> = s.text.chars().collect();
+                    char_ok += out.chars().zip(&r).filter(|(a, b)| a == *b).count();
+                    char_total += r.len();
+                    if out == s.text {
+                        ok[i % 2] += 1;
+                    } else {
+                        fails.push(format!("{f}\t{}\n\t{out}", s.text));
+                    }
+                    oracle += paths.iter().any(|p| p.text() == s.text) as usize;
+                }
+                done += n;
+                lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
+                let mut line = format!(
+                    "{f}: n={n} 句準 {:.2}%（dev {:.1} test {:.1}）字準 {:.2}% oracle@{n_best} {:.1}% p50 {:.1}ms p95 {:.1}ms",
+                    pct(ok[0] + ok[1], n),
+                    pct(ok[0], n.div_ceil(2)),
+                    pct(ok[1], n / 2),
+                    pct(char_ok, char_total),
+                    pct(oracle, n),
+                    lat[lat.len() / 2],
+                    lat[(lat.len() as f64 * 0.95) as usize],
                 );
+                if noise.is_some() {
+                    line += &format!(" | 有錯的句子 {:.1}%", pct(changed, n));
+                }
+                if ch.is_some() && err > 0 {
+                    line += &format!(" | 涵蓋 {hit}/{err} {:.1}%", pct(hit, err));
+                }
+                println!("{line}");
+            }
+            if let Some(out) = args.get(2) {
+                std::fs::write(out, fails.join("\n")).unwrap();
+                eprintln!("{} 句錯 -> {out}", fails.len());
             }
         }
         Some("dump") => {

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
-import { loadEvalSamples } from './packages/cli/src/runtime.js';
+import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
 
 const PIME = 'C:\\Program Files (x86)\\PIME';
 const BACKENDS = {

@@ -11,6 +11,12 @@ export interface EvalSample {
   syllables: string[];
 }
 
+/** 讀評測集（第一行是中繼資料） */
+export async function loadEvalSamples(file: string): Promise<EvalSample[]> {
+  const lines = (await readFile(file, 'utf8')).split('\n').filter(Boolean);
+  return lines.slice(1).map((l) => JSON.parse(l) as EvalSample);
+}
+
 /** 線性同餘 RNG——評測集必須可重現（種子寫進輸出檔名旁的 meta）。 */
 function lcg(seed: number): () => number {
   let s = seed >>> 0;

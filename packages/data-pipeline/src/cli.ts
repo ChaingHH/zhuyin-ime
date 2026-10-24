@@ -1,4 +1,5 @@
 import { cmdDownload, cmdLexicon } from './build/run.js';
+import { cmdLexbin } from './build/lexbin.js';
 import { cmdSyllables } from './build/syllables.js';
 import { buildColloquial, buildWritten } from './build/corpus.js';
 import { buildEvalSet } from './build/evalset.js';
@@ -17,6 +18,9 @@ async function main(): Promise<void> {
     case 'lexicon':
       await cmdLexicon();
       break;
+    case 'lexbin':
+      await cmdLexbin();
+      break;
     case 'syllables':
       await cmdSyllables();
       break;
@@ -32,7 +36,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.log(`用法: tsx src/cli.ts <download|lexicon|syllables|corpus|evalset> [args…]`);
+      console.log(`用法: tsx src/cli.ts <download|lexicon|lexbin|syllables|corpus|evalset> [args…]`);
       process.exitCode = cmd === undefined ? 0 : 1;
   }
 }

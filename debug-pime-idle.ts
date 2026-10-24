@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { syllableToKeyCodes } from '@zhuyin/core';
-import { loadEvalSamples } from './packages/cli/src/runtime.js';
+import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
 
 const n = Number(process.argv[2] ?? 300);
 const cold = process.argv[3] === 'cold';

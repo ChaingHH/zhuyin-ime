@@ -3,7 +3,6 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/lm" },
-    { "path": "packages/data-pipeline" },
-    { "path": "packages/cli" }
+    { "path": "packages/data-pipeline" }
   ]
 }

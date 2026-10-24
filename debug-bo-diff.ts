@@ -1,7 +1,7 @@
 // 退回式模型 vs 未剪枝 KN 計數模型：沿評測句的正解斷詞逐詞比 log 機率，列出差最多的查詢。
 // NODE_OPTIONS=--max-old-space-size=12000 npx tsx debug-bo-diff.ts [bits]
 import { LanguageModel, buildBackoff, scoreNgrams } from './packages/lm/src/index.js';
-import { loadEvalSamples } from './packages/cli/src/runtime.js';
+import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
 
 const SRC = 'data/models/lm.tsv';
 const bits = Number(process.argv[2] ?? 16) as 8 | 16;

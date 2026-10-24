@@ -54,10 +54,6 @@ export const INITIALS = [
 ] as const;
 
 export * from './keymap.js';
-export * from './slots.js';
-export * from './decode.js';
-export * from './x2.js';
-export * from './l3.js';
 export * from './lexicon.js';
 export * from './nontrad.js';
 
@@ -118,3 +114,9 @@ export interface LexiconEntry {
   readonly freq?: number;
   readonly provenance: readonly Provenance[];
 }
+
+/**
+ * 英文類別符號（私用區字元）：訓練語料（build-big-corpus.ts CORPUS_EN=1）把一串英文詞換成它，
+ * 解碼器（native/src/decode.rs is_english）把組字區裡的英文原樣 token 當成它來查 LM（詞、字兩個專家都是）。
+ */
+export const EN_CLASS = '';
