@@ -63,7 +63,9 @@ Windows 的注音輸入法（大千鍵盤）。用語言模型整句選字；打
 
 ## 開發者
 
-使用者版本（Setup.exe）只有 Rust 編出的引擎與資料檔。這個 repo 還有 TS 版引擎（實驗與評測用）、資料管線與模型訓練。
+使用者版本（Setup.exe）只有 Rust 編出的引擎與資料檔。這個 repo 還有引擎原始碼（`native/`）、資料管線與模型訓練（TypeScript）。
+
+`master` 是開發中的程式碼，可能比最新的 Release 新，也還沒驗證過。要拿使用者版本的原始碼，切到 Release 的 tag（例如 `git checkout v1.0.1`）。舊的 TS 版引擎封存在 tag `archive/ts-engine`。
 
 - 專案全貌、架構、評測：[docs/PROJECT.md](docs/PROJECT.md)
 - 指令速查：[CLAUDE.md](CLAUDE.md)
