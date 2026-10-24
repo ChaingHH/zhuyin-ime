@@ -235,6 +235,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | 項目 | 預設 | 作用 |
 |---|---|---|
 | `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊、`"none"` 都不切換（用左鍵點圖示切換）。關掉的那邊單按不做事；其他值當 `"both"` |
+| `halfWidth` | `false` | `true`：注音模式的標點也打半形（Shift+, 打出 `,` 而不是 `，`）。右鍵選單「標點用半形」切換。不管這項，注音模式下 Shift+數字等沒有全形對應的符號（`%`、`@`、`#`…）都直接打出半形，不必切英文 |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
 | `candFontName` | `"Microsoft JhengHei UI"` | 選字視窗的字型（1–31 字元的字型名） |

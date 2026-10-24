@@ -131,6 +131,15 @@ describe('標點與空格', () => {
     expect(e.onKey({ code: 'BracketLeft', key: '[', timestampMs: 0 }).text).toBe('「');
   });
 
+  it('Shift 符號沒有全形對應就原樣輸出；halfWidth 時標點也半形', () => {
+    const e = setup();
+    expect(e.onKey({ code: 'Digit5', key: '%', timestampMs: 0 }).composition).toBe('經驗%');
+    e.halfWidth = true;
+    expect(e.onKey({ code: 'Comma', key: '<', timestampMs: 0 }).composition).toBe('經驗%<');
+    e.commit();
+    expect(e.onKey({ code: 'Digit2', key: '@', timestampMs: 0 }).text).toBe('@');
+  });
+
   it('沒按 Shift 的 , 還是注音 ㄝ', () => {
     const e = setup();
     e.commit();

@@ -80,6 +80,8 @@ const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
 /// 右鍵選單：用瀏覽器開學習資料（learned.html）
 const ID_SHOW_LEARNED: i64 = 5;
+/// 右鍵選單：注音模式的標點也用半形（config.json 的 halfWidth）
+const ID_HALF_WIDTH: i64 = 6;
 const LEARNED_HTML: &str = include_str!("learned.html");
 
 #[link(name = "shell32")]
@@ -302,6 +304,8 @@ pub struct Backend {
     stale: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
     shift_toggle: &'static str,
+    /// 注音模式的標點用半形：config.json 的 "halfWidth"
+    half_width: bool,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
     /// 這個鍵（filterKeyDown 決定）只是展開／收回表格，onKeyDown 不交給引擎
@@ -341,6 +345,7 @@ impl Backend {
             shift_alone: false,
             stale: false,
             shift_toggle: "both",
+            half_width: false,
             table: false,
             layout_key: false,
             sent_cols: HashMap::new(),
@@ -372,12 +377,16 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、halfWidth、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
         let (l, r) = shift_sides(s.get("shiftToggle").and_then(Value::as_str).unwrap_or(""));
         self.shift_toggle = shift_name(l, r);
+        self.half_width = s.get("halfWidth").and_then(Value::as_bool).unwrap_or(false);
+        if let Some(e) = self.eng.as_mut() {
+            e.half_width = self.half_width;
+        }
         if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = secs(secs_v, 300.0);
         }
@@ -615,6 +624,7 @@ impl Backend {
             match r {
                 Ok(Ok((mut eng, save_ok))) => {
                     eng.mode = self.mode;
+                    eng.half_width = self.half_width;
                     self.eng = Some(eng);
                     self.save_ok = save_ok;
                     eprintln!("[pime] 載入引擎 {:?}", t.elapsed());
@@ -1003,6 +1013,13 @@ impl Backend {
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     Some(ID_SHOW_LEARNED) => self.show_learned(),
+                    Some(ID_HALF_WIDTH) => {
+                        self.half_width = !self.half_width;
+                        if let Some(e) = self.eng.as_mut() {
+                            e.half_width = self.half_width;
+                        }
+                        self.write_setting("halfWidth", json!(self.half_width));
+                    }
                     _ => {}
                 }
                 None
@@ -1018,6 +1035,8 @@ impl Backend {
                         {"id": 0, "text": ""},
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
+                        {"id": 0, "text": ""},
+                        {"id": ID_HALF_WIDTH, "text": "標點用半形", "checked": self.half_width},
                     ]),
                 );
                 None

@@ -69,6 +69,8 @@ const PUNCT: Record<string, string> = {
   '\\': '、',
   '~': '～',
 };
+/** 美式鍵盤要按 Shift 才打得出的符號：不在 PUNCT（或設定只用半形）就原樣輸出，不必切英文（同 engine.rs） */
+const SHIFTED = '!@#$%^&*()_+{}|:"<>?~';
 
 export type InputMode = 'zhuyin' | 'english';
 
@@ -136,6 +138,8 @@ export class ImeEngine {
   channel?: Channel;
   /** 英文模式：按鍵不進 L1/L2，直接輸出字元 */
   mode: InputMode = 'zhuyin';
+  /** 注音模式的標點也用半形（Shift+, 打出 , 而不是 ，） */
+  halfWidth = false;
   /** 使用者選字固定的詞段（本次組字內有效；解碼硬性遵守） */
   private fixed: FixedSpan[] = [];
   /** 選字視窗：候選與目前頁 */
@@ -404,7 +408,10 @@ export class ImeEngine {
     // 標點、空白鍵（沒有未完成注音時）：組字區空的就直接輸出；
     // 有字就當原樣字元插在游標處，跟著一起送出（還沒確定就能加，游標在中間也行）。
     // 打到一半的注音時：空白是一聲，標點不收（先把注音打完或退掉）
-    const punct = ev.key !== undefined ? PUNCT[ev.key] : undefined;
+    const k = ev.key;
+    const punct =
+      (k !== undefined && !this.halfWidth ? PUNCT[k] : undefined) ??
+      (k !== undefined && k.length === 1 && SHIFTED.includes(k) ? k : undefined);
     // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
     const symbol =
       punct ??

@@ -40,6 +40,8 @@ const PUNCT: [(&str, &str); 14] = [
     ("\\", "、"),
     ("~", "～"),
 ];
+/// 美式鍵盤要按 Shift 才打得出的符號：不在 PUNCT（或設定只用半形）就原樣輸出，不必切英文（同 engine.ts）
+const SHIFTED: &str = "!@#$%^&*()_+{}|:\"<>?~";
 
 pub struct MenuView {
     pub items: Vec<String>,
@@ -162,6 +164,8 @@ pub struct ImeEngine {
     pub adapter: Option<UserAdapter>,
     pub channel: Option<Channel>,
     pub mode: Mode,
+    /// 注音模式的標點也用半形（Shift+, 打出 , 而不是 ，）
+    pub half_width: bool,
     /// X2 的時鐘（毫秒）；None＝系統時間
     pub clock: Option<f64>,
     last: Vec<DecodePath>,
@@ -180,6 +184,7 @@ impl ImeEngine {
             adapter,
             channel: None,
             mode: Mode::Zhuyin,
+            half_width: false,
             clock: None,
             last: vec![],
             last_seq: vec![],
@@ -545,7 +550,10 @@ impl ImeEngine {
             self.clear();
             return self.state(true);
         }
-        let punct = key.and_then(|k| PUNCT.iter().find(|(p, _)| *p == k).map(|(_, v)| *v));
+        let full = key
+            .filter(|_| !self.half_width)
+            .and_then(|k| PUNCT.iter().find(|(p, _)| *p == k).map(|(_, v)| *v));
+        let punct = full.or(key.filter(|k| k.len() == 1 && SHIFTED.contains(*k)));
         // 數字鍵盤的數字：和標點一樣當原樣字元（大千的數字鍵是注音，數字只能從這裡打）
         let numpad = code
             .strip_prefix("Numpad")
