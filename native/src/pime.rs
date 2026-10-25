@@ -999,7 +999,7 @@ impl Backend {
         let st = if layout_key {
             eng.state(true)
         } else {
-            eng.on_key(code, k.key.as_deref())
+            eng.on_key(code, k.key.as_deref(), k.shift)
         };
         // 英文模式下打空白／標點會整段送出（有學習）
         if was && st.text.is_some() {

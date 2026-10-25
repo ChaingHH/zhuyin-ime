@@ -380,6 +380,17 @@ async function smoke(): Promise<void> {
     return r;
   };
   check((await press('Comma', '<')).out === '<', 'Shift+, → <');
+  // Shift＋字母：同英文模式，組字區空就直接輸出，組字中併進英文 token
+  check((await withMods([0x10], 'KeyA', 'A')).out === 'A', 'Shift+A → A');
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c); // ㄋㄧˇ
+  await withMods([0x10], 'KeyA', 'A');
+  check((await press('Enter')).out.endsWith('A'), '組字中 Shift+A 併進組字區');
+  // CapsLock 開著（key 是大寫）但沒按 Shift：仍打注音
+  const caps = await press('KeyA', 'A');
+  check(caps.eaten && caps.out === '', 'CapsLock＋A 仍打注音');
+  await press('Escape');
+  // CapsLock＋Shift＋A（key 是小寫）：打英文 a
+  check((await withMods([0x10], 'KeyA', 'a')).out === 'a', 'CapsLock＋Shift+A → a');
   check((await withMods([0x11], 'Comma')).out === '，', 'Ctrl+, → ，');
   check((await withMods([0x11, 0x10], 'BracketLeft')).out === '『', 'Ctrl+Shift+[ → 『');
   check(!(await withMods([0x11], 'KeyC')).eaten, 'Ctrl+C 交給程式');

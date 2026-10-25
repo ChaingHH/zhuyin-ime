@@ -144,7 +144,7 @@ fn replay(eng: &mut engine::ImeEngine, events: &str) -> Vec<String> {
             "k" => {
                 let key = f.get(2).filter(|k| !k.is_empty()).copied();
                 let t = Instant::now();
-                let st = eng.on_key(f[1], key);
+                let st = eng.on_key(f[1], key, false);
                 keys.push(ms(t));
                 // ZHUYIN_QUIET：不留每鍵的輸出（長時間模擬量記憶體時，輸出本身會佔上百 MB）
                 if quiet {

@@ -559,15 +559,16 @@ impl ImeEngine {
         }
     }
 
-    /// 一次按鍵。code＝KeyboardEvent.code，key＝KeyboardEvent.key（標點、英文模式用）
-    pub fn on_key(&mut self, code: &str, key: Option<&str>) -> EngineState {
+    /// 一次按鍵。code＝KeyboardEvent.code，key＝KeyboardEvent.key（標點、英文模式用），shift＝Shift 按著
+    pub fn on_key(&mut self, code: &str, key: Option<&str>, shift: bool) -> EngineState {
         self.keys += 1;
         self.backspaces += (code == "Backspace") as usize;
         if self.menu.is_some() {
             return self.on_menu_key(code);
         }
         let before = self.cursor();
-        if self.mode == Mode::English {
+        // 注音模式的 Shift＋字母：照英文模式打出字母（大小寫照 CapsLock）。只按 CapsLock 仍打注音
+        if self.mode == Mode::English || shift && code.starts_with("Key") {
             let ch = key.filter(|k| k.chars().count() == 1);
             if self.comp.is_empty() {
                 return Self::direct(ch.map(String::from));

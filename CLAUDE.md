@@ -61,7 +61,7 @@ L1–L5、L3、X2、`ImeEngine`（`engine.rs`）、PIME 後端協定（`pime.rs`
 
 - `eval [fails-out]`：`eval/colloquial`、`written`、`mixed` 的句準（dev＝偶數句／test＝奇數句）、字準、N-best oracle、延遲。一設定一行程，用環境變數換設定：`ZHUYIN_A`（預設 1）、`ZHUYIN_GAMMA`、`ZHUYIN_POLY`、`ZHUYIN_POLY_MINOR`、`ZHUYIN_BEAM`、`ZHUYIN_NBEST`、`ZHUYIN_LM`；L3：`ZHUYIN_NOISE=key,cog`（`noise.rs` 注入合成錯誤，每句種子 1000+i）配 `ZHUYIN_L3=1` 或 `ZHUYIN_L3_SCALE=s`（代價 × s，另有 `_NASAL`、`_MAXALTS`），會多印「有錯的句子」與涵蓋率；`ZHUYIN_EVAL=<檔,…>` 換評測檔。不讀 adapter.json。
 - `usage <usage.jsonl> [eval-out]`：使用紀錄的統計（不用改就對、每 100 字選字修正、最常改的字、L3 更正）；eval-out 轉成評測集格式（音節照實際打的）。紀錄由學習資料頁的「使用紀錄」開關打開（config `usageLog`，預設關），每次送出 `ImeEngine` 往 `usage_lines` 加一行（`engine.rs` `usage_record`，有選字時另解碼一次求原本的第一名），`pime.rs` `flush_usage` 在每則請求後附加到設定檔旁的 `usage.jsonl`，超過 10MB 留後一半。
-- 標點：注音模式的 Shift 組合打半形（`SHIFTED`，原樣字元）；Ctrl＋原按鍵打全形（`engine.rs` `ctrl_punct`，`pime.rs` 在 filterKeyDown 攔下、`ImeEngine::on_punct` 處理；Ctrl+Shift+[ ] → 『』）；英文模式的 Ctrl 組合交給應用程式。1.0.1 的 `halfWidth` 設定已拿掉（右鍵選單 id 6 不再用）。
+- 標點：注音模式的 Shift 組合打半形（`SHIFTED`，原樣字元）；Shift＋字母走英文模式那段（`on_key` 的 `shift` 參數，CapsLock 不影響注音）；Ctrl＋原按鍵打全形（`engine.rs` `ctrl_punct`，`pime.rs` 在 filterKeyDown 攔下、`ImeEngine::on_punct` 處理；Ctrl+Shift+[ ] → 『』）；英文模式的 Ctrl 組合交給應用程式。1.0.1 的 `halfWidth` 設定已拿掉（右鍵選單 id 6 不再用）。
 - `dump`、`keys`、`l3`、`replay`：倒 N-best、L1/L2 按鍵、L3 解碼、重播按鍵事件。
 - 英文模式：切換不送出組字區；組字中打的字母、數字併進游標前的英文 token（`slots.rs` `append_english`），前面的中文跟著重解碼；英文模式下空白、標點才整段送出；退格一次退一個字母。`EngineState.cursor` 是字數（英文 token 照長度）。
 - X2 選字加成的鍵是該詞自己的讀音（以前傳整句，bySeq 從沒生效）。
