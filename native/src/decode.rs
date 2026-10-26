@@ -64,6 +64,30 @@ pub struct Decoder {
     max_span: usize,
     /// 執行中加的詞（add_entry），詞級分數走 parts_log_prob
     runtime_words: std::collections::HashSet<String>,
+    /// 詞典改過（add_entry／remove_entry）就加一，Lattice 跟著作廢
+    gen: u64,
+}
+
+/// 增量解碼的格：位置 q 的桶只收 q 之前出發的邊、門檻只看到達 q 的路徑，與後面的音節無關。
+/// 所以打下一個音節只補「到達新位置」的邊；改中間音節（退格、L3 展開不同）從共同前綴截斷再補。
+/// 結果與全量 decode 逐位元相同（`eval` 的 ZHUYIN_INCR=1 逐步比對）。
+/// 呼叫端負責：modifier 換了（X2 學習資料改動、時間）就換一個新的 Lattice。
+/// ponytail: a、gamma、beam 等參數改了不會作廢；只有 eval 啟動時改
+#[derive(Default)]
+pub struct Lattice {
+    seq: Vec<String>,
+    alts: Option<Vec<Vec<Hypothesis>>>,
+    fixed: Vec<FixedSpan>,
+    n_best: usize,
+    ms: usize,
+    gen: u64,
+    extra: Vec<String>,
+    paths: Vec<Path>,
+    buckets: Vec<Bucket>,
+    // None＝還沒算；Some(None)＝被固定段擋住（不同於查無詞，不補未知詞）
+    span_cache: Vec<Option<Option<Vec<Cand>>>>,
+    floors: Vec<f64>,
+    counts: Vec<usize>,
 }
 
 /// 使用者選定的詞段：從第 pos 個音節起、len 個音節固定為 word
@@ -118,7 +142,7 @@ pub struct DecodeOptions<'m> {
     pub fixed: &'m [FixedSpan],
 }
 
-/// 詞編號：小於詞典詞數的是詞典詞，其餘是這次解碼的額外詞（空詞、□、原樣 token）
+/// 詞編號：小於詞典詞數的是詞典詞，其餘是這個格的額外詞（空詞、□、原樣 token）
 struct Words<'a> {
     lex: &'a Lexicon,
     extra: Vec<String>,
@@ -222,59 +246,126 @@ impl Decoder {
             alt_single_only_if_empty: true,
             max_span,
             runtime_words: Default::default(),
+            gen: 0,
         }
     }
 
     /// 解碼音節序列，回傳 N-best（含逐詞拆解）
     pub fn decode(&self, seq: &[String], o: &DecodeOptions) -> Vec<DecodePath> {
+        self.decode_in(&mut Lattice::default(), seq, o)
+    }
+
+    /// 同 decode，但重用 lat 裡與這次相同的前綴（見 Lattice）
+    pub fn decode_in(
+        &self,
+        lat: &mut Lattice,
+        seq: &[String],
+        o: &DecodeOptions,
+    ) -> Vec<DecodePath> {
         let n = seq.len();
         if n == 0 {
             return vec![];
         }
         let n_best = if o.n_best == 0 { 4 } else { o.n_best };
+        let ms = self.max_span;
+        let key = |w1: u32, w2: u32| (w1 as u64) << 32 | w2 as u64;
+        // 可重用的前綴長度 p：音節與 L3 展開都相同的那段
+        let mut p = 0;
+        if !lat.buckets.is_empty()
+            && (lat.n_best, lat.ms, lat.gen) == (n_best, ms, self.gen)
+            && lat.fixed == o.fixed
+            && lat.alts.is_some() == o.alternatives.is_some()
+        {
+            let same_alts = |i: usize| match (&lat.alts, o.alternatives) {
+                (Some(x), Some(y)) => x.get(i) == y.get(i),
+                _ => true,
+            };
+            while p < n.min(lat.seq.len()) && lat.seq[p] == seq[p] && same_alts(p) {
+                p += 1;
+            }
+            // 跨過 p 的固定段：舊格裡生效與否看當時長度，從它前面重算
+            for f in o.fixed {
+                if f.pos < p && f.pos + f.len > p {
+                    p = f.pos;
+                }
+            }
+        }
+        if p == 0 {
+            *lat = Lattice::default();
+        }
         let mut words = Words {
             lex: &self.lex,
-            extra: vec![],
+            extra: std::mem::take(&mut lat.extra),
         };
         let empty = words.intern("");
         let unk = words.intern(UNK_WORD);
         let en = words.intern(EN_CLASS);
-        let key = |w1: u32, w2: u32| (w1 as u64) << 32 | w2 as u64;
-        let mut paths = vec![Path {
-            score: 0.0,
-            parent: NONE,
-            word: empty,
-            w1: empty,
-            w2: empty,
-            c1: BOS,
-            c2: BOS,
-            ci: NONE,
-            cand: NONE,
-        }];
-        let mut buckets: Vec<Bucket> = (0..=n).map(|_| Bucket::default()).collect();
-        buckets[0].index.insert(key(empty, empty), 0);
-        buckets[0].lists.push((key(empty, empty), vec![0]));
-        let ms = self.max_span;
-        // None＝還沒算；Some(None)＝被固定段擋住（不同於查無詞，不補未知詞）
-        let mut span_cache: Vec<Option<Option<Vec<Cand>>>> = vec![None; n * (ms + 1)];
-        let mut floors = vec![f64::NEG_INFINITY; n + 1];
-        let mut counts = vec![0usize; n + 1];
+        if p == 0 {
+            lat.paths.push(Path {
+                score: 0.0,
+                parent: NONE,
+                word: empty,
+                w1: empty,
+                w2: empty,
+                c1: BOS,
+                c2: BOS,
+                ci: NONE,
+                cand: NONE,
+            });
+            let mut b0 = Bucket::default();
+            b0.index.insert(key(empty, empty), 0);
+            b0.lists.push((key(empty, empty), vec![0]));
+            lat.buckets.push(b0);
+            lat.floors.push(f64::NEG_INFINITY);
+            lat.counts.push(0);
+        } else {
+            // 截到 p：p 之後的桶重建；跨過 p 的 span 候選看到的音節變了
+            lat.buckets.truncate(p + 1);
+            lat.floors.truncate(p + 1);
+            lat.counts.truncate(p + 1);
+            lat.span_cache.truncate(p * (ms + 1));
+            for pos in p.saturating_sub(ms)..p {
+                for len in p - pos + 1..=ms {
+                    lat.span_cache[pos * (ms + 1) + len] = None;
+                }
+            }
+        }
+        lat.buckets.resize_with(n + 1, Bucket::default);
+        lat.floors.resize(n + 1, f64::NEG_INFINITY);
+        lat.counts.resize(n + 1, 0);
+        lat.span_cache.resize(n * (ms + 1), None);
+        (lat.seq, lat.fixed, lat.n_best, lat.ms, lat.gen) =
+            (seq.to_vec(), o.fixed.to_vec(), n_best, ms, self.gen);
+        lat.alts = o.alternatives.map(|a| a.to_vec());
+        let Lattice {
+            paths,
+            buckets,
+            span_cache,
+            floors,
+            counts,
+            ..
+        } = lat;
         let beam = self.beam;
         let (a, gamma) = (self.a, self.gamma);
         let mut lpws: Vec<f64> = vec![];
         let mut lpcs: Vec<f64> = vec![];
         let mut us: Vec<f64> = vec![];
 
-        for pos in 0..n {
-            let groups = std::mem::take(&mut buckets[pos]);
+        // p 之前的位置只補長度 > p−pos 的邊（到達 p 之後的新位置）
+        for pos in p.saturating_sub(ms)..n {
+            let min_len = if pos < p { p - pos + 1 } else { 1 };
             let max_len = ms.min(n - pos);
+            if min_len > max_len {
+                continue;
+            }
+            let groups = std::mem::take(&mut buckets[pos]);
             for (gkey, gp) in &groups.lists {
                 if gp.is_empty() {
                     continue;
                 }
                 let (w1, w2) = ((gkey >> 32) as u32, *gkey as u32);
                 let rep = paths[gp[0] as usize];
-                for len in 1..=max_len {
+                for len in min_len..=max_len {
                     let ci = pos * (ms + 1) + len;
                     if span_cache[ci].is_none() {
                         span_cache[ci] = Some(self.fixed_cands(seq, pos, len, o, &mut words));
@@ -309,10 +400,10 @@ impl Decoder {
                                     target.lists.push((k, vec![]));
                                     target.lists.len() - 1
                                 });
-                                if admits(&target.lists[li].1, np.score, &paths, n_best) {
+                                if admits(&target.lists[li].1, np.score, paths, n_best) {
                                     paths.push(np);
                                     let id = paths.len() as u32 - 1;
-                                    counts[q] += insert(&mut target.lists[li].1, id, &paths, n_best)
+                                    counts[q] += insert(&mut target.lists[li].1, id, paths, n_best)
                                         as usize;
                                 }
                             }
@@ -377,7 +468,7 @@ impl Decoder {
                             }
                             let l = match li {
                                 Some(l) => {
-                                    if !admits(&target.lists[l].1, score, &paths, n_best) {
+                                    if !admits(&target.lists[l].1, score, paths, n_best) {
                                         continue;
                                     }
                                     l
@@ -405,9 +496,9 @@ impl Decoder {
                             });
                             let id = paths.len() as u32 - 1;
                             counts[q] +=
-                                insert(&mut target.lists[l].1, id, &paths, n_best) as usize;
+                                insert(&mut target.lists[l].1, id, paths, n_best) as usize;
                             if counts[q] > 2 * beam {
-                                floor = prune_beam(target, beam, &paths);
+                                floor = prune_beam(target, beam, paths);
                                 floors[q] = floor;
                                 counts[q] = beam;
                             }
@@ -415,12 +506,13 @@ impl Decoder {
                     }
                 }
             }
-            for q in pos + 1..=pos + max_len {
+            for q in pos + min_len..=pos + max_len {
                 if counts[q] > beam {
-                    floors[q] = prune_beam(&mut buckets[q], beam, &paths);
+                    floors[q] = prune_beam(&mut buckets[q], beam, paths);
                     counts[q] = beam;
                 }
             }
+            buckets[pos] = groups;
         }
 
         // 句尾項：P(EOS | 末兩詞) 與 P(EOS | 末兩字)
@@ -441,6 +533,7 @@ impl Decoder {
                 (pp.score + eos_w + eos_c, p)
             })
             .collect();
+        let paths = &*paths;
         finals.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
         // 同一串字的不同斷詞／讀音只留最高分那條，否則 N-best 會被同字路徑佔滿
         let mut seen = std::collections::HashSet::new();
@@ -475,6 +568,7 @@ impl Decoder {
             .filter(|d| seen.insert(d.text()))
             .take(n_best)
             .collect();
+        lat.extra = words.extra;
         // 固定段的詞走不通（不在候選）時整個格斷掉：不帶固定段重解，畫面才不會變空
         if out.is_empty() && !o.fixed.is_empty() {
             return self.decode(
@@ -658,6 +752,7 @@ impl Decoder {
 
     /// 增量加入詞條（X2 挖詞／使用者造詞）
     pub fn add_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        self.gen += 1;
         self.runtime_words.insert(word.to_string());
         for r in readings {
             if r.len() > 10 {
@@ -670,6 +765,7 @@ impl Decoder {
 
     /// 拿掉 add_entry 加的詞（學習資料頁的刪除）
     pub fn remove_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        self.gen += 1;
         self.runtime_words.remove(word);
         for r in readings {
             self.lex.remove(r, word);
