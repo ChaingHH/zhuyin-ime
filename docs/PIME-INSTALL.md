@@ -186,9 +186,10 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 |---|---|---|
 | 任何時候 | 單按 Shift | 切換注音／英文。組字中按：先送出，再切換。可設成只用左邊或只用右邊的 Shift（見「設定」） |
 | 任何時候 | 點工作列的「注／英」圖示 | 切換注音／英文。組字中點不切換（先 Enter 送出或 Esc 取消） |
-| 任何時候 | 右鍵點「注／英」圖示 | 選單：「學習資料與使用紀錄…」用瀏覽器開一個頁面（見「學習資料與使用紀錄」）：學到的詞每一列可以「刪除」（馬上生效、馬上存檔；刪使用者詞會連同它的選字次數一起刪），也有學習、使用紀錄兩個開關和「全部清除」。頁面由後端在本機開的小網頁服務提供（只有本機連得到、網址帶隨機密碼；分頁全部關掉幾秒後就停，萬一瀏覽器沒通知，最多 3 分鐘也會停）；開不起來時退回唯讀的 `%APPDATA%\PIME\zhuyin\learned.html`；「左 Shift 切換中英」「右 Shift 切換中英」兩個開關，點一下切換打勾（打勾＝單按那顆 Shift 會切換中英） |
+| 任何時候 | 右鍵點「注／英」圖示 | 選單：「學習資料與使用紀錄…」用瀏覽器開一個頁面（見「學習資料與使用紀錄」）：學到的詞每一列可以「刪除」（馬上生效、馬上存檔；刪使用者詞會連同它的選字次數一起刪），也有學習、使用紀錄兩個開關和「全部清除」。頁面由後端在本機開的小網頁服務提供（只有本機連得到、網址帶隨機密碼；分頁全部關掉幾秒後就停，萬一瀏覽器沒通知，最多 3 分鐘也會停）；開不起來時退回唯讀的 `%APPDATA%\PIME\zhuyin\learned.html`；「左 Shift 切換中英」「右 Shift 切換中英」兩個開關，點一下切換打勾（打勾＝單按那顆 Shift 會切換中英）；「簡體輸出」開關（同 Ctrl+Shift+F） |
 | 注音模式 | Shift＋標點鍵 | 打半形符號（Shift+, → `<`、Shift+/ → `?`、Shift+5 → `%`…），組字中插在游標處 |
 | 注音模式 | Shift＋字母 | 打英文字母，同英文模式（大小寫照 CapsLock）：組字區空就直接輸出，組字中併進英文。只開 CapsLock 不按 Shift 仍打注音 |
+| 注音模式 | Ctrl+Shift+F | 切換繁體／簡體輸出（同微軟注音）。組字中按會馬上換字形。只轉顯示和送出的字，打字和學習仍用繁體。右鍵選單的「簡體輸出」開關效果相同（組字中從選單切換，下一個鍵才換字形） |
 | 注音模式 | Ctrl＋標點鍵 | 打全形標點：Ctrl+, → ，、Ctrl+. → 。、Ctrl+/ → ？、Ctrl+; → ：、Ctrl+' → ；、Ctrl+1 → ！、Ctrl+[ → 「、Ctrl+] → 」、Ctrl+Shift+[ → 『、Ctrl+Shift+] → 』、Ctrl+9 → （、Ctrl+0 → ）、Ctrl+\ → 、、Ctrl+` → ～。這些組合在注音模式不會傳給程式（例如 VS Code 的 Ctrl+[ 縮排），切到英文模式就照常 |
 | 組字中 | 大千鍵位 | 打注音；空白＝一聲 |
 | 組字中 | ← → Home End | 移游標，改前面的字 |
@@ -223,7 +224,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 設定
 
-設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 開關、學習資料頁的兩個開關也是寫進這個檔。
+設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 與簡體輸出開關、學習資料頁的兩個開關也是寫進這個檔。
 
 ```json
 {
@@ -240,6 +241,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 | `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊、`"none"` 都不切換（用左鍵點圖示切換）。關掉的那邊單按不做事；其他值當 `"both"` |
 | `learning` | `true` | `false`：關掉學習。不學新的，已學到的也暫停使用（資料保留）。學習資料頁的「學習」開關切換 |
 | `usageLog` | `false` | `true`：記錄使用情形。學習資料頁的「使用紀錄」開關切換 |
+| `simplified` | `false` | `true`：簡體輸出（組字區、候選、送出的字轉成簡體；轉換表是 OpenCC 的 TSPhrases＋TSCharacters，詞組優先）。學習資料與使用紀錄仍存繁體。Ctrl+Shift+F 或右鍵選單「簡體輸出」切換 |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正（下次載入模型時生效） |
 | `candFontName` | `"Microsoft JhengHei UI"` | 選字視窗的字型（1–31 字元的字型名） |

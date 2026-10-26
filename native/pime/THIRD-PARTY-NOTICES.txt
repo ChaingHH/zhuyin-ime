@@ -52,3 +52,11 @@ lm.bo.bin 是從下列語料統計出來的詞與字的出現機率，不含語�
 - 授權：LGPL 2.0（PIME 本體），內含元件的授權見 PIME 安裝目錄的 LICENSE.txt。
   原始碼：https://github.com/EasyIME/PIME/tree/v2.0.0-beta3
 - 本輸入法的安裝程式只在電腦上沒有 PIME 時，用 /S 靜默執行上面這個安裝檔。
+
+5. OpenCC 繁轉簡轉換表（簡體輸出）
+--------------------------------
+
+- 來源：https://github.com/BYVoid/OpenCC （data/dictionary/TSCharacters.txt、TSPhrases.txt，取用版本 ver.1.4.2）
+- 著作權：OpenCC 的作者（BYVoid）與貢獻者
+- 授權：Apache License 2.0（https://www.apache.org/licenses/LICENSE-2.0）
+- 未修改，原樣編進 zhuyin-native.exe。

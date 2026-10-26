@@ -400,6 +400,40 @@ async function smoke(): Promise<void> {
   await shiftTap(false);
   check(!(await withMods([0x11], 'Comma')).eaten, '英文模式 Ctrl+, 交給程式');
   await shiftTap(false);
+  // 簡體輸出：Ctrl+Shift+F 切換（組字中馬上重畫），右鍵選單 id 10；只轉輸出
+  const simpMenu = async () =>
+    (
+      (await call({ method: 'onMenu', id: 'windows-mode-icon' }))['return'] as Array<{
+        id: number;
+        checked?: boolean;
+      }>
+    ).find((i) => i.id === 10)?.checked;
+  check((await simpMenu()) === false, '預設不是簡體輸出');
+  const ctrlShiftF = () => withMods([0x11, 0x10], 'KeyF');
+  const sf = await ctrlShiftF();
+  check(sf.eaten && sf.out === '', 'Ctrl+Shift+F 攔下、不輸出');
+  check(
+    JSON.parse(readFileSync(configFile, 'utf8')).simplified === true,
+    'config.json 寫入 simplified',
+  );
+  check((await simpMenu()) === true, '選單打勾');
+  let comp = '';
+  // ㄊㄡˊㄈㄚˇ
+  for (const c of ['KeyW', 'Period', 'Digit6', 'KeyZ', 'Digit8', 'Digit3'])
+    comp = String((await press(c)).last['compositionString']);
+  check(comp === '头发', `組字區轉成簡體（${comp}）`);
+  const cands = ((await press('ArrowDown')).last['candidateList'] as string[]).join(' ');
+  check(cands.includes('发') && !/[頭髮]/.test(cands), `候選轉成簡體（${cands}）`);
+  await press('Escape'); // 只關選字視窗
+  check((await ctrlShiftF()).last['compositionString'] === '頭髮', '組字中切回繁體馬上重畫');
+  check((await ctrlShiftF()).last['compositionString'] === '头发', '組字中切成簡體馬上重畫');
+  check((await press('Enter')).out === '头发', 'Enter 送出簡體');
+  noSession(await call({ method: 'onCommand', id: 10, type: 2 }), '選單切換簡體');
+  check((await simpMenu()) === false, '選單關掉簡體');
+  check(
+    JSON.parse(readFileSync(configFile, 'utf8')).simplified === false,
+    'config.json 寫入 false',
+  );
   // Esc 取消組字
   await press('Digit1');
   check((await press('Escape')).last['compositionString'] === '', 'Esc 清空組字區');

@@ -82,6 +82,8 @@ const ID_SHIFT_RIGHT: i64 = 3;
 const ID_SHOW_LEARNED: i64 = 5;
 // id 6 是舊版的「標點用半形」，不再用
 // id 7、8 是 1.0.2 的「記錄使用情形」「清除使用紀錄」，已移到頁面上，不再用
+/// 右鍵選單：簡體輸出開關（config.json 的 simplified）。跳過 9，留給同時在加的選單項目
+const ID_SIMPLIFIED: i64 = 10;
 /// 使用紀錄超過這個大小就丟掉舊的一半
 const USAGE_MAX_BYTES: u64 = 10 << 20;
 const LEARNED_HTML: &str = include_str!("learned.html");
@@ -315,6 +317,8 @@ pub struct Backend {
     usage: bool,
     /// 學習（X2，config.json 的 "learning"，預設開）：關掉時不學、已學到的也不用（ImeEngine::set_learning）
     learning: bool,
+    /// 簡體輸出（config.json 的 "simplified"，預設關）：只轉回應裡的組字、候選、送出文字（t2s.rs）
+    simplified: bool,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
     table: bool,
     /// 這個鍵（filterKeyDown 決定）只是展開／收回表格，onKeyDown 不交給引擎
@@ -356,6 +360,7 @@ impl Backend {
             shift_toggle: "both",
             usage: false,
             learning: true,
+            simplified: false,
             table: false,
             layout_key: false,
             sent_cols: HashMap::new(),
@@ -387,7 +392,7 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、learning、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、learning、simplified、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
@@ -395,6 +400,10 @@ impl Backend {
         self.shift_toggle = shift_name(l, r);
         self.usage = s.get("usageLog").and_then(Value::as_bool).unwrap_or(false);
         self.learning = s.get("learning").and_then(Value::as_bool).unwrap_or(true);
+        self.simplified = s
+            .get("simplified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let save_ok = self.save_ok;
         if let Some(e) = self.eng.as_mut() {
             e.usage = self.usage;
@@ -938,6 +947,7 @@ impl Backend {
         !self.gave_up()
             && self.mode == Mode::Zhuyin
             && (self.ctrl_punct(k).is_some()
+                || is_simp_toggle(k)
                 || !k.ctrl_alt && k.code.as_deref().is_some_and(starts_composition))
     }
 
@@ -948,6 +958,11 @@ impl Backend {
             .flatten()
     }
 
+    fn toggle_simplified(&mut self) {
+        self.simplified = !self.simplified;
+        self.write_setting("simplified", json!(self.simplified));
+    }
+
     fn on_key_down(&mut self, k: &Key, r: &mut Map<String, Value>) -> bool {
         if self.stale {
             self.redraw(r);
@@ -955,6 +970,12 @@ impl Backend {
             if !self.composing() && !self.filter_key_down(k, r) {
                 return false;
             }
+        }
+        // Ctrl+Shift+F（同微軟注音）切換簡體輸出；組字中馬上重畫（handle 最後依新設定轉換）
+        if self.mode == Mode::Zhuyin && is_simp_toggle(k) {
+            self.toggle_simplified();
+            self.redraw(r);
+            return true;
         }
         if let Some(p) = self.ctrl_punct(k) {
             let cols = self.cols();
@@ -1167,6 +1188,11 @@ impl Backend {
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     Some(ID_SHOW_LEARNED) => self.show_learned(),
+                    // 這裡不能送組字區：組字中的話下一個鍵補畫（stale）
+                    Some(ID_SIMPLIFIED) => {
+                        self.toggle_simplified();
+                        self.stale |= self.composing();
+                    }
                     _ => {}
                 }
                 None
@@ -1182,6 +1208,8 @@ impl Backend {
                         {"id": 0, "text": ""},
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
+                        {"id": 0, "text": ""},
+                        {"id": ID_SIMPLIFIED, "text": "簡體輸出（Ctrl+Shift+F）", "checked": self.simplified},
                     ]),
                 );
                 None
@@ -1215,9 +1243,33 @@ impl Backend {
         if let Some(v) = ret {
             r.insert("return".into(), json!(v));
         }
+        if self.simplified {
+            to_simplified(&mut r);
+        }
         r.entry("success").or_insert(json!(true));
         r.insert("seqNum".into(), msg["seqNum"].clone());
         r
+    }
+}
+
+/// Ctrl+Shift+F：切換簡體輸出（ctrl_punct 的 Shift 組合只有 [ ]，不衝突）
+fn is_simp_toggle(k: &Key) -> bool {
+    k.ctrl && k.shift && k.code.as_deref() == Some("KeyF")
+}
+
+/// 回應裡要顯示或送出的文字轉成簡體：組字區、送出文字、候選
+fn to_simplified(r: &mut Map<String, Value>) {
+    for key in ["compositionString", "commitString"] {
+        if let Some(Value::String(s)) = r.get_mut(key) {
+            *s = crate::t2s::convert(s);
+        }
+    }
+    if let Some(Value::Array(items)) = r.get_mut("candidateList") {
+        for v in items {
+            if let Value::String(s) = v {
+                *s = crate::t2s::convert(s);
+            }
+        }
     }
 }
 

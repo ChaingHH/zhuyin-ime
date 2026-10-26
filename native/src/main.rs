@@ -32,6 +32,7 @@ mod noise;
 mod pime;
 mod usage;
 mod slots;
+mod t2s;
 mod x2;
 
 use std::collections::HashSet;
