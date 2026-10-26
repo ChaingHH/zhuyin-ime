@@ -5,7 +5,8 @@
 //!                                           ZHUYIN_BEAM、ZHUYIN_NBEST（預設 4）；ZHUYIN_LM＝模型檔（預設 data/models/lm.bo.bin）；
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
 //!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個）；
-//!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）
+//!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）；
+//!                                           ZHUYIN_INCR=1 逐音節比對增量解碼與全量解碼（不同就 panic），印每步延遲
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
 //!   zhuyin-native keys <out>                L1/L2：評測句的大千按鍵 → 音節序列
 //!   zhuyin-native l3 <in> <out> <s>         L3：解碼 debug-native-parity.ts 倒出的有錯輸入
@@ -77,6 +78,66 @@ fn mem(label: &str) {
 struct Sample {
     text: String,
     syllables: Vec<String>,
+}
+
+/// 增量解碼 == 全量解碼：逐音節打、刪掉中間一個再補回、中途選字後接著打；steps＝[全量, 增量] 每步毫秒
+fn incr_check(
+    dec: &decode::Decoder,
+    obs: &[String],
+    alts: Option<&[Vec<l3::Hypothesis>]>,
+    n_best: usize,
+    steps: &mut [Vec<f64>; 2],
+) {
+    let sig = |ps: &[decode::DecodePath]| -> Vec<(u64, Vec<(String, Vec<String>)>)> {
+        ps.iter()
+            .map(|p| {
+                let b = p.breakdown.iter().map(|b| (b.word.clone(), b.reading.clone()));
+                (p.score.to_bits(), b.collect())
+            })
+            .collect()
+    };
+    let mut lat = decode::Lattice::default();
+    let mut run = |seq: &[String], alts: Option<&[Vec<l3::Hypothesis>]>, fixed: &[decode::FixedSpan]| {
+        let o = decode::DecodeOptions {
+            n_best,
+            alternatives: alts,
+            fixed,
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let full = dec.decode(seq, &o);
+        steps[0].push(t.elapsed().as_secs_f64() * 1000.0);
+        let t = Instant::now();
+        let inc = dec.decode_in(&mut lat, seq, &o);
+        steps[1].push(t.elapsed().as_secs_f64() * 1000.0);
+        assert!(sig(&full) == sig(&inc), "增量≠全量：{}", seq.join(" "));
+        full
+    };
+    let n = obs.len();
+    let mut mid = vec![];
+    for k in 1..=n {
+        let r = run(&obs[..k], alts.map(|a| &a[..k]), &[]);
+        if k == n.div_ceil(2) {
+            mid = r;
+        }
+    }
+    if n > 2 {
+        let m = n / 2;
+        let cut_alts = alts.map(|v| [&v[..m], &v[m + 1..]].concat());
+        run(&[&obs[..m], &obs[m + 1..]].concat(), cut_alts.as_deref(), &[]);
+        run(obs, alts, &[]);
+    }
+    // 前半句第二名的第一個詞當選字，接著打完
+    if let Some(b) = mid.get(1).and_then(|p| p.breakdown.first()) {
+        let f = [decode::FixedSpan {
+            pos: 0,
+            len: b.reading.len(),
+            word: b.word.clone(),
+        }];
+        for k in n.div_ceil(2)..=n {
+            run(&obs[..k], alts.map(|a| &a[..k]), &f);
+        }
+    }
 }
 
 fn load_samples(file: &str) -> Vec<Sample> {
@@ -363,6 +424,9 @@ fn main() {
                 }
             });
             let mut fails = vec![];
+            // ZHUYIN_INCR=1：逐音節增量解碼，每步和全量解碼比對（不同就 panic），印每步延遲
+            let incr = std::env::var("ZHUYIN_INCR").is_ok_and(|v| v != "0");
+            let mut steps: [Vec<f64>; 2] = [vec![], vec![]];
             let files = std::env::var("ZHUYIN_EVAL").unwrap_or_else(|_| {
                 "eval/colloquial.jsonl,eval/written.jsonl,eval/mixed.jsonl".into()
             });
@@ -404,6 +468,9 @@ fn main() {
                         alternatives: alts.as_deref(),
                         ..Default::default()
                     };
+                    if incr {
+                        incr_check(&dec, &obs, alts.as_deref(), n_best, &mut steps);
+                    }
                     let t = Instant::now();
                     let paths = dec.decode(&obs, &o);
                     lat.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -439,6 +506,21 @@ fn main() {
                     line += &format!(" | 涵蓋 {hit}/{err} {:.1}%", pct(hit, err));
                 }
                 println!("{line}");
+            }
+            if incr {
+                for (name, v) in ["全量", "增量"].iter().zip(&mut steps) {
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let q = |p: f64| v[((v.len() as f64 * p) as usize).min(v.len() - 1)];
+                    println!(
+                        "每步{name}（{} 步，相同）p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms 合計 {:.0}ms",
+                        v.len(),
+                        q(0.5),
+                        q(0.95),
+                        q(0.99),
+                        v[v.len() - 1],
+                        v.iter().sum::<f64>()
+                    );
+                }
             }
             if let Some(out) = args.get(2) {
                 std::fs::write(out, fails.join("\n")).unwrap();

@@ -1,10 +1,11 @@
 //! 輸入法引擎：packages/cli/src/engine.ts ImeEngine 的移植（注音／英文模式、選字視窗、
 //! 游標、標點與原樣 token、Esc、送出學習）。時鐘由呼叫端給（X2 的 at），對拍時固定。
-use crate::decode::{is_literal, DecodeOptions, DecodePath, Decoder, FixedSpan};
+use crate::decode::{is_literal, DecodeOptions, DecodePath, Decoder, FixedSpan, Lattice};
 use crate::l3::{Channel, Hypothesis};
 use crate::slots::CompositionBuffer;
 use crate::x2::UserAdapter;
 use serde_json::{json, Value};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 const UNK: &str = "\u{25A1}";
@@ -188,6 +189,10 @@ pub struct ImeEngine {
     /// 這次組字按了幾個鍵、幾次退格（使用紀錄用）
     keys: usize,
     backspaces: usize,
+    /// 增量解碼的格（每打一個音節只補新的部分）；組字清空、學習開關時作廢
+    lattice: RefCell<Lattice>,
+    /// 這次組字的 X2 時間：整段固定，增量解碼重用的前綴才和全量相同（半衰期 14 天，差異可忽略）
+    decode_at: Cell<Option<f64>>,
 }
 
 impl ImeEngine {
@@ -208,6 +213,8 @@ impl ImeEngine {
             usage_lines: vec![],
             keys: 0,
             backspaces: 0,
+            lattice: Default::default(),
+            decode_at: Cell::new(None),
         }
     }
 
@@ -235,13 +242,15 @@ impl ImeEngine {
     }
 
     fn decode_with_adapter(&self) -> Vec<DecodePath> {
-        self.decode_fixed(&self.fixed)
+        self.decode_fixed(&self.fixed, Some(&mut self.lattice.borrow_mut()))
     }
 
-    fn decode_fixed(&self, fixed: &[FixedSpan]) -> Vec<DecodePath> {
+    /// lat：增量解碼用的格；None＝全量（另一組選字，不動格）
+    fn decode_fixed(&self, fixed: &[FixedSpan], lat: Option<&mut Lattice>) -> Vec<DecodePath> {
         let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
-        let at = self.now();
+        let at = self.decode_at.get().unwrap_or_else(|| self.now());
+        self.decode_at.set(Some(at));
         let adapt = self.adapter.as_ref().filter(|a| a.enabled);
         // U(w) 每次解碼同一個（詞, 起點, 長度）只算一次（TS 每組都重算，值相同）。
         // 選字紀錄以「該詞的讀音」為鍵（record_selection 存的是詞自己的音節），不是整句
@@ -256,15 +265,16 @@ impl ImeEngine {
             cache.borrow_mut().insert(k, u);
             u
         };
-        let paths = self.decoder.decode(
-            seq,
-            &DecodeOptions {
-                n_best: 4,
-                modifier: adapt.map(|_| &modifier as &dyn Fn(&str, usize, usize) -> f64),
-                alternatives: alts.as_deref(),
-                fixed,
-            },
-        );
+        let o = DecodeOptions {
+            n_best: 4,
+            modifier: adapt.map(|_| &modifier as &dyn Fn(&str, usize, usize) -> f64),
+            alternatives: alts.as_deref(),
+            fixed,
+        };
+        let paths = match lat {
+            Some(lat) => self.decoder.decode_in(lat, seq, &o),
+            None => self.decoder.decode(seq, &o),
+        };
         // 同樣的字、不同斷詞只留分數最高的那條
         let mut seen = HashSet::new();
         paths
@@ -382,6 +392,7 @@ impl ImeEngine {
                 self.decoder.remove_entry(&e.word, &e.readings);
             }
         }
+        self.reset_lattice();
         self.redecode();
     }
 
@@ -791,7 +802,7 @@ impl ImeEngine {
         let seq = self.comp.sequence();
         // 有選字時另外解碼一次（不帶選字）才知道原本的第一名
         let top = (!self.fixed.is_empty())
-            .then(|| self.decode_fixed(&[]).into_iter().next())
+            .then(|| self.decode_fixed(&[], None).into_iter().next())
             .flatten();
         let top = top.as_ref().unwrap_or(chosen);
         let span_text = |p: &DecodePath, pos: usize, len: usize| {
@@ -843,6 +854,13 @@ impl ImeEngine {
         self.last_seq.clear();
         self.fixed.clear();
         self.menu = None;
+        self.reset_lattice();
+    }
+
+    /// U(w) 變了（學習開關、新的組字）：格與 X2 時間重來
+    fn reset_lattice(&mut self) {
+        *self.lattice.get_mut() = Lattice::default();
+        self.decode_at.set(None);
     }
 }
 
