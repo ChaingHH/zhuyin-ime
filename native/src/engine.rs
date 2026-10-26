@@ -1,6 +1,7 @@
 //! 輸入法引擎：packages/cli/src/engine.ts ImeEngine 的移植（注音／英文模式、選字視窗、
 //! 游標、標點與原樣 token、Esc、送出學習）。時鐘由呼叫端給（X2 的 at），對拍時固定。
 use crate::decode::{is_literal, DecodeOptions, DecodePath, Decoder, FixedSpan, Lattice};
+use crate::keymap::Layout;
 use crate::l3::{Channel, Hypothesis};
 use crate::slots::CompositionBuffer;
 use crate::x2::UserAdapter;
@@ -216,6 +217,16 @@ impl ImeEngine {
             lattice: Default::default(),
             decode_at: Cell::new(None),
         }
+    }
+
+    /// 換鍵盤排列：打到一半的注音丟掉（照舊排列打的），L3 鄰鍵照新排列重建
+    pub fn set_layout(&mut self, layout: Layout) {
+        if self.comp.layout == layout {
+            return;
+        }
+        self.comp.clear_pending();
+        self.comp.layout = layout;
+        self.channel = self.channel.take().map(|c| c.relayout(layout));
     }
 
     /// 改一頁的候選數（MENU_PAGE 的倍數）；視窗開著就換到反白所在的那一頁

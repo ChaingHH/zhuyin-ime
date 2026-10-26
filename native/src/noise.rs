@@ -1,7 +1,7 @@
 //! X3 錯誤注入（原 packages/cli/src/noise.ts）：在按鍵層級模擬打錯，再走真正的 L2 組字，
 //! 得到「打錯後的音節序列」，用於評估 L3。相鄰鍵與模糊音表和 L3 共用，結果偏樂觀（缺真人打字紀錄）。
 //! 亂數與抽樣順序照 TS，同種子得到同一組錯誤。
-use crate::keymap::{key_neighbors, syllable_to_key_codes, DACHEN, MARKS, TONE_CODES};
+use crate::keymap::{key_neighbors, Layout, Mapped, MARKS};
 use crate::l3::FUZZY_PAIRS;
 use crate::slots::CompositionBuffer;
 use std::collections::HashSet;
@@ -74,8 +74,10 @@ pub fn inject_noise(
     o: &NoiseOptions,
     r: &mut Rng,
 ) -> Vec<String> {
-    let is_tone = |c: &str| TONE_CODES.iter().any(|(t, _)| *t == c);
-    let is_symbol = |c: &str| DACHEN.iter().any(|(k, _)| *k == c);
+    // 評測只模擬大千
+    let kb = Layout::Dachen;
+    let is_tone = |c: &str| matches!(kb.meanings(c)[..], [Mapped::Tone(_)]);
+    let is_symbol = |c: &str| matches!(kb.meanings(c)[..], [Mapped::Symbol(_)]);
     let mut buf = CompositionBuffer::new(legal.clone());
     for intended in syllables {
         let syl = if r.next() < o.cognitive {
@@ -83,7 +85,8 @@ pub fn inject_noise(
         } else {
             intended.clone()
         };
-        for code in syllable_to_key_codes(&syl) {
+        for code in kb.syllable_to_key_codes(&syl) {
+            let code = code.as_str();
             if is_tone(code) {
                 // 聲調鍵：只會按到相鄰的聲調鍵（不破壞音節邊界）
                 let adj: Vec<String> = key_neighbors(code)

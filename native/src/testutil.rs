@@ -2,7 +2,7 @@
 //! 不需要 data/ 裡的大模型。平坦 LM 下每個詞分數相同，所以詞數少（長詞）的路徑贏。
 use crate::decode::Decoder;
 use crate::engine::ImeEngine;
-use crate::keymap::syllable_to_key_codes;
+use crate::keymap::Layout;
 use crate::lexicon::Lexicon;
 use crate::lm::BackoffLm;
 use std::collections::HashSet;
@@ -120,8 +120,8 @@ pub fn engine(entries: &[(&str, &str)]) -> ImeEngine {
 /// 照大千打一串音節（空白分隔）
 pub fn type_syllables(e: &mut ImeEngine, syls: &str) {
     for s in syls.split(' ') {
-        for code in syllable_to_key_codes(s) {
-            e.on_key(code, None, false);
+        for code in Layout::Dachen.syllable_to_key_codes(s) {
+            e.on_key(&code, None, false);
         }
     }
 }

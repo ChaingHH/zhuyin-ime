@@ -565,8 +565,8 @@ fn main() {
             for s in eval_samples() {
                 let mut buf = slots::CompositionBuffer::new(legal.clone());
                 for syl in &s.syllables {
-                    for code in keymap::syllable_to_key_codes(syl) {
-                        buf.on_key(code);
+                    for code in keymap::Layout::Dachen.syllable_to_key_codes(syl) {
+                        buf.on_key(&code);
                     }
                 }
                 lines.push(buf.sequence().join(" "));

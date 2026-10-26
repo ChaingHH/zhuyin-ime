@@ -1,6 +1,6 @@
 //! L3 假設展開（通道模型）：packages/core/src/l3.ts Channel 的移植。
 //! 展開順序、同代價的排序都照 TS（Map 插入順序＋穩定排序），結果逐項相同。
-use crate::keymap::{key_neighbors, slot_of, DACHEN, FINALS, INITIALS, MARKS, MEDIALS, TONE_CODES};
+use crate::keymap::{key_neighbors, slot_of, Layout, Mapped, FINALS, INITIALS, MARKS, MEDIALS};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -93,29 +93,37 @@ pub struct Channel {
 
 impl Channel {
     pub fn new(legal: HashSet<String>, o: ChannelOptions) -> Self {
-        let sym = |code: &str| DACHEN.iter().find(|(c, _)| *c == code).map(|(_, s)| *s);
-        let mark = |code: &str| {
-            TONE_CODES
+        Self::with_layout(legal, o, Layout::Dachen)
+    }
+
+    /// 鄰鍵依排列的實體鍵位推回注音：同一個鍵有好幾個符號（許氏、倚天 26 鍵）時都算
+    pub fn with_layout(legal: HashSet<String>, o: ChannelOptions, layout: Layout) -> Self {
+        let near = |m: Mapped| {
+            let code = layout.code_of(m).unwrap();
+            key_neighbors(&code)
                 .iter()
-                .find(|(c, _)| *c == code)
-                .map(|(_, t)| MARKS[*t as usize - 1])
+                .flat_map(|n| layout.meanings(n))
+                .collect::<Vec<_>>()
         };
-        let sym_neighbors = DACHEN
+        let sym_neighbors = INITIALS
             .iter()
-            .map(|(code, s)| {
-                (
-                    *s,
-                    key_neighbors(code).iter().filter_map(|n| sym(n)).collect(),
-                )
+            .chain(&MEDIALS)
+            .chain(&FINALS)
+            .map(|&s| {
+                let nb = near(Mapped::Symbol(s)).into_iter().filter_map(|m| match m {
+                    Mapped::Symbol(x) => Some(x),
+                    _ => None,
+                });
+                (s, nb.collect())
             })
             .collect();
-        let tone_neighbors = TONE_CODES
-            .iter()
-            .map(|(code, _)| {
-                (
-                    mark(code).unwrap(),
-                    key_neighbors(code).iter().filter_map(|n| mark(n)).collect(),
-                )
+        let tone_neighbors = (1..=5u8)
+            .map(|t| {
+                let nb = near(Mapped::Tone(t)).into_iter().filter_map(|m| match m {
+                    Mapped::Tone(x) => Some(MARKS[x as usize - 1]),
+                    _ => None,
+                });
+                (MARKS[t as usize - 1], nb.collect())
             })
             .collect();
         let mut fuzzy: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
@@ -131,6 +139,10 @@ impl Channel {
             tone_neighbors,
             fuzzy,
         }
+    }
+
+    pub fn relayout(self, layout: Layout) -> Self {
+        Self::with_layout(self.legal, self.o, layout)
     }
 
     /// 展開觀察音節：第一個永遠是原音節（代價 0），其後依代價遞增

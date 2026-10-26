@@ -11,6 +11,7 @@
 //! 之後不會關，行程結束 1 秒後還會自動重開。所以行程常駐、引擎不常駐：第一個要組字的按鍵才載入
 //! 引擎，閒置 ZHUYIN_IDLE_SECS 秒（預設 300）沒按鍵、或最後一個 client 停用時卸載。
 use crate::engine::{ctrl_punct, EngineState, ImeEngine, Mode};
+use crate::keymap::{Layout, LAYOUTS};
 use crate::{decode, l3, learned_web, lexicon, lm, x2};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -81,6 +82,9 @@ const ID_SHIFT_RIGHT: i64 = 3;
 /// 右鍵選單：用瀏覽器開學習資料與使用紀錄的頁面（learned.html；開關與清除都在頁面上）
 const ID_SHOW_LEARNED: i64 = 5;
 // id 6 是舊版的「標點用半形」，不再用
+/// 右鍵選單「鍵盤排列」子選單：id ID_LAYOUT＋keymap::LAYOUTS 的索引（子選單本身用 ID_LAYOUT_MENU）
+const ID_LAYOUT_MENU: i64 = 9;
+const ID_LAYOUT: i64 = 10;
 // id 7、8 是 1.0.2 的「記錄使用情形」「清除使用紀錄」，已移到頁面上，不再用
 /// 使用紀錄超過這個大小就丟掉舊的一半
 const USAGE_MAX_BYTES: u64 = 10 << 20;
@@ -311,6 +315,8 @@ pub struct Backend {
     stale: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
     shift_toggle: &'static str,
+    /// 鍵盤排列：config.json 的 "layout"（keymap::LAYOUTS 的名稱，沒寫或看不懂＝大千）
+    layout: Layout,
     /// 使用紀錄（config.json 的 "usageLog"，預設關）：每次送出往設定檔旁的 usage.jsonl 加一行
     usage: bool,
     /// 學習（X2，config.json 的 "learning"，預設開）：關掉時不學、已學到的也不用（ImeEngine::set_learning）
@@ -354,6 +360,7 @@ impl Backend {
             shift_alone: false,
             stale: false,
             shift_toggle: "both",
+            layout: Layout::Dachen,
             usage: false,
             learning: true,
             table: false,
@@ -393,11 +400,17 @@ impl Backend {
         let s = self.settings();
         let (l, r) = shift_sides(s.get("shiftToggle").and_then(Value::as_str).unwrap_or(""));
         self.shift_toggle = shift_name(l, r);
+        self.layout = s
+            .get("layout")
+            .and_then(Value::as_str)
+            .and_then(Layout::from_name)
+            .unwrap_or_default();
         self.usage = s.get("usageLog").and_then(Value::as_bool).unwrap_or(false);
         self.learning = s.get("learning").and_then(Value::as_bool).unwrap_or(true);
         let save_ok = self.save_ok;
         if let Some(e) = self.eng.as_mut() {
             e.usage = self.usage;
+            e.set_layout(self.layout);
             // 學習檔讀不懂時一直關著（load），不跟設定
             if save_ok {
                 e.set_learning(self.learning);
@@ -762,6 +775,7 @@ impl Backend {
                 Ok(Ok((mut eng, save_ok))) => {
                     eng.mode = self.mode;
                     eng.usage = self.usage;
+                    eng.set_layout(self.layout);
                     if save_ok && !self.learning {
                         eng.set_learning(false);
                     }
@@ -943,7 +957,11 @@ impl Backend {
         !self.gave_up()
             && self.mode == Mode::Zhuyin
             && (self.ctrl_punct(k).is_some()
-                || !k.ctrl_alt && k.code.as_deref().is_some_and(starts_composition))
+                || !k.ctrl_alt
+                    && k.code.as_deref().is_some_and(|c| {
+                        // 排列用到、清單裡沒有的鍵（倚天的 = 是 ㄦ）
+                        starts_composition(c) || c != "Space" && !self.layout.meanings(c).is_empty()
+                    }))
     }
 
     /// 注音模式的 Ctrl＋標點鍵 → 全形標點；英文模式的 Ctrl 組合照常交給應用程式
@@ -1172,6 +1190,13 @@ impl Backend {
                         self.write_setting("shiftToggle", json!(self.shift_toggle));
                     }
                     Some(ID_SHOW_LEARNED) => self.show_learned(),
+                    Some(id) if (0..LAYOUTS.len() as i64).contains(&(id - ID_LAYOUT)) => {
+                        self.layout = LAYOUTS[(id - ID_LAYOUT) as usize].0;
+                        if let Some(e) = self.eng.as_mut() {
+                            e.set_layout(self.layout);
+                        }
+                        self.write_setting("layout", json!(self.layout.name()));
+                    }
                     _ => {}
                 }
                 None
@@ -1180,6 +1205,13 @@ impl Backend {
             // id 0＋空字串＝分隔線）。左、右 Shift 各一個開關，checked＝開著；切換中英用左鍵點圖示
             "onMenu" => {
                 let (l, r2) = shift_sides(self.shift_toggle);
+                let layouts: Vec<Value> = LAYOUTS
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (lay, _, text))| {
+                        json!({"id": ID_LAYOUT + i as i64, "text": text, "checked": *lay == self.layout})
+                    })
+                    .collect();
                 r.insert(
                     "return".into(),
                     json!([
@@ -1187,6 +1219,7 @@ impl Backend {
                         {"id": 0, "text": ""},
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},
+                        {"id": ID_LAYOUT_MENU, "text": "鍵盤排列", "submenu": layouts},
                     ]),
                 );
                 None
