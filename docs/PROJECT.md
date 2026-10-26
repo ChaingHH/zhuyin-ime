@@ -4,7 +4,7 @@
 指令速查見 [CLAUDE.md](../CLAUDE.md)；授權與資料來源摘要見 [README.md](../README.md)。
 
 > 文件內容以 2026-10-24 的程式碼為準。數字（預設值、實測準確率）都來自程式碼註解或 CLAUDE.md，
-> 改參數時請同步更新本文件。
+> 改參數時請同步更新本文件。2026-10-27 對照程式碼核對過 §3、§5、§7、§10。
 
 ## 1. 目標
 
@@ -123,7 +123,7 @@ L3 的更正要靠上下文才會發生。以鄰鍵那一句為例，逐音節�
 
 ### 3.1 引擎（`native/`）
 
-Rust，相依只有 `indexmap`、`serde_json`。`cargo build --release` 產生 `native/target/release/zhuyin-native.exe`，指令見 `native/src/main.rs` 檔頭。
+Rust，相依只有 `indexmap`、`serde_json`。其他檔案：`lexicon.rs`（唯讀 `lexicon.bin`＋執行中加詞的疊加層）、`lm.rs`（記憶體映射讀 `lm.bo.bin`）、`usage.rs`（使用紀錄統計）、`learned_web.rs`（學習資料頁）、`nontrad.txt`（非台灣繁體字表：學習資料裡含這些字的詞不加進解碼器）。`cargo build --release` 產生 `native/target/release/zhuyin-native.exe`，指令見 `native/src/main.rs` 檔頭。
 
 **L1 鍵盤映射**（`keymap.rs`）
 
@@ -201,7 +201,7 @@ Score = Σ_詞 [ a·logP_word(w | 前兩詞)
   - 同讀音紀錄：`min(2.2, 0.55·ln(1+次數))`
   - 全域紀錄：上限 1.1，再乘 0.35
   - 兩者都乘時間衰減，半衰期 14 天
-  - 手動造詞：固定 +8
+  - 手動造詞：+8，3 音節以上每多一個音節再 +10（算到 6 音節，`MANUAL_PHRASE_BOOST_PER_SYLLABLE`），不再加同讀音與全域加成
 - `mine_word`：送出時，連續 2–4 個單字詞、組合不在詞庫、頭尾不是虛字 → 記一次；兩次送出都出現才加入詞格。
 - 狀態存在 `%APPDATA%\PIME\zhuyin\adapter.json`，有筆數上限，檔案約在 2MB 持平。
 
@@ -213,7 +213,7 @@ Score = Σ_詞 [ a·logP_word(w | 前兩詞)
 - `commit(k)`：送出第 k 個候選，觸發 X2 學習。X2 學的是 `breakdown.reading`（L3 更正後的讀音），不是打錯的觀察讀音。
 - 學習資料頁（右鍵選單「學習資料與使用紀錄…」，`learned_web.rs`、`learned.html`）：刪除學到的詞、學習開關（關掉時加分歸零、使用者詞與挖詞從解碼器拿掉）、使用紀錄開關與統計（`usage.rs`）、全部清除。
 - 使用紀錄（學習資料頁的開關，預設關）：每次送出往 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行，欄位見 `engine.rs` `usage_record`；超過 10MB 丟掉舊的一半。`zhuyin-native usage <檔>` 統計。
-- PIME 協定的限制（不能停 PIMELauncher、每則請求都要回 seqNum 等）見 CLAUDE.md。
+- PIME 協定的限制（不能停 PIMELauncher、每則請求都要回 seqNum 等）見 CLAUDE.md 與 [PIME-NOTES.md](PIME-NOTES.md)。
 
 **`noise.rs`**：在按鍵層級注入錯誤（鄰鍵 60%、漏按 20%、多按 20%；認知錯誤中模糊音 70%、聲調 30%），再走真正的 L2，得到「打錯後的音節序列」。用固定種子的 mulberry32 亂數，可重現。
 
@@ -294,7 +294,7 @@ npm workspaces monorepo。套件之間透過各自的 `dist/` 互相引用，所
 
 - 每完成一個音節就整句重解碼，句子越長越慢。
 - 閒置 300 秒（`idleSecs`）卸載引擎，下一個組字鍵重新載入。
-- 記憶體的拆解、和微軟注音的比較、縮小方案見 `docs/MEMORY.md`。
+- 記憶體的拆解、和微軟注音的比較、縮小方案見 [MEMORY.md](MEMORY.md)；後端的載入／卸載與 PIME 的比較見 [PIME-NOTES.md](PIME-NOTES.md)。
 
 ## 6. 評測
 
@@ -315,7 +315,7 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 
 ## 7. 根目錄的 `debug-*.ts`
 
-調查與測試腳本，直接 import `packages/*/src`，用 `npx tsx debug-xxx.ts` 跑。
+調查與測試腳本。`.ts` 直接 import `packages/*/src`，用 `npx tsx debug-xxx.ts` 跑。其他的 `debug-*.ts`（`debug-prune`、`debug-latency`、`debug-native-parity` 等）已封存在 git tag `archive/ts-engine`。
 
 | 腳本 | 用途 |
 |---|---|
@@ -324,6 +324,8 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 | `debug-pime-idle.ts` | 閒置卸載與重新載入 |
 | `debug-learned-web.ts` | 學習資料頁的端對端檢查 |
 | `debug-ms-keys.ts` | 產生微軟注音測試用的大千 VK 序列 |
+| `debug-ms-bopomofo.ps1` | 用 SendInput 把 VK 序列打進自己的 WinForms 文字框，讀回微軟注音（或 PIME 輸入法）的結果。會佔用鍵盤與前景視窗 |
+| `debug-ime-bench.ps1` | 包住 `debug-ms-bopomofo.ps1`，前後記錄輸入法引擎行程（`ctfmon` 或 PIME）的 CPU 與記憶體。`-Ime` 選 `ms`／`chewing`／`mcbopomofo` |
 | `debug-bo-diff.ts` | 沿正解逐詞比 KN 與退回式機率 |
 
 ## 8. 測試
@@ -342,5 +344,7 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 
 - X1 領域先驗沒有實作。
 - 只有大千排列。
+- 所有程式共用一份組字狀態與中英模式（`pime.rs` 的 `ponytail:` 註記）：換到別的程式打字，前一個程式沒送出的組字會丟掉。
+- 組字中按 Tab（表格以外）、F1–F12、Insert 會被吃掉。
 - L3 的評測只有合成錯誤；使用紀錄能收真實資料，但預設關閉，也看不到送出後才在應用程式裡改的錯字。
 - 每個音節完成就整句重解碼，長句的延遲會隨長度增加。

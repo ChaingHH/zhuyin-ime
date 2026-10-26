@@ -1,6 +1,6 @@
 # 安裝到 PIME：注音 (zhuyin-native)
 
-把本專案的 Rust 引擎裝成 PIME 的一個輸入法。技術細節與量測見 `docs/MEMORY.md` §6。
+把本專案的 Rust 引擎裝成 PIME 的一個輸入法。技術細節與量測見 [PIME-NOTES.md](PIME-NOTES.md)。
 
 一般使用者用 Releases 的 `zhuyin-native-setup.exe` 就好（見 [README](../README.md)）。本文件給從原始碼安裝、做 Setup.exe 的人。
 
@@ -62,7 +62,7 @@ Setup.exe 做的事：
 - 你的鍵盤清單：`install.cmd` 第二次執行時加入、`uninstall.cmd` 拿掉（見「只留『注音 (zhuyin-native)』」「移除」）。
 - 學習資料存在 `%APPDATA%\PIME\zhuyin\adapter.json`。從空的開始，不會沿用網頁測試台的 `data\user\adapter.json`。
 
-> **警告：不要停掉 PIMELauncher.exe**（不要執行 `PIMELauncher.exe /quit`，也不要在工作管理員結束它）。PIME 2.0.0-beta 的 `PIMETextService.dll` 連不上啟動器時，會讓每個載入它的程式當掉；Explorer 會一秒當一次，只能重開機。2026-10-18 的當機就是 3bb05bf 版的安裝腳本這樣做造成的（詳見 `docs/MEMORY.md` §6）。現在的腳本不會停 PIME。
+> **警告：不要停掉 PIMELauncher.exe**（不要執行 `PIMELauncher.exe /quit`，也不要在工作管理員結束它）。PIME 2.0.0-beta 的 `PIMETextService.dll` 連不上啟動器時，會讓每個載入它的程式當掉；Explorer 會一秒當一次，只能重開機。2026-10-18 的當機就是 3bb05bf 版的安裝腳本這樣做造成的（詳見 [PIME-NOTES.md](PIME-NOTES.md) §4）。現在的腳本不會停 PIME。
 
 > **警告**：`backends.json` 格式錯了，PIME 的**所有**輸入法都會失效。腳本會先備份；萬一出事，把 `backends.json.bak` 改名回 `backends.json` 再重新登入。
 
@@ -124,7 +124,7 @@ Setup.exe 做的事：
 
 ### 不登出就換新執行檔（`hotUpdate`，要 PIME v2.0.0-beta2 以上）
 
-> **警告：PIME v2.0.0-beta（2026-10-04）不能開。** 那一版的 DLL 遇到後端結束會讓所有宿主程式當掉，Explorer 一秒當一次（`docs/MEMORY.md` §6）。先把 PIME 升到 v2.0.0-beta3。沒設定時，後端看到 beta 版會自己關掉這個選項，不要在 `config.json` 強制打開。
+> **警告：PIME v2.0.0-beta（2026-10-04）不能開。** 那一版的 DLL 遇到後端結束會讓所有宿主程式當掉，Explorer 一秒當一次（[PIME-NOTES.md](PIME-NOTES.md) §1、§4）。先把 PIME 升到 v2.0.0-beta3。沒設定時，後端看到 beta 版會自己關掉這個選項，不要在 `config.json` 強制打開。
 
 PIME 是 v2.0.0-beta2 以上時預設就開（後端讀 PIME 目錄的 `version.txt`；安裝腳本用同樣的規則決定要不要叫你登出），`config.json` 設 `"hotUpdate": false` 可關掉。之後裝了新版，舊後端會在下面兩種時候自己結束：
 

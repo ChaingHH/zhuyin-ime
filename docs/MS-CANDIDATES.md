@@ -102,7 +102,7 @@
 
 | 上游修正 | 合併日期 | 內容 | 對我們的影響 |
 |---|---|---|---|
-| EasyIME/PIME#905「Fix host app crash when PIMELauncher dies (#904)」 | 2026-10-16 | `handleRpcResponse` 先檢查 `msg.is_object()`，RPC 失敗不再丟例外（master `PIMEClient.cpp` 104–108 行） | 就是 2026-10-18 Explorer 連續當機的根因（docs/MEMORY.md §6）。**已包含在 v2.0.0-beta2（10-16）與 beta3（10-17）**，本機裝的是 v2.0.0-beta（10-04） |
+| EasyIME/PIME#905「Fix host app crash when PIMELauncher dies (#904)」 | 2026-10-16 | `handleRpcResponse` 先檢查 `msg.is_object()`，RPC 失敗不再丟例外（master `PIMEClient.cpp` 104–108 行） | 就是 2026-10-18 Explorer 連續當機的根因（docs/PIME-NOTES.md §4）。**已包含在 v2.0.0-beta2（10-16）與 beta3（10-17）**，本機裝的是 v2.0.0-beta（10-04） |
 | 「increase timeout waiting for backend startup during init and activate」 | 2026-10-16 | `init`、`onActivate` 的逾時從 2 秒放寬到 15 秒，按鍵仍是 2 秒 | 我們的後端啟動很快，影響小 |
 | `getPipeName` 回傳 `false` 當 `wstring` | 2026-10-16 | 取不到使用者名稱時存取違規 | 一般情況碰不到 |
 
