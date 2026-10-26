@@ -79,38 +79,58 @@ export function mapKey(layout: KeyboardLayout, code: KeyCode): MappedKey[] {
   return [{ kind: 'unmapped', code }];
 }
 
-/** 倚天26／許氏等排列僅保留介面位置（Phase 2+）。 */
+/** 引擎（native/src/keymap.rs `Layout`）用的是這張表；mapKey 只有大千。 */
 export const LAYOUTS: Record<string, KeyboardLayout> = { dachen: DACHEN };
 
-const SYMBOL_TO_CODE = new Map(
-  Object.entries(DACHEN.codeMap).map(([code, sym]) => [sym, code] as const),
-);
-const TONE_TO_CODE: Readonly<Record<Tone, string>> = {
-  1: 'Space',
-  2: 'Digit6',
-  3: 'Digit3',
-  4: 'Digit4',
-  5: 'Digit7',
+/**
+ * 各排列的鍵位：libchewing v0.5.1 `src/common/key2pho.c` 的 `key_str`，
+ * 依序對應 PH_ORDER（ㄅ…ㄙ、ㄧㄨㄩ、ㄚ…ㄦ、˙ˊˇˋ）；空白一律是一聲。同 native/src/keymap.rs。
+ */
+export const LAYOUT_KEYS = {
+  dachen: '1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/-7634',
+  eten: "bpmfdtnlvkhg7c,./j;'sexuaorwiqzy890-=1234",
+  hsu: 'bpmfdtnlgkhjvcjvcrzasexuyhgeiawomnkllsdfj',
+  ibm: '1234567890-qwertyuiopasdfghjkl;zxcvbn/m,.',
+  eten26: 'bpmfdtnlvkhgvcgycjqwsexuaorwiqzpmntlhdfjk',
+} as const;
+export type LayoutName = keyof typeof LAYOUT_KEYS;
+
+const PH_ORDER = 'ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦ˙ˊˇˋ';
+const PUNCT_CODE: Record<string, string> = {
+  '-': 'Minus',
+  '=': 'Equal',
+  ';': 'Semicolon',
+  "'": 'Quote',
+  ',': 'Comma',
+  '.': 'Period',
+  '/': 'Slash',
 };
+const charCode = (c: string): string =>
+  /[a-z]/.test(c) ? `Key${c.toUpperCase()}` : /\d/.test(c) ? `Digit${c}` : PUNCT_CODE[c]!;
 
 /**
  * 正規形音節字串 → 實體鍵碼序列（C-M-F 順序送出後按聲調鍵）。
  * 用於 replay 合成、評測的 L0-L2 往返驗證與未來 X3 錯誤注入。
+ * 許氏、倚天 26 鍵靠引擎依槽位判斷一鍵多音，少數音節（如 ㄟ）打不回來，見 keymap.rs 的測試。
  */
-export function syllableToKeyCodes(canonicalForm: string): KeyCode[] {
-  const MARK_TO_TONE: Record<string, Tone> = { ˊ: 2, ˇ: 3, ˋ: 4, '˙': 5 };
+export function syllableToKeyCodes(
+  canonicalForm: string,
+  layout: LayoutName = 'dachen',
+): KeyCode[] {
+  const keys = LAYOUT_KEYS[layout];
+  const MARK = '˙ˊˇˋ';
   let text = canonicalForm;
-  let tone: Tone = 1;
+  let tone = '';
   const last = text[text.length - 1];
-  if (last && MARK_TO_TONE[last] !== undefined) {
-    tone = MARK_TO_TONE[last]!;
+  if (last && MARK.includes(last)) {
+    tone = last;
     text = text.slice(0, -1);
   }
   const codes: KeyCode[] = [];
   for (const glyph of text) {
-    const code = SYMBOL_TO_CODE.get(glyph);
-    if (code) codes.push(code);
+    const i = PH_ORDER.indexOf(glyph);
+    if (i >= 0) codes.push(charCode(keys[i]!));
   }
-  codes.push(TONE_TO_CODE[tone]);
+  codes.push(tone ? charCode(keys[PH_ORDER.indexOf(tone)]!) : 'Space');
   return codes;
 }

@@ -1,7 +1,7 @@
 //! L2 槽位組字區：packages/core/src/slots.ts CompositionBuffer 的移植。
 //! 已完成的音節直接存正規形字串（TS 只在 sequence 時才轉，結果相同）；原樣字元也是字串。
 use crate::decode::is_literal;
-use crate::keymap::{map_key, slot_of, Mapped, MARKS};
+use crate::keymap::{slot_of, Layout, Mapped, MARKS};
 use std::collections::HashSet;
 
 #[derive(Default)]
@@ -14,6 +14,7 @@ pub struct CompositionBuffer {
     history: Vec<usize>,
     /// 游標（第幾個已完成音節之前）；None＝在最後
     cursor_at: Option<usize>,
+    pub layout: Layout,
 }
 
 impl CompositionBuffer {
@@ -65,11 +66,12 @@ impl CompositionBuffer {
             }
             _ => {}
         }
-        match map_key(code) {
+        match self.layout.map_key(code, &self.partial) {
             Mapped::Tone(t) => {
                 if self.history.is_empty() {
                     return true;
                 }
+                self.layout.on_end(&mut self.partial);
                 let syl = self.pending_display() + MARKS[t as usize - 1];
                 let legal = self.legal.contains(&syl);
                 self.insert(syl);
@@ -78,6 +80,7 @@ impl CompositionBuffer {
                 legal
             }
             Mapped::Symbol(s) => {
+                self.layout.on_symbol(&mut self.partial, s);
                 let slot = slot_of(s).unwrap();
                 // 同槽再按＝覆蓋；該槽移到退格歷史最後
                 if self.partial[slot].is_some() {

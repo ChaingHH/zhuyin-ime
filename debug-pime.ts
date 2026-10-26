@@ -4,6 +4,7 @@
 // npx tsx debug-pime.ts chewing|mcbopomofo|zhuyin [句數上限]
 // zhuyin＝本專案的 Rust 後端（native/target/release/zhuyin-native.exe pime，ZHUYIN_EXE 可換），要設 ZHUYIN_DATA；
 // 學習預設關（ZHUYIN_ADAPTER=off，句準才和 `zhuyin-native eval` 可比），ZHUYIN_L3=0 關 L3。
+// ZHUYIN_LAYOUT=eten|hsu|ibm|eten26：行為檢查（大千）後從右鍵選單換排列，句子照那個排列打。
 // zhuyin 會先跑一小段行為檢查（Shift 切換、標點、Esc、選字視窗），不符就丟例外。
 // 注意：新酷音會把打過的詞學進 %APPDATA%\PIME\chewing\chewing.sqlite3。
 import { spawn } from 'node:child_process';
@@ -12,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { syllableToKeyCodes } from '@zhuyin/core';
+import { LAYOUT_KEYS, syllableToKeyCodes, type LayoutName } from '@zhuyin/core';
 import { loadEvalSamples } from './packages/data-pipeline/src/build/evalset.js';
 
 const PIME = 'C:\\Program Files (x86)\\PIME';
@@ -58,6 +59,8 @@ const keyOf = (code: string): [number, number] => {
     Minus: [0xbd, 0x2d],
     Semicolon: [0xba, 0x3b],
     Comma: [0xbc, 0x2c],
+    Equal: [0xbb, 0x3d],
+    Quote: [0xde, 0x27],
     Period: [0xbe, 0x2e],
     Slash: [0xbf, 0x2f],
     BracketLeft: [0xdb, 0x5b],
@@ -296,7 +299,14 @@ const shiftTap = async (
   await call({ method: 'filterKeyDown', ...ev, keyStates });
   if (rollover) {
     const [keyCode, charCode] = keyOf(rollover);
-    const up = await call({ method: 'filterKeyUp', ...ev, keyCode, charCode, scanCode: 0, keyStates });
+    const up = await call({
+      method: 'filterKeyUp',
+      ...ev,
+      keyCode,
+      charCode,
+      scanCode: 0,
+      keyStates,
+    });
     check(!up['return'], `Shift 按著時放開 ${rollover} 不該被攔下`);
   }
   keyStates[0x10] = 0;
@@ -432,7 +442,11 @@ async function smoke(): Promise<void> {
   const logged = (await press('Enter')).out;
   const rec = JSON.parse(readFileSync(usageFile, 'utf8').trim().split('\n').pop()!);
   check(
-    rec.out === logged && rec.syl === 'ㄋㄧˇ' && rec.picks.length === 1 && rec.picks[0].to === logged && rec.keys === 5,
+    rec.out === logged &&
+      rec.syl === 'ㄋㄧˇ' &&
+      rec.picks.length === 1 &&
+      rec.picks[0].to === logged &&
+      rec.keys === 5,
     `使用紀錄一行（${JSON.stringify(rec)}）`,
   );
   await setUsage(false);
@@ -716,6 +730,20 @@ if (which === 'zhuyin') {
   await smoke();
   console.log('[zhuyin] 行為檢查通過');
 }
+const layout = (process.env['ZHUYIN_LAYOUT'] ?? 'dachen') as LayoutName;
+if (!(layout in LAYOUT_KEYS)) throw new Error(`沒有這個排列：${layout}`);
+if (which === 'zhuyin') {
+  // 右鍵選單「鍵盤排列」子選單：id 10＋LAYOUT_KEYS 的順序（同 native/src/keymap.rs LAYOUTS）
+  const items = (await call({ method: 'onMenu', id: 'windows-mode-icon' }))['return'] as Array<{
+    submenu?: Array<{ id: number; checked?: boolean }>;
+  }>;
+  const sub = items.find((i) => i.submenu)?.submenu ?? [];
+  if (sub.length !== 5 || !sub[0]!.checked) throw new Error('右鍵選單：鍵盤排列子選單、預設大千');
+  const id = 10 + Object.keys(LAYOUT_KEYS).indexOf(layout);
+  await call({ method: 'onCommand', id, type: 2 });
+  if (!readFileSync(configFile, 'utf8').includes(`"layout": "${layout}"`))
+    throw new Error(`config.json 沒寫入 layout ${layout}`);
+}
 
 const samples = [
   ...(await loadEvalSamples('eval/colloquial.jsonl')).map((s) => ({ ...s, set: 'colloquial' })),
@@ -738,7 +766,7 @@ const ok: Record<string, [number, number]> = { colloquial: [0, 0], written: [0, 
 const fails: string[] = [];
 for (const s of samples) {
   let out = '';
-  for (const code of s.syllables.flatMap((syl) => syllableToKeyCodes(syl))) {
+  for (const code of s.syllables.flatMap((syl) => syllableToKeyCodes(syl, layout))) {
     const t = performance.now();
     out += await key(code);
     lat.push(performance.now() - t);
@@ -760,7 +788,7 @@ const pct = (p: number): string =>
 const acc = (k: string): string => ((ok[k]![0] / Math.max(1, ok[k]![1])) * 100).toFixed(1);
 console.log(`[${which}] init=${JSON.stringify(init).slice(0, 80)}`);
 console.log(
-  `${which} | ${samples.length} 句 ${lat.length} 鍵 | 句 口語 ${acc('colloquial')} 書面 ${acc('written')} | ` +
+  `${which}${layout === 'dachen' ? '' : ` ${layout}`} | ${samples.length} 句 ${lat.length} 鍵 | 句 口語 ${acc('colloquial')} 書面 ${acc('written')} | ` +
     `冷啟動 ${coldMs.toFixed(0)}ms | 每鍵 p50 ${pct(0.5)} p95 ${pct(0.95)} p99 ${pct(0.99)} max ${sorted.at(-1)!.toFixed(2)} ms | ` +
     `Enter ${(commitLat.reduce((a, b) => a + b, 0) / commitLat.length).toFixed(2)}ms | ` +
     `CPU ${((after.cpu - before.cpu) / lat.length).toFixed(2)} ms/鍵 | ` +
