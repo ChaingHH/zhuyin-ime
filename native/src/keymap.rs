@@ -309,7 +309,11 @@ mod tests {
         let mut codes = vec![];
         for s in INITIALS.iter().chain(&MEDIALS).chain(&FINALS) {
             let code = Layout::Dachen.code_of(Mapped::Symbol(s)).expect(s);
-            assert_eq!(Layout::Dachen.map_key(&code, &EMPTY), Mapped::Symbol(s), "{code}");
+            assert_eq!(
+                Layout::Dachen.map_key(&code, &EMPTY),
+                Mapped::Symbol(s),
+                "{code}"
+            );
             codes.push(code);
         }
         codes.sort();

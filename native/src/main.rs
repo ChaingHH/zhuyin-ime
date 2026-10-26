@@ -32,6 +32,7 @@ mod lm;
 mod noise;
 mod pime;
 mod slots;
+mod t2s;
 #[cfg(test)]
 mod testutil;
 mod usage;
@@ -81,6 +82,9 @@ struct Sample {
 }
 
 /// 增量解碼 == 全量解碼：逐音節打、刪掉中間一個再補回、中途選字後接著打；steps＝[全量, 增量] 每步毫秒
+/// 一條路徑的比對簽章：分數的位元＋（詞、讀音）序列
+type PathSig = (u64, Vec<(String, Vec<String>)>);
+
 fn incr_check(
     dec: &decode::Decoder,
     obs: &[String],
@@ -88,31 +92,35 @@ fn incr_check(
     n_best: usize,
     steps: &mut [Vec<f64>; 2],
 ) {
-    let sig = |ps: &[decode::DecodePath]| -> Vec<(u64, Vec<(String, Vec<String>)>)> {
+    let sig = |ps: &[decode::DecodePath]| -> Vec<PathSig> {
         ps.iter()
             .map(|p| {
-                let b = p.breakdown.iter().map(|b| (b.word.clone(), b.reading.clone()));
+                let b = p
+                    .breakdown
+                    .iter()
+                    .map(|b| (b.word.clone(), b.reading.clone()));
                 (p.score.to_bits(), b.collect())
             })
             .collect()
     };
     let mut lat = decode::Lattice::default();
-    let mut run = |seq: &[String], alts: Option<&[Vec<l3::Hypothesis>]>, fixed: &[decode::FixedSpan]| {
-        let o = decode::DecodeOptions {
-            n_best,
-            alternatives: alts,
-            fixed,
-            ..Default::default()
+    let mut run =
+        |seq: &[String], alts: Option<&[Vec<l3::Hypothesis>]>, fixed: &[decode::FixedSpan]| {
+            let o = decode::DecodeOptions {
+                n_best,
+                alternatives: alts,
+                fixed,
+                ..Default::default()
+            };
+            let t = Instant::now();
+            let full = dec.decode(seq, &o);
+            steps[0].push(t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let inc = dec.decode_in(&mut lat, seq, &o);
+            steps[1].push(t.elapsed().as_secs_f64() * 1000.0);
+            assert!(sig(&full) == sig(&inc), "增量≠全量：{}", seq.join(" "));
+            full
         };
-        let t = Instant::now();
-        let full = dec.decode(seq, &o);
-        steps[0].push(t.elapsed().as_secs_f64() * 1000.0);
-        let t = Instant::now();
-        let inc = dec.decode_in(&mut lat, seq, &o);
-        steps[1].push(t.elapsed().as_secs_f64() * 1000.0);
-        assert!(sig(&full) == sig(&inc), "增量≠全量：{}", seq.join(" "));
-        full
-    };
     let n = obs.len();
     let mut mid = vec![];
     for k in 1..=n {
@@ -124,7 +132,11 @@ fn incr_check(
     if n > 2 {
         let m = n / 2;
         let cut_alts = alts.map(|v| [&v[..m], &v[m + 1..]].concat());
-        run(&[&obs[..m], &obs[m + 1..]].concat(), cut_alts.as_deref(), &[]);
+        run(
+            &[&obs[..m], &obs[m + 1..]].concat(),
+            cut_alts.as_deref(),
+            &[],
+        );
         run(obs, alts, &[]);
     }
     // 前半句第二名的第一個詞當選字，接著打完

@@ -31,4 +31,11 @@ export const SOURCES = {
     license: '見 dataset card（使用前逐條核對）',
     revision: 'main@2026-08',
   },
+  /** 簡體輸出的繁轉簡表。表小（約 113KB），原樣放在 native/src/opencc/、用 include_str! 編進引擎（native/src/t2s.rs），不經資料流程 */
+  opencc: {
+    baseUrl: 'https://raw.githubusercontent.com/BYVoid/OpenCC/ver.1.4.2/data/dictionary/',
+    files: ['TSCharacters.txt', 'TSPhrases.txt'] as const,
+    license: 'Apache-2.0 (OpenCC, Copyright BYVoid and contributors)',
+    revision: 'ver.1.4.2',
+  },
 } as const;

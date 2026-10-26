@@ -406,8 +406,8 @@ impl Decoder {
                                 if admits(&target.lists[li].1, np.score, paths, n_best) {
                                     paths.push(np);
                                     let id = paths.len() as u32 - 1;
-                                    counts[q] += insert(&mut target.lists[li].1, id, paths, n_best)
-                                        as usize;
+                                    counts[q] +=
+                                        insert(&mut target.lists[li].1, id, paths, n_best) as usize;
                                 }
                             }
                         }
@@ -501,8 +501,7 @@ impl Decoder {
                                 cand: i as u32,
                             });
                             let id = paths.len() as u32 - 1;
-                            counts[q] +=
-                                insert(&mut target.lists[l].1, id, paths, n_best) as usize;
+                            counts[q] += insert(&mut target.lists[l].1, id, paths, n_best) as usize;
                             if counts[q] > 2 * beam {
                                 floor = prune_beam(target, beam, paths);
                                 floors[q] = floor;

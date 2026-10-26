@@ -27,12 +27,14 @@ Windows 的注音輸入法（大千、倚天、許氏、IBM、倚天 26 鍵）�
 | ↓ | 開選字視窗。↓ ↑ 移動、1–9 或 Enter 選、空白翻頁 |
 | → 或 Tab（選字視窗中） | 展開成表格，一次看更多候選 |
 | ↑ | 不開視窗，直接換成下一個候選 |
+| Ctrl+Shift+F | 切換繁體／簡體輸出（同微軟注音） |
 
 右鍵點工作列的「注／英」圖示：
 
 - **學習資料與使用紀錄**：在瀏覽器裡看學到的詞，不要的可以刪；學習、使用紀錄各有開關，也能一次全部清除。
 - **左 Shift／右 Shift 切換中英**：決定單按哪一顆 Shift 會切換。
 - **鍵盤排列**：大千（預設）、倚天、許氏、IBM、倚天 26 鍵。許氏和倚天 26 鍵一鍵多音，照新酷音的規則依前面打的符號判斷。
+- **簡體輸出**：組字區、候選和送出的字改成簡體。打字和學習仍用繁體，切回來學到的詞照樣能用。
 
 學習資料存在 `%APPDATA%\PIME\zhuyin\`，只在你的電腦上，不會上傳。
 
@@ -59,6 +61,7 @@ Windows 的注音輸入法（大千、倚天、許氏、IBM、倚天 26 鍵）�
 - 詞庫：
   - [萌典 g0v/moedict-data](https://github.com/g0v/moedict-data)：教育部《重編國語辭典修訂本》，政府資料開放授權條款，散布須標示來源。
   - [libchewing-data](https://github.com/chewing/libchewing-data)：LGPL-2.1-or-later。本專案有修改，安裝目錄的 `THIRD-PARTY-NOTICES.txt` 列出改了什麼。
+- 簡體輸出的轉換表：[OpenCC](https://github.com/BYVoid/OpenCC) ver.1.4.2 的 `TSCharacters.txt`、`TSPhrases.txt`，Apache-2.0，未修改。
 - 語言模型的訓練語料：Hugging Face `yuhuanstudio/PTT-pretrain-zhtw`、`voidful/fineweb-zhtw`、`wikimedia/wikipedia`（經 OpenCC s2twp 轉繁體）。
 - 安裝程式內附 [PIME](https://github.com/EasyIME/PIME) v2.0.0-beta3 官方安裝檔（LGPL），未修改。
 
