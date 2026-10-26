@@ -60,14 +60,18 @@ impl Lexicon {
         };
         let u16s = |name: &str| {
             seg(name)
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect()
         };
         let u32s = |name: &str| {
             seg(name)
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect()
         };
 
@@ -266,5 +270,63 @@ impl Lexicon {
         if let Some(l) = list {
             l.retain(|&x| x != w);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testutil::lexicon;
+
+    fn rd(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    fn words(l: &super::Lexicon, r: &str) -> Vec<String> {
+        let mut out = vec![];
+        l.each(&rd(r), usize::MAX, |w| out.push(l.word(w).to_string()));
+        out
+    }
+
+    #[test]
+    fn lookup_keeps_order_and_overlay() {
+        let mut l = lexicon(
+            &[
+                ("ㄋㄧˇ", "你"),
+                ("ㄋㄧˇ", "擬"),
+                ("ㄋㄧˇ ㄏㄠˇ", "你好"),
+                ("ㄏㄠˇ", "好"),
+            ],
+            &[("好", "ㄏㄠˇ")],
+        );
+        assert_eq!(words(&l, "ㄋㄧˇ"), ["你", "擬"]);
+        assert!(words(&l, "ㄇㄚ").is_empty());
+        assert_eq!(l.max_span(), 2);
+        assert_eq!(l.word_count(), 4);
+        let mut first = vec![];
+        l.each(&rd("ㄋㄧˇ"), 1, |w| first.push(w));
+        assert_eq!(first.len(), 1);
+        // 破音單字
+        let id = |l: &super::Lexicon, w: &str| {
+            (0..l.word_count() as u32)
+                .find(|&i| l.word(i) == w)
+                .unwrap()
+        };
+        assert!(l.is_poly(id(&l, "好")) && !l.is_poly(id(&l, "你")));
+        // 疊加層：接在該讀音最後；已有的詞沿用編號；全新讀音、全新音節也行
+        l.add(&rd("ㄋㄧˇ"), "妳");
+        l.add(&rd("ㄋㄧˇ"), "你");
+        l.add(&rd("ㄏㄠˇ"), "你");
+        l.add(&rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"), "狀態欄");
+        assert_eq!(words(&l, "ㄋㄧˇ"), ["你", "擬", "妳"]);
+        assert_eq!(words(&l, "ㄏㄠˇ"), ["好", "你"]);
+        assert!(l.has(&rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"), "狀態欄"));
+        assert_eq!(l.max_span(), 3);
+        assert_eq!(l.word_count(), 6);
+        // 基本詞典的詞拿不掉，疊加層的可以
+        l.remove(&rd("ㄋㄧˇ"), "你");
+        l.remove(&rd("ㄋㄧˇ"), "妳");
+        assert_eq!(words(&l, "ㄋㄧˇ"), ["你", "擬"]);
+        l.add(&rd("ㄋㄧˇ"), "妳");
+        assert_eq!(l.word_count(), 6);
     }
 }

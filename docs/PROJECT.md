@@ -329,7 +329,8 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 ## 8. 測試
 
 - `npm test` 跑 vitest：`core/test`（型別、詞典索引）、`lm/test`（模型、退回式模型）、`data-pipeline/test`（注音解析、萌典、詞庫、清洗、防洩漏）。
-- 引擎：`debug-pime.ts`（行為檢查）與 `debug-pime-fuzz.ts`。
+- 引擎單元測試：`cd native && cargo test`。各模組的 `#[cfg(test)] mod tests`（keymap、slots、l3、x2、usage、lexicon、decode、engine、pime），不需要 `data/`：`native/src/testutil.rs` 手造極小的 lexicon.bin 與平坦的 lm.bo.bin（每個詞都查不到、回 unseen，所以詞少的路徑贏）。CI 的 `native` job（windows-latest）跑 `cargo fmt --check`、`cargo build --release`、`cargo test`、`cargo clippy --all-targets -- -D warnings`。
+- 引擎整合：`debug-pime.ts`（行為檢查）與 `debug-pime-fuzz.ts`，需要 `data/` 的大模型，CI 上不跑。
 
 ## 9. 授權限制
 

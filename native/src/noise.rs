@@ -57,7 +57,7 @@ fn cognitive(syl: &str, r: &mut Rng) -> String {
         return chars.concat();
     }
     let last = chars.last().unwrap().as_str();
-    let has_mark = last != "" && MARKS.contains(&last);
+    let has_mark = !last.is_empty() && MARKS.contains(&last);
     let (base, cur) = if has_mark {
         (chars[..chars.len() - 1].concat(), last)
     } else {
@@ -86,7 +86,10 @@ pub fn inject_noise(
         for code in syllable_to_key_codes(&syl) {
             if is_tone(code) {
                 // 聲調鍵：只會按到相鄰的聲調鍵（不破壞音節邊界）
-                let adj: Vec<String> = key_neighbors(code).into_iter().filter(|c| is_tone(c)).collect();
+                let adj: Vec<String> = key_neighbors(code)
+                    .into_iter()
+                    .filter(|c| is_tone(c))
+                    .collect();
                 if !adj.is_empty() && r.next() < o.key {
                     let c = r.pick(&adj).clone();
                     buf.on_key(&c);
@@ -99,7 +102,10 @@ pub fn inject_noise(
                 buf.on_key(code);
                 continue;
             }
-            let nb: Vec<String> = key_neighbors(code).into_iter().filter(|c| is_symbol(c)).collect();
+            let nb: Vec<String> = key_neighbors(code)
+                .into_iter()
+                .filter(|c| is_symbol(c))
+                .collect();
             let kind = r.next();
             if kind < 0.6 {
                 let c = r.pick(&nb).clone();

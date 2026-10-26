@@ -18,3 +18,22 @@ jobs:
       - run: npx prettier --check "packages/**/src/**/*.ts" "packages/**/test/**/*.ts"
       - run: npm run build
       - run: npm test
+
+  native:
+    # 引擎直接呼叫 Windows API（lm.rs 的記憶體映射等），只能在 Windows 建置
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - run: cargo fmt --check
+      - run: cargo build --release
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings

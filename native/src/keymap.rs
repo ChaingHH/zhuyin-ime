@@ -156,3 +156,73 @@ pub fn key_neighbors(code: &str) -> Vec<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dachen_covers_every_symbol_once() {
+        let mut syms: Vec<&str> = DACHEN.iter().map(|(_, s)| *s).collect();
+        syms.sort();
+        let mut all: Vec<&str> = INITIALS
+            .iter()
+            .chain(&MEDIALS)
+            .chain(&FINALS)
+            .copied()
+            .collect();
+        all.sort();
+        assert_eq!(syms, all);
+        for (code, s) in DACHEN {
+            assert!(
+                matches!(map_key(code), Mapped::Symbol(x) if x == s),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_key_tones_and_unmapped() {
+        assert!(matches!(map_key("Space"), Mapped::Tone(1)));
+        assert!(matches!(map_key("Digit6"), Mapped::Tone(2)));
+        assert!(matches!(map_key("Digit3"), Mapped::Tone(3)));
+        assert!(matches!(map_key("Digit4"), Mapped::Tone(4)));
+        assert!(matches!(map_key("Digit7"), Mapped::Tone(5)));
+        assert!(matches!(map_key("KeyU"), Mapped::Symbol("ㄧ")));
+        assert!(matches!(map_key("Equal"), Mapped::Unmapped));
+        assert!(matches!(map_key("Enter"), Mapped::Unmapped));
+    }
+
+    #[test]
+    fn slot_of_parts() {
+        assert_eq!(slot_of("ㄅ"), Some(0));
+        assert_eq!(slot_of("ㄩ"), Some(1));
+        assert_eq!(slot_of("ㄦ"), Some(2));
+        assert_eq!(slot_of("ˇ"), None);
+        assert_eq!(slot_of("a"), None);
+    }
+
+    #[test]
+    fn syllable_to_key_codes_appends_tone_key() {
+        assert_eq!(syllable_to_key_codes("ㄋㄧˇ"), ["KeyS", "KeyU", "Digit3"]);
+        assert_eq!(syllable_to_key_codes("ㄇㄚ"), ["KeyA", "Digit8", "Space"]);
+        assert_eq!(syllable_to_key_codes("ㄓˊ"), ["Digit5", "Digit6"]);
+        assert_eq!(syllable_to_key_codes("ㄉㄜ˙"), ["Digit2", "KeyK", "Digit7"]);
+        assert_eq!(
+            syllable_to_key_codes("ㄒㄩㄝˋ"),
+            ["KeyV", "KeyM", "Comma", "Digit4"]
+        );
+    }
+
+    #[test]
+    fn key_neighbors_by_geometry() {
+        let n = key_neighbors("KeyG");
+        for k in ["KeyF", "KeyH", "KeyT", "KeyY", "KeyV", "KeyB"] {
+            assert!(n.iter().any(|x| x == k), "{k} 應與 G 相鄰：{n:?}");
+        }
+        assert!(!n.iter().any(|x| x == "KeyG" || x == "KeyR" || x == "KeyN"));
+        // 數字列：3 與 4 相鄰（L3 的相鄰聲調鍵靠這個）
+        assert!(key_neighbors("Digit3").iter().any(|x| x == "Digit4"));
+        assert!(key_neighbors("Space").is_empty());
+    }
+}

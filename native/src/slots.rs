@@ -165,3 +165,131 @@ impl CompositionBuffer {
         self.cursor_at = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buf() -> CompositionBuffer {
+        CompositionBuffer::new(["ㄋㄧˇ", "ㄏㄠˇ"].iter().map(|s| s.to_string()).collect())
+    }
+
+    fn keys(b: &mut CompositionBuffer, codes: &[&str]) -> bool {
+        codes.iter().map(|c| b.on_key(c)).last().unwrap()
+    }
+
+    #[test]
+    fn tone_key_completes_syllable_and_reports_legality() {
+        let mut b = buf();
+        assert!(keys(&mut b, &["KeyS", "KeyU"]));
+        assert_eq!(b.pending_display(), "ㄋㄧ");
+        assert!(b.on_key("Digit3"));
+        assert_eq!(b.sequence(), ["ㄋㄧˇ"]);
+        assert_eq!(b.pending_display(), "");
+        // 不合法的也放進去，只是回 false
+        assert!(!keys(&mut b, &["KeyS", "KeyL", "Digit3"]));
+        assert_eq!(b.sequence(), ["ㄋㄧˇ", "ㄋㄠˇ"]);
+    }
+
+    #[test]
+    fn tone_without_symbols_and_unmapped_keys_do_nothing() {
+        let mut b = buf();
+        assert!(b.on_key("Space"));
+        assert!(b.on_key("Equal"));
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn same_slot_overwrites_and_moves_to_end_of_history() {
+        let mut b = buf();
+        keys(&mut b, &["KeyS", "KeyU", "KeyC"]);
+        assert_eq!(b.pending_display(), "ㄏㄧ");
+        // 最後按的是聲母：先退聲母
+        b.backspace();
+        assert_eq!(b.pending_display(), "ㄧ");
+    }
+
+    #[test]
+    fn backspace_partial_first_then_syllables() {
+        let mut b = buf();
+        keys(&mut b, &["KeyS", "KeyU", "Digit3", "KeyC"]);
+        assert!(b.backspace());
+        assert_eq!((b.pending_display().as_str(), b.sequence().len()), ("", 1));
+        assert!(b.backspace());
+        assert!(b.is_empty());
+        assert!(!b.backspace());
+    }
+
+    #[test]
+    fn cursor_inserts_and_deletes_in_the_middle() {
+        let mut b = buf();
+        keys(&mut b, &["KeyS", "KeyU", "Digit3"]);
+        b.set_cursor(0);
+        assert_eq!(b.cursor(), 0);
+        keys(&mut b, &["KeyC", "KeyL", "Digit3"]);
+        assert_eq!(b.sequence(), ["ㄏㄠˇ", "ㄋㄧˇ"]);
+        assert_eq!(b.cursor(), 1);
+        // 游標超過結尾＝在最後
+        b.set_cursor(99);
+        assert_eq!(b.cursor(), 2);
+        assert!(!b.delete_forward());
+        b.set_cursor(0);
+        assert!(b.delete_forward());
+        assert_eq!(b.sequence(), ["ㄋㄧˇ"]);
+        // 刪到游標在結尾：游標回到「在最後」
+        assert!(b.delete_forward());
+        assert_eq!(b.cursor(), 0);
+        assert!(b.sequence().is_empty());
+    }
+
+    #[test]
+    fn english_letters_merge_into_one_token() {
+        let mut b = buf();
+        keys(&mut b, &["KeyS", "KeyU", "Digit3"]);
+        for c in ["a", "b", "1"] {
+            assert!(b.append_english(c));
+        }
+        assert_eq!(b.sequence(), ["ㄋㄧˇ", "ab1"]);
+        // 數字從 push_literal 進來也併進去；標點自成一個 token，之後的字母開新 token
+        b.push_literal("2");
+        b.push_literal(",");
+        b.append_english("c");
+        assert_eq!(b.sequence(), ["ㄋㄧˇ", "ab12", ",", "c"]);
+        // 退格：英文 token 一次退一個字母，單字元 token 整個拿掉
+        b.backspace();
+        b.backspace();
+        assert_eq!(b.sequence(), ["ㄋㄧˇ", "ab12"]);
+        b.backspace();
+        assert_eq!(b.sequence(), ["ㄋㄧˇ", "ab1"]);
+    }
+
+    #[test]
+    fn english_merges_with_token_before_cursor_only() {
+        let mut b = buf();
+        b.append_english("x");
+        keys(&mut b, &["KeyS", "KeyU", "Digit3"]);
+        b.set_cursor(1);
+        b.append_english("y");
+        assert_eq!(b.sequence(), ["xy", "ㄋㄧˇ"]);
+        assert_eq!(b.cursor(), 1);
+        b.set_cursor(0);
+        b.append_english("z");
+        assert_eq!(b.sequence(), ["z", "xy", "ㄋㄧˇ"]);
+    }
+
+    #[test]
+    fn literals_rejected_while_pending() {
+        let mut b = buf();
+        b.on_key("KeyS");
+        assert!(!b.append_english("a"));
+        assert!(!b.push_literal(","));
+        assert!(!b.push_literal("1"));
+        assert!(!b.delete_forward());
+        b.clear_pending();
+        assert!(b.is_empty());
+        assert!(b.push_literal(","));
+        assert_eq!(b.sequence(), [","]);
+        b.reset();
+        assert!(b.is_empty());
+    }
+}

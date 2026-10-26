@@ -108,11 +108,14 @@ impl DecodePath {
     }
 }
 
+/// X2 修飾：詞、起點、長度 → log 加成
+pub type Modifier<'m> = &'m dyn Fn(&str, usize, usize) -> f64;
+
 #[derive(Default)]
 pub struct DecodeOptions<'m> {
     pub n_best: usize,
     /// X2 修飾：詞、起點、長度 → log 加成
-    pub modifier: Option<&'m dyn Fn(&str, usize, usize) -> f64>,
+    pub modifier: Option<Modifier<'m>>,
     /// L3 假設：每個位置的候選意圖音節（第一個是觀察音節、代價 0）
     pub alternatives: Option<&'m [Vec<Hypothesis>]>,
     pub fixed: &'m [FixedSpan],
@@ -339,7 +342,10 @@ impl Decoder {
                         if words.poly(c.word) {
                             lp -= self.poly_penalty;
                             // 次要讀音（將讀 ㄑㄧㄤ）再罰；在詞裡（將進酒）不罰
-                            let read = c.fix.as_ref().map_or(seq[pos].as_str(), |(_, s)| s.as_str());
+                            let read = c
+                                .fix
+                                .as_ref()
+                                .map_or(seq[pos].as_str(), |(_, s)| s.as_str());
                             if self.lex.poly_set.get(name).is_some_and(|m| m != read) {
                                 lp -= self.poly_minor_penalty;
                             }
@@ -678,5 +684,132 @@ impl Decoder {
 
     pub fn has_entry(&self, reading: &[String], word: &str) -> bool {
         self.lex.has(reading, word)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::decoder;
+
+    fn rd(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    const LEX: &[(&str, &str)] = &[
+        ("ㄋㄧˇ", "你"),
+        ("ㄋㄧˇ", "擬"),
+        ("ㄏㄠˇ", "好"),
+        ("ㄏㄠˇ", "號"),
+        ("ㄋㄧˇ ㄏㄠˇ", "你好"),
+    ];
+
+    #[test]
+    fn literal_and_english_tokens() {
+        assert!(is_literal(" ") && is_literal("abc") && is_literal("，"));
+        assert!(!is_literal("ㄋㄧˇ") && !is_literal("aㄅ"));
+        assert!(is_english("abc") && is_english("a1") && !is_english("12") && !is_english("ㄅa"));
+    }
+
+    #[test]
+    fn flat_lm_prefers_fewer_words() {
+        let d = decoder(LEX);
+        let p = d.decode(&rd("ㄋㄧˇ ㄏㄠˇ"), &DecodeOptions::default());
+        assert_eq!(p[0].text(), "你好");
+        assert_eq!(p[0].breakdown[0].reading, rd("ㄋㄧˇ ㄏㄠˇ"));
+        // N-best：其餘是同分的兩詞組合（同分的取捨照狀態的插入順序，你|好 被擠掉）
+        assert_eq!(
+            p.iter().map(|p| p.text()).collect::<Vec<_>>(),
+            ["你好", "你號", "擬好", "擬號"]
+        );
+        assert!(p[0].score > p[1].score);
+        assert!(p[1..].iter().all(|x| x.score == p[1].score));
+        assert!(d.decode(&[], &DecodeOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn unknown_syllables_and_literals() {
+        let d = decoder(LEX);
+        let p = d.decode(&rd("ㄋㄧˇ ㄇㄚ , abc"), &DecodeOptions::default());
+        assert_eq!(p[0].words(), ["你", UNK_WORD, ",", "abc"]);
+    }
+
+    #[test]
+    fn fixed_span_and_modifier() {
+        let d = decoder(LEX);
+        let seq = rd("ㄋㄧˇ ㄏㄠˇ");
+        let fixed = [FixedSpan {
+            pos: 1,
+            len: 1,
+            word: "號".into(),
+        }];
+        let p = d.decode(
+            &seq,
+            &DecodeOptions {
+                fixed: &fixed,
+                ..Default::default()
+            },
+        );
+        assert!(p.iter().all(|p| p.text().ends_with('號')));
+        assert_eq!(p[0].text(), "你號");
+        let m = |w: &str, _: usize, _: usize| if w == "擬" { 50.0 } else { 0.0 };
+        let p = d.decode(
+            &seq,
+            &DecodeOptions {
+                modifier: Some(&m),
+                ..Default::default()
+            },
+        );
+        assert_eq!(p[0].text(), "擬好");
+    }
+
+    #[test]
+    fn alternatives_correct_readings() {
+        let d = decoder(LEX);
+        // 打成 ㄋㄧˋ（沒有詞），L3 給 ㄋㄧˇ：單音節只在原讀音查無詞時才更正
+        let alts = vec![
+            vec![
+                Hypothesis {
+                    syl: "ㄋㄧˋ".into(),
+                    cost: 0.0,
+                },
+                Hypothesis {
+                    syl: "ㄋㄧˇ".into(),
+                    cost: 3.0,
+                },
+            ],
+            vec![Hypothesis {
+                syl: "ㄏㄠˇ".into(),
+                cost: 0.0,
+            }],
+        ];
+        let p = d.decode(
+            &rd("ㄋㄧˋ ㄏㄠˇ"),
+            &DecodeOptions {
+                alternatives: Some(&alts),
+                ..Default::default()
+            },
+        );
+        assert_eq!(p[0].text(), "你好");
+        assert_eq!(p[0].breakdown[0].reading, rd("ㄋㄧˇ ㄏㄠˇ"));
+        let c = d.span_cands(&rd("ㄋㄧˋ"), 0, 1, Some(&alts[..1]));
+        assert_eq!(
+            c.iter()
+                .map(|c| (c.word.as_str(), c.cost))
+                .collect::<Vec<_>>(),
+            [("你", 3.0), ("擬", 3.0)]
+        );
+    }
+
+    #[test]
+    fn runtime_entries() {
+        let mut d = decoder(LEX);
+        let r = rd("ㄓㄨㄤˋ ㄊㄞˋ");
+        assert!(!d.has_entry(&r, "狀態"));
+        d.add_entry("狀態", std::slice::from_ref(&r));
+        assert!(d.has_entry(&r, "狀態"));
+        assert_eq!(d.decode(&r, &DecodeOptions::default())[0].text(), "狀態");
+        d.remove_entry("狀態", std::slice::from_ref(&r));
+        assert!(!d.has_entry(&r, "狀態"));
     }
 }

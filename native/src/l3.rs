@@ -159,7 +159,7 @@ impl Channel {
         if let Some(p) = parsed {
             let o = &self.o;
             let pools: [&[&'static str]; 3] = [&INITIALS, &MEDIALS, &FINALS];
-            for slot in 0..3 {
+            for (slot, &pool) in pools.iter().enumerate() {
                 let Some(c) = p.0[slot] else { continue };
                 // 多按一鍵：意圖沒有這個符號
                 let mut q = p;
@@ -177,7 +177,7 @@ impl Channel {
                         q.0[s_slot] = Some(s);
                         add(&q, o.sub, false);
                         // 跨槽覆蓋：鄰鍵 c 蓋掉了 slot 槽原本的符號 x（ㄒㄧㄠ 的 U 按成 Y → ㄗㄠ）
-                        for &x in pools[slot] {
+                        for &x in pool {
                             q.0[slot] = Some(x);
                             add(&q, o.sub, false);
                         }
@@ -195,11 +195,11 @@ impl Channel {
                 }
             }
             // 漏按一鍵：只補空槽。不受 max_alts 限制：同代價的漏按很多，依池順序截斷會砍掉 ㄨˇ→ㄨㄛˇ
-            for slot in 0..3 {
+            for (slot, &pool) in pools.iter().enumerate() {
                 if p.0[slot].is_some() {
                     continue;
                 }
-                for &s in pools[slot] {
+                for &s in pool {
                     let mut q = p;
                     q.0[slot] = Some(s);
                     add(&q, o.miss, true);
@@ -232,5 +232,110 @@ impl Channel {
                 .insert(observed.to_string(), out.clone());
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(legal: &[&str], o: ChannelOptions) -> Channel {
+        Channel::new(legal.iter().map(|s| s.to_string()).collect(), o)
+    }
+
+    fn cost(hs: &[Hypothesis], syl: &str) -> Option<f64> {
+        hs.iter().find(|h| h.syl == syl).map(|h| h.cost)
+    }
+
+    #[test]
+    fn observed_first_then_sorted_by_cost() {
+        let c = channel(
+            &["ㄇㄚˇ", "ㄇㄚˋ", "ㄇㄚˊ", "ㄋㄚˇ", "ㄇㄚ"],
+            Default::default(),
+        );
+        let hs = c.expand("ㄇㄚˇ");
+        assert_eq!(
+            hs[0],
+            Hypothesis {
+                syl: "ㄇㄚˇ".into(),
+                cost: 0.0
+            }
+        );
+        assert!(hs.windows(2).skip(1).all(|w| w[0].cost <= w[1].cost));
+        // 只出合法音節、不重複原音節
+        assert_eq!(hs.len(), 5);
+    }
+
+    #[test]
+    fn edit_costs() {
+        let o = ChannelOptions::default();
+        let c = channel(
+            &[
+                "ㄧㄥ",
+                "ㄗㄚ",
+                "ㄋㄚ",
+                "ㄇㄚ",
+                "ㄏㄨㄠ",
+                "ㄇㄚˋ",
+                "ㄇㄚˊ",
+                "ㄧㄢ",
+                "ㄨㄛˇ",
+            ],
+            o,
+        );
+        // ㄣ／ㄥ 有自己的低代價；其他模糊音
+        assert_eq!(cost(&c.expand("ㄧㄣ"), "ㄧㄥ"), Some(o.nasal));
+        assert_eq!(o.nasal, 3.5);
+        assert_eq!(cost(&c.expand("ㄓㄚ"), "ㄗㄚ"), Some(o.fuzzy));
+        // 鄰鍵（A 與 S）、多按、漏按
+        assert_eq!(cost(&c.expand("ㄇㄚ"), "ㄋㄚ"), Some(o.sub));
+        assert_eq!(cost(&c.expand("ㄇㄨㄚ"), "ㄇㄚ"), Some(o.extra));
+        assert_eq!(cost(&c.expand("ㄏㄠ"), "ㄏㄨㄠ"), Some(o.miss));
+        // 同一個意圖音節有好幾種改法時取最便宜的：ㄨˇ→ㄨㄛˇ 是漏按，也是 J→I 鄰鍵跨槽
+        assert_eq!(cost(&c.expand("ㄨˇ"), "ㄨㄛˇ"), Some(o.sub));
+        // 鄰鍵 P→0：ㄣ→ㄢ
+        assert_eq!(cost(&c.expand("ㄧㄣ"), "ㄧㄢ"), Some(o.sub));
+        // 聲調：3 與 4 相鄰較便宜，其他算記錯
+        let hs = c.expand("ㄇㄚˇ");
+        assert_eq!(cost(&hs, "ㄇㄚˋ"), Some(o.tone_adj));
+        assert_eq!(cost(&hs, "ㄇㄚˊ"), Some(o.tone));
+        assert_eq!(cost(&hs, "ㄇㄚ"), Some(o.tone));
+    }
+
+    #[test]
+    fn one_edit_per_syllable() {
+        // ㄓㄣ→ㄗㄥ 要兩次模糊音
+        let c = channel(&["ㄗㄥ", "ㄗㄣ", "ㄓㄥ"], Default::default());
+        let hs = c.expand("ㄓㄣ");
+        assert_eq!(cost(&hs, "ㄗㄥ"), None);
+        assert!(cost(&hs, "ㄗㄣ").is_some() && cost(&hs, "ㄓㄥ").is_some());
+    }
+
+    #[test]
+    fn max_alts_cuts_all_but_missed_keys() {
+        let o = ChannelOptions {
+            max_alts: 1,
+            ..Default::default()
+        };
+        let c = channel(&["ㄇㄚˋ", "ㄇㄚˊ", "ㄇㄨㄚˇ", "ㄇㄩㄚˇ", "ㄇㄧㄚˇ"], o);
+        let hs: Vec<_> = c.expand("ㄇㄚˇ").into_iter().map(|h| h.syl).collect();
+        // 最便宜的一個（相鄰聲調）＋不受限的漏按。
+        // ㄇㄧㄚˇ 也是漏按，但 8→U 鄰鍵跨槽更便宜，記成鄰鍵後就受 max_alts 限制、被截掉（現況）
+        assert_eq!(hs, ["ㄇㄚˇ", "ㄇㄚˋ", "ㄇㄨㄚˇ", "ㄇㄩㄚˇ"]);
+    }
+
+    #[test]
+    fn unparsable_tokens_are_not_cached() {
+        let c = channel(&["ㄇㄚ"], Default::default());
+        assert_eq!(
+            c.expand("abc"),
+            [Hypothesis {
+                syl: "abc".into(),
+                cost: 0.0
+            }]
+        );
+        c.expand("ㄇㄚˇ");
+        assert_eq!(c.cache.borrow().len(), 1);
+        assert!(c.cache.borrow().contains_key("ㄇㄚˇ"));
     }
 }

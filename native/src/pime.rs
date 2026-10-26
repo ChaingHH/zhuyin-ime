@@ -710,7 +710,12 @@ impl Backend {
 
     /// 使用紀錄檔：設定檔旁的 usage.jsonl（%APPDATA%\PIME\zhuyin\usage.jsonl）
     fn usage_file(&self) -> Option<PathBuf> {
-        Some(self.cfg.settings_file.as_ref()?.with_file_name("usage.jsonl"))
+        Some(
+            self.cfg
+                .settings_file
+                .as_ref()?
+                .with_file_name("usage.jsonl"),
+        )
     }
 
     /// 把引擎累積的使用紀錄附加到檔案；超過 USAGE_MAX_BYTES 就只留後一半（暫存檔＋改名）

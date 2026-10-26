@@ -495,3 +495,168 @@ impl UserAdapter {
         Ok(a)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T0: f64 = 1.7e12;
+    const DAY: f64 = 86_400_000.0;
+
+    fn rd(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn selection_boost_by_reading_and_global() {
+        let mut a = UserAdapter::new();
+        a.record_selection(&rd("ㄕˋ ㄐㄧㄢ"), "事件", T0);
+        let g = BOOST_PER_COUNT * 2f64.ln();
+        assert_eq!(
+            a.modifier_for("ㄕˋ ㄐㄧㄢ", "事件", T0),
+            g + g * GLOBAL_FACTOR
+        );
+        // 別的讀音只有全域那份；14 天後減半
+        assert_eq!(a.modifier_for("ㄕˋ", "事件", T0), g * GLOBAL_FACTOR);
+        assert_eq!(
+            a.modifier_for("ㄕˋ", "事件", T0 + 14.0 * DAY),
+            g * GLOBAL_FACTOR / 2.0
+        );
+        // 加成有上限
+        for _ in 0..100 {
+            a.record_selection(&rd("ㄕˋ ㄐㄧㄢ"), "事件", T0);
+        }
+        let u = a.modifier_for("ㄕˋ ㄐㄧㄢ", "事件", T0);
+        assert_eq!(u, MAX_SEQ_BOOST + MAX_SEQ_BOOST / 2.0 * GLOBAL_FACTOR);
+        a.enabled = false;
+        assert_eq!(a.modifier_for("ㄕˋ ㄐㄧㄢ", "事件", T0), 0.0);
+        a.record_selection(&rd("ㄕˋ"), "是", T0);
+        assert_eq!(a.stats(), (1, 1, 0, 0));
+    }
+
+    #[test]
+    fn manual_phrase_boost_grows_with_syllables() {
+        let mut a = UserAdapter::new();
+        a.set_user_phrase("狀態欄", &rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"));
+        let boost = |k: &str| a.modifier_for(k, "狀態欄", T0);
+        assert_eq!(boost("a b"), MANUAL_PHRASE_BOOST);
+        assert_eq!(
+            boost("a b c"),
+            MANUAL_PHRASE_BOOST + MANUAL_PHRASE_BOOST_PER_SYLLABLE
+        );
+        // 算到 6 音節
+        assert_eq!(
+            boost("a b c d e f g h"),
+            MANUAL_PHRASE_BOOST + 4.0 * MANUAL_PHRASE_BOOST_PER_SYLLABLE
+        );
+        assert_eq!(a.stats(), (0, 0, 1, 0));
+    }
+
+    #[test]
+    fn mined_word_enters_after_two_commits() {
+        let mut a = UserAdapter::new();
+        assert!(!a.mine_word("字", &rd("ㄗˋ")), "單字不挖");
+        assert!(a.mine_word("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ")));
+        assert!(a.drain_pending().is_empty());
+        assert!(!a.mine_word("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ")));
+        let e = a.drain_pending();
+        assert_eq!(e.len(), 1);
+        assert_eq!(
+            (e[0].word.as_str(), e[0].readings.clone()),
+            ("狀態", vec![rd("ㄓㄨㄤˋ ㄊㄞˋ")])
+        );
+        // 注入過的不再給；take_entries 清掉注入紀錄後再給一次
+        assert!(a.drain_pending().is_empty());
+        assert_eq!(a.take_entries().len(), 1);
+        assert_eq!(a.drain_pending().len(), 1);
+        assert_eq!(a.stats(), (0, 0, 0, 1));
+    }
+
+    #[test]
+    fn mining_does_not_touch_manual_phrase_and_nontraditional_is_skipped() {
+        let mut a = UserAdapter::new();
+        a.set_user_phrase("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ"));
+        assert!(!a.mine_word("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ")));
+        assert!(!a.to_json().contains("\"freq\""));
+        // 非台灣繁體字的詞不入格（手動詞也一樣）
+        a.set_user_phrase("这个", &rd("ㄓㄜˋ ㄍㄜ˙"));
+        let words: Vec<_> = a.drain_pending().into_iter().map(|e| e.word).collect();
+        assert_eq!(words, ["狀態"]);
+    }
+
+    #[test]
+    fn remove_phrase_and_selection() {
+        let mut a = UserAdapter::new();
+        a.set_user_phrase("狀態欄", &rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"));
+        a.record_selection(&rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"), "狀態欄", T0);
+        a.record_selection(&rd("ㄕˋ"), "是", T0);
+        assert_eq!(a.remove_phrase("狀態欄"), vec![rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ")]);
+        assert_eq!(a.stats(), (1, 1, 0, 0));
+        assert!(a.remove_phrase("沒有").is_empty());
+        assert!(!a.remove_selection(Some("ㄕˋ"), "事"));
+        assert!(a.remove_selection(Some("ㄕˋ"), "是"));
+        assert!(!a.remove_selection(Some("ㄕˋ"), "是"));
+        assert!(a.remove_selection(None, "是"));
+        assert_eq!(a.stats(), (0, 0, 0, 0));
+        assert_eq!(a.to_json(), r#"{"bySeq":{},"global":{},"phrases":[]}"#);
+    }
+
+    #[test]
+    fn compact_drops_decayed_records() {
+        let mut a = UserAdapter::new();
+        a.record_selection(&rd("ㄕˋ"), "是", T0);
+        // 1 × 0.5^(70/14) = 0.03125 ≥ 0.025 留著；75 天 < 0.025 刪掉
+        a.compact(T0 + 70.0 * DAY);
+        assert_eq!(a.stats(), (1, 1, 0, 0));
+        a.compact(T0 + 75.0 * DAY);
+        assert_eq!(a.stats(), (0, 0, 0, 0));
+        // 手動詞不衰減
+        a.set_user_phrase("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ"));
+        a.compact(T0 + 1000.0 * DAY);
+        assert_eq!(a.stats(), (0, 0, 1, 0));
+    }
+
+    #[test]
+    fn weakest_drops_below_threshold_then_down_to_cap() {
+        let items = vec![("a", 0.01), ("b", 3.0), ("c", 1.0), ("d", 1.0), ("e", 2.0)];
+        let mut out = weakest(items.clone(), 10, 0.025);
+        assert_eq!(out, ["a"]);
+        // 同分刪前面的
+        out = weakest(items, 2, 0.025);
+        assert_eq!(out, ["a", "c", "d"]);
+    }
+
+    #[test]
+    fn json_round_trip() {
+        let mut a = UserAdapter::new();
+        a.record_selection(&rd("ㄕˋ ㄐㄧㄢ"), "事件", T0);
+        a.set_user_phrase("狀態欄", &rd("ㄓㄨㄤˋ ㄊㄞˋ ㄌㄢˊ"));
+        a.mine_word("狀態", &rd("ㄓㄨㄤˋ ㄊㄞˋ"));
+        let s = a.to_json();
+        assert_eq!(
+            s,
+            r#"{"bySeq":{"ㄕˋ ㄐㄧㄢ":{"事件":{"count":1,"lastAt":1700000000000}}},"global":{"事件":{"count":1,"lastAt":1700000000000}},"phrases":[{"word":"狀態欄","readings":[["ㄓㄨㄤˋ","ㄊㄞˋ","ㄌㄢˊ"]],"provenance":["user"],"manual":true,"lastAt":1700000000000},{"word":"狀態","readings":[["ㄓㄨㄤˋ","ㄊㄞˋ"]],"provenance":["mined"],"freq":1,"lastAt":1700000000000}]}"#
+        );
+        assert_eq!(UserAdapter::from_json_at(&s, T0).unwrap().to_json(), s);
+        assert!(UserAdapter::from_json_at("{", T0).is_err());
+    }
+
+    #[test]
+    fn from_json_skips_compaction_after_clock_jump() {
+        let mut a = UserAdapter::new();
+        a.record_selection(&rd("ㄕˋ"), "是", T0);
+        let s = a.to_json();
+        assert_eq!(
+            UserAdapter::from_json_at(&s, T0 + 400.0 * DAY)
+                .unwrap()
+                .stats(),
+            (1, 1, 0, 0)
+        );
+        assert_eq!(
+            UserAdapter::from_json_at(&s, T0 + 300.0 * DAY)
+                .unwrap()
+                .stats(),
+            (0, 0, 0, 0)
+        );
+    }
+}

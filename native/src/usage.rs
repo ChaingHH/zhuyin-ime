@@ -18,10 +18,13 @@ pub fn summary(text: &str) -> Value {
         right += (r["top1"] == r["out"]) as usize;
         for p in r["picks"].as_array().into_iter().flatten() {
             picks += 1;
-            *fixes.entry(format!("{} → {}", s(&p["from"]), s(&p["to"]))).or_default() += 1;
+            *fixes
+                .entry(format!("{} → {}", s(&p["from"]), s(&p["to"])))
+                .or_default() += 1;
         }
         for c in r["l3"].as_array().into_iter().flatten() {
-            *l3.entry(format!("{} → {}", s(&c[0]), s(&c[1]))).or_default() += 1;
+            *l3.entry(format!("{} → {}", s(&c[0]), s(&c[1])))
+                .or_default() += 1;
         }
     }
     // 次數多的在前，同次數照字排（輸出穩定）；只留前 20
@@ -47,9 +50,54 @@ pub fn summary(text: &str) -> Value {
 /// 紀錄 → 評測集格式（第一行中繼資料，之後每句 text＋syllables；音節照實際打的）
 pub fn to_eval(text: &str, source: &str) -> String {
     let mut lines = vec![json!({ "source": source }).to_string()];
-    for r in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+    for r in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
         let syl: Vec<&str> = r["syl"].as_str().unwrap_or("").split(' ').collect();
         lines.push(json!({"text": r["out"], "syllables": syl}).to_string());
     }
     lines.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOG: &str = r#"{"t":1,"syl":"ㄋㄧˇ ㄏㄠˇ","top1":"你好","out":"你好","picks":[],"l3":[],"bs":1,"keys":7}
+not json
+{"t":2,"syl":"ㄕˋ ㄐㄧㄢ","top1":"市間","out":"事件","picks":[{"pos":0,"len":2,"from":"市間","to":"事件"}],"l3":[["ㄕˋ","ㄕˋ"]],"bs":0,"keys":9}
+"#;
+
+    #[test]
+    fn summary_counts() {
+        let s = summary(LOG);
+        assert_eq!(s["commits"], 2);
+        assert_eq!(s["chars"], 4);
+        assert_eq!(s["keys"], 16);
+        assert_eq!(s["backspaces"], 1);
+        assert_eq!(s["right"], 1);
+        assert_eq!(s["picks"], 1);
+        assert_eq!(s["l3"], 1);
+        assert_eq!(s["topFixes"], json!([["市間 → 事件", 1]]));
+        assert_eq!(summary("")["commits"], 0);
+    }
+
+    #[test]
+    fn top_sorted_by_count_then_text() {
+        let line = |from: &str| format!(r#"{{"out":"x","picks":[{{"from":"{from}","to":"y"}}]}}"#);
+        let log = [line("b"), line("a"), line("c"), line("c")].join("\n");
+        assert_eq!(
+            summary(&log)["topFixes"],
+            json!([["c → y", 2], ["a → y", 1], ["b → y", 1]])
+        );
+    }
+
+    #[test]
+    fn to_eval_format() {
+        assert_eq!(
+            to_eval(LOG, "usage"),
+            "{\"source\":\"usage\"}\n{\"text\":\"你好\",\"syllables\":[\"ㄋㄧˇ\",\"ㄏㄠˇ\"]}\n{\"text\":\"事件\",\"syllables\":[\"ㄕˋ\",\"ㄐㄧㄢ\"]}\n"
+        );
+    }
 }

@@ -30,8 +30,10 @@ mod lexicon;
 mod lm;
 mod noise;
 mod pime;
-mod usage;
 mod slots;
+#[cfg(test)]
+mod testutil;
+mod usage;
 mod x2;
 
 use std::collections::HashSet;
@@ -234,7 +236,10 @@ fn usage_report(file: &str, eval_out: Option<&str>) {
         pct(n("backspaces"), n("keys")),
         s["l3"],
     );
-    for (key, title) in [("topFixes", "最常改的字（原本 → 改成）"), ("topL3", "L3 更正（打的 → 採用）")] {
+    for (key, title) in [
+        ("topFixes", "最常改的字（原本 → 改成）"),
+        ("topL3", "L3 更正（打的 → 採用）"),
+    ] {
         println!("\n{title}");
         for p in s[key].as_array().into_iter().flatten() {
             println!("  {}\t{}", p[1], p[0].as_str().unwrap_or(""));
@@ -382,8 +387,9 @@ fn main() {
                     if obs != s.syllables {
                         changed += 1;
                     }
-                    let alts: Option<Vec<_>> =
-                        ch.as_ref().map(|c| obs.iter().map(|x| c.expand(x)).collect());
+                    let alts: Option<Vec<_>> = ch
+                        .as_ref()
+                        .map(|c| obs.iter().map(|x| c.expand(x)).collect());
                     // 涵蓋率：注入錯誤的音節裡，正確音節出現在展開裡的比例（L3 的上限）
                     if let (Some(alts), true) = (&alts, obs.len() == s.syllables.len()) {
                         for (j, o) in obs.iter().enumerate() {

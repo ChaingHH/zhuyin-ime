@@ -10,6 +10,7 @@ Zhuyin (Bopomofo) IME. Goal: add the channel model `P(K|S)` (fuzzy sounds, typo 
 
 ```bash
 cd native && cargo build --release   # the engine
+cd native && cargo test              # engine unit tests; no data/ needed (fixtures in native/src/testutil.rs)
 ZHUYIN_DATA=data native/target/release/zhuyin-native.exe eval   # accuracy; run from repo root (see below)
 
 npm install

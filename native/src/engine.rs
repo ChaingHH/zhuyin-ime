@@ -845,3 +845,273 @@ impl ImeEngine {
         self.menu = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{engine, type_syllables};
+
+    const LEX: &[(&str, &str)] = &[
+        ("ㄋㄧˇ", "你"),
+        ("ㄋㄧˇ", "擬"),
+        ("ㄏㄠˇ", "好"),
+        ("ㄏㄠˇ", "號"),
+        ("ㄋㄧˇ ㄏㄠˇ", "你好"),
+        ("ㄌㄢˊ", "欄"),
+        ("ㄨㄟˋ", "位"),
+        ("ㄨㄛˇ", "我"),
+    ];
+
+    fn rd(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn ctrl_punct_table() {
+        assert_eq!(ctrl_punct("Comma", false), Some("，"));
+        assert_eq!(ctrl_punct("Digit1", false), Some("！"));
+        assert_eq!(ctrl_punct("Backquote", false), Some("～"));
+        assert_eq!(ctrl_punct("BracketLeft", true), Some("『"));
+        assert_eq!(ctrl_punct("BracketRight", true), Some("』"));
+        assert_eq!(ctrl_punct("Comma", true), None);
+        assert_eq!(ctrl_punct("KeyA", false), None);
+    }
+
+    #[test]
+    fn particle_edges() {
+        assert!(edge_ok("狀態") && edge_ok("欄位") && edge_ok(""));
+        assert!(!edge_ok("我們") && !edge_ok("好嗎") && !edge_ok("的話"));
+        // 只看頭尾
+        assert!(edge_ok("看的書"));
+        for c in STANDALONE.chars() {
+            assert!(PARTICLE_EDGE.contains(c), "{c}");
+        }
+    }
+
+    #[test]
+    fn remapper_shifts_spans_outside_the_edit() {
+        // 中間插一個：前面不動、後面平移、跨過編輯點的作廢
+        let m = remapper(&rd("a b c"), &rd("a x b c"), 1);
+        assert_eq!((m(0, 1), m(1, 2), m(0, 2)), (Some(0), Some(2), None));
+        // 疊字旁刪字：在 0 刪了一個 a，相同前綴不超過編輯位置，所以作廢的是第一個 a
+        let m = remapper(&rd("a a b"), &rd("a b"), 0);
+        assert_eq!((m(0, 1), m(1, 1), m(2, 1)), (None, Some(0), Some(1)));
+    }
+
+    #[test]
+    fn menu_moves() {
+        let items = |n: usize| {
+            (0..n)
+                .map(|i| FixedSpan {
+                    pos: 0,
+                    len: 1,
+                    word: i.to_string(),
+                })
+                .collect()
+        };
+        let menu = |page, sel| Menu {
+            items: items(20),
+            page,
+            sel,
+        };
+        let m = menu(0, 0);
+        // ↑ 從頭循環到尾、跨頁
+        assert_eq!(menu_move(&m, "ArrowUp", 9), (19, 2));
+        assert_eq!(menu_move(&m, "ArrowDown", 9), (1, 0));
+        assert_eq!(menu_move(&m, "Space", 9), (9, 1));
+        assert_eq!(menu_move(&m, "PageUp", 9), (18, 2));
+        // 單欄時 ← → 不動
+        assert_eq!(menu_move(&m, "ArrowRight", 9), (0, 0));
+        // 表格（一頁 2 欄＝18 個）：→ 到右欄同一列，最右欄再 → 到下一頁；那欄短就到它最後一個
+        assert_eq!(menu_move(&menu(0, 3), "ArrowRight", 18), (12, 0));
+        assert_eq!(menu_move(&menu(0, 12), "ArrowRight", 18), (19, 1));
+        // 最左欄再 ← 到上一頁最右欄的同一列
+        assert_eq!(menu_move(&menu(1, 19), "ArrowLeft", 18), (10, 0));
+        assert_eq!(menu_move(&menu(1, 19), "Escape", 18), (19, 1));
+    }
+
+    #[test]
+    fn type_and_commit() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        let st = e.state(true);
+        assert_eq!((st.composition.as_str(), st.cursor), ("你好", 2));
+        e.on_key("KeyC", None, false);
+        let st = e.state(true);
+        assert_eq!(
+            (st.composition.as_str(), st.pending.as_deref()),
+            ("你好ㄏ", Some("ㄏ"))
+        );
+        // 打到一半的注音不送出
+        assert_eq!(e.commit(0), "你好");
+        assert!(!e.is_composing());
+        type_syllables(&mut e, "ㄋㄧˇ");
+        e.on_key("Escape", None, false);
+        assert!(!e.is_composing());
+    }
+
+    #[test]
+    fn direct_output_when_empty() {
+        let mut e = engine(LEX);
+        let text = |st: EngineState| st.text;
+        assert_eq!(
+            text(e.on_key("Space", Some(" "), false)).as_deref(),
+            Some(" ")
+        );
+        assert_eq!(
+            text(e.on_key("Digit1", Some("!"), true)).as_deref(),
+            Some("!")
+        );
+        assert_eq!(
+            text(e.on_key("Numpad5", Some("5"), false)).as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            text(e.on_key("NumpadAdd", Some("+"), false)).as_deref(),
+            Some("+")
+        );
+        assert_eq!(
+            text(e.on_key("KeyA", Some("A"), true)).as_deref(),
+            Some("A")
+        );
+        assert_eq!(text(e.on_punct("，")).as_deref(), Some("，"));
+        assert!(!e.is_composing());
+    }
+
+    #[test]
+    fn literals_inside_composition() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        e.on_key("Digit1", Some("!"), true);
+        e.on_punct("，");
+        e.on_key("Numpad7", Some("7"), false);
+        assert_eq!(e.state(true).composition, "你好!，7");
+        // 有打到一半的注音時標點不收
+        e.on_key("KeyS", None, false);
+        e.on_punct("。");
+        assert_eq!(e.state(true).composition, "你好!，7ㄋ");
+        e.on_key("Backspace", None, false);
+        assert_eq!(e.commit(0), "你好!，7");
+    }
+
+    #[test]
+    fn english_inside_composition() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ");
+        // 注音模式的 Shift＋字母
+        e.on_key("KeyA", Some("A"), true);
+        assert_eq!(e.state(true).composition, "你A");
+        e.on_key("KeyS", None, false);
+        e.toggle_mode();
+        // 切到英文：打到一半的注音丟掉，字母、數字併進英文 token
+        assert_eq!(e.state(true).pending, None);
+        e.on_key("KeyB", Some("b"), false);
+        e.on_key("Digit2", Some("2"), false);
+        let st = e.state(true);
+        assert_eq!((st.composition.as_str(), st.cursor), ("你Ab2", 4));
+        e.on_key("Backspace", None, false);
+        assert_eq!(e.state(true).composition, "你Ab");
+        // 英文模式的空白：整段送出再接空白
+        let st = e.on_key("Space", Some(" "), false);
+        assert_eq!(st.text.as_deref(), Some("你Ab "));
+        assert!(!e.is_composing());
+        let st = e.on_key("KeyC", Some("c"), false);
+        assert_eq!(st.text.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn cursor_moves_and_insert_in_middle() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        e.on_key("Home", None, false);
+        assert_eq!(e.state(true).cursor, 0);
+        e.on_key("ArrowRight", None, false);
+        type_syllables(&mut e, "ㄨㄛˇ");
+        let st = e.state(true);
+        assert_eq!((st.composition.as_str(), st.cursor), ("你我好", 2));
+        e.on_key("End", None, false);
+        assert_eq!(e.state(true).cursor, 3);
+    }
+
+    #[test]
+    fn menu_pick_saves_user_phrase() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        // 游標在最後：清單從最後一個音節開始；最後一項是注音本身
+        let st = e.on_key("ArrowDown", None, false);
+        assert_eq!(st.menu.unwrap().items, ["好", "號", "ㄏㄠˇ"]);
+        e.on_key("Escape", None, false);
+        e.on_key("Home", None, false);
+        let st = e.on_key("ArrowDown", None, false);
+        assert_eq!(st.menu.unwrap().items, ["你好", "你", "擬", "ㄋㄧˇ"]);
+        let st = e.on_key("Digit3", None, false);
+        assert!(st.menu.is_none());
+        assert_eq!((st.composition.as_str(), st.cursor), ("擬好", 1));
+        assert_eq!(e.commit(0), "擬好");
+        // 選過的字所在的單字串存成使用者詞，下次直接贏過 你好
+        assert!(e.decoder.has_entry(&rd("ㄋㄧˇ ㄏㄠˇ"), "擬好"));
+        assert_eq!(e.adapter.as_ref().unwrap().stats().2, 1);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        assert_eq!(e.state(true).composition, "擬好");
+        // 關掉學習：使用者詞拿掉、加分歸零；打開放回去
+        e.set_learning(false);
+        assert!(!e.decoder.has_entry(&rd("ㄋㄧˇ ㄏㄠˇ"), "擬好"));
+        assert_eq!(e.state(true).composition, "你好");
+        e.set_learning(true);
+        assert_eq!(e.state(true).composition, "擬好");
+    }
+
+    #[test]
+    fn arrow_up_cycles_candidates() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        e.on_key("Home", None, false);
+        e.on_key("ArrowUp", None, false);
+        e.on_key("ArrowUp", None, false);
+        let st = e.state(true);
+        assert!(st.menu.is_none());
+        assert_eq!((st.composition.as_str(), st.cursor), ("擬好", 0));
+    }
+
+    #[test]
+    fn mined_words_need_two_commits_and_clean_edges() {
+        let mut e = engine(LEX);
+        let r = rd("ㄌㄢˊ ㄨㄟˋ");
+        for i in 0..2 {
+            assert!(!e.decoder.has_entry(&r, "欄位"), "第 {i} 次送出前");
+            type_syllables(&mut e, "ㄌㄢˊ ㄨㄟˋ");
+            assert_eq!(e.commit(0), "欄位");
+        }
+        assert!(e.decoder.has_entry(&r, "欄位"));
+        // 頭尾是虛字（我）的不挖
+        for _ in 0..3 {
+            type_syllables(&mut e, "ㄨㄛˇ ㄌㄢˊ");
+            e.commit(0);
+        }
+        assert!(!e.decoder.has_entry(&rd("ㄨㄛˇ ㄌㄢˊ"), "我欄"));
+        assert_eq!(e.adapter.as_ref().unwrap().stats().3, 1);
+    }
+
+    #[test]
+    fn usage_log_line() {
+        let mut e = engine(LEX);
+        e.usage = true;
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        e.on_key("KeyC", None, false);
+        e.on_key("Backspace", None, false);
+        e.on_key("Home", None, false);
+        e.on_key("ArrowDown", None, false);
+        e.on_key("Digit3", None, false);
+        e.commit(0);
+        let v: Value = serde_json::from_str(&e.usage_lines[0]).unwrap();
+        assert_eq!(v["syl"], "ㄋㄧˇ ㄏㄠˇ");
+        assert_eq!(v["top1"], "你好");
+        assert_eq!(v["out"], "擬好");
+        assert_eq!(
+            v["picks"],
+            json!([{"pos": 0, "len": 1, "from": "你好", "to": "擬"}])
+        );
+        assert_eq!((v["bs"].as_u64(), v["keys"].as_u64()), (Some(1), Some(11)));
+        assert_eq!(v["t"], 1_700_000_000_000u64);
+    }
+}
