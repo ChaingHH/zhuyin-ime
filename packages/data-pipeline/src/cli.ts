@@ -36,7 +36,9 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.log(`用法: tsx src/cli.ts <download|lexicon|lexbin|syllables|corpus|evalset> [args…]`);
+      console.log(
+        `用法: tsx src/cli.ts <download|lexicon|lexbin|syllables|corpus|evalset> [args…]`,
+      );
       process.exitCode = cmd === undefined ? 0 : 1;
   }
 }
