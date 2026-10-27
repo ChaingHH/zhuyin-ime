@@ -194,11 +194,15 @@ impl UserAdapter {
         self.added += !m.contains_key(word) as usize + !self.global.contains_key(word) as usize;
         bump(m, word, at);
         bump(&mut self.global, word, at);
+        self.maybe_compact();
+    }
+
+    /// 送出裡有這個使用者詞（選了或沒選）：用過的次數加一
+    pub fn use_phrase(&mut self, word: &str, at: f64) {
         if let Some(p) = self.phrases.get_mut(word).filter(|p| p.is_manual()) {
             p.freq = Some(p.freq.unwrap_or(1.0) + 1.0);
             p.last_at = Some(at);
         }
-        self.maybe_compact();
     }
 
     /// 使用者把第一名裡的這個使用者詞改成別的：用過的次數回到 1（加成回到基本值）
@@ -578,7 +582,7 @@ mod tests {
         let mut a = UserAdapter::new();
         let r = rd("ㄓㄨㄤˋ ㄊㄞˋ");
         a.set_user_phrase("狀態", &r);
-        a.record_selection(&r, "狀態", T0);
+        a.use_phrase("狀態", T0);
         let b = UserAdapter::from_json(&a.to_json()).unwrap();
         assert_eq!(
             b.modifier_for("a b", "狀態", T0),

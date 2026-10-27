@@ -728,21 +728,27 @@ impl ImeEngine {
             for w in &replaced {
                 adapter.demote(w);
             }
-            // 1) 選字覆寫學習
-            for b in &chosen.breakdown {
-                if !opaque(b) {
-                    adapter.record_selection(&b.reading, &b.word, at);
-                }
-            }
-            // 2) 造詞挖掘：連續 2–4 個單字詞、頭尾不是虛字 → 記一次，兩次送出都出現才入格；
-            // 3) 這串字裡有選過的字（頭尾不是虛字）、或選過的多字詞 → 使用者詞
-            //    選過的字連成一段（≥2 字）就照選的邊界存（我剛跟|鈺婷|開完會 只存 鈺婷）；
-            //    只選了零散的單字才取「連續單字」整串
             let picked: HashSet<(usize, &str)> = self
                 .fixed
                 .iter()
                 .map(|f| (f.pos, f.word.as_str()))
                 .collect();
+            // 1) 選字覆寫學習：只記選過的詞。沒選的詞是解碼器本來就排第一的，記下來只會
+            //    改動常用字的計數，讓不相關的句子翻掉。使用者詞不論選沒選都算用了一次
+            let mut at_pos = 0;
+            for b in &chosen.breakdown {
+                if !opaque(b) {
+                    if picked.contains(&(at_pos, b.word.as_str())) {
+                        adapter.record_selection(&b.reading, &b.word, at);
+                    }
+                    adapter.use_phrase(&b.word, at);
+                }
+                at_pos += b.reading.len();
+            }
+            // 2) 造詞挖掘：連續 2–4 個單字詞、頭尾不是虛字 → 記一次，兩次送出都出現才入格；
+            // 3) 這串字裡有選過的字（頭尾不是虛字）、或選過的多字詞 → 使用者詞
+            //    選過的字連成一段（≥2 字）就照選的邊界存（我剛跟|鈺婷|開完會 只存 鈺婷）；
+            //    只選了零散的單字才取「連續單字」整串
             let mut ops: Vec<(bool, String, Vec<String>)> = vec![]; // (使用者詞?, 詞, 讀音)
                                                                     // 一串連續單字：字、讀音、各字是不是選過的
             let (mut chars, mut rd, mut marks) = (vec![], vec![], vec![]);
