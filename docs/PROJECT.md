@@ -187,7 +187,7 @@ Score = Σ_詞 [ a·logP_word(w | 前兩詞)
 - L3 更正：每個詞最多更正一個音節，每個更正讀音最多取 8 個詞（`alt_entry_cap`）。
 - 單音節更正只在觀察音節查無任何詞時才做（`alt_single_only_if_empty`）。全開可在有錯輸入上多救約 7 點，但解碼慢 5–8 倍。
 - 查無詞的音節用未知詞 `□` 補上，確保詞格連通。
-- 破音單字額外扣 `poly_penalty=2.5`；用的是次要讀音時再扣 `poly_minor_penalty=6`。
+- 破音單字額外扣 `poly_penalty=1`（2026-10-27 從 2.5 調降：主評測 +1.0／+1.0／+1.5，L3 雜訊 −0.5；並／比／化／尾等常用破音字以前常輸給同音單字）；用的是次要讀音時再扣 `poly_minor_penalty=6`。
 - N-best 用 **list-Viterbi**：狀態是「前兩詞」，每個狀態保留 K 條部分路徑（預設 4），全域 beam 上限 200。
 - 每條路徑附 `breakdown`：逐詞的詞與採用的讀音（`reading`）。
 - 含拉丁字母的原樣 token 當 `EN_CLASS` 查 LM（`is_english`），輸出原字。
