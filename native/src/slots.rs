@@ -161,6 +161,12 @@ impl CompositionBuffer {
         self.history.clear();
     }
 
+    /// 評測用：直接換成這串音節（不經按鍵）
+    pub fn set_sequence(&mut self, s: &[String]) {
+        self.reset();
+        self.done = s.to_vec();
+    }
+
     pub fn reset(&mut self) {
         self.done.clear();
         self.partial = [None; 3];

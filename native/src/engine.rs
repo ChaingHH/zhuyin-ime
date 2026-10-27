@@ -856,6 +856,57 @@ impl ImeEngine {
         .to_string()
     }
 
+    /// 評測用（main.rs x2）：放入音節序列，模擬使用者照正解選字。pieces＝每個音節的正解字。
+    /// 每次從第一個錯的音節開候選清單，選第一個（長詞在前）和正解相符的詞，清單裡沒有就停。
+    /// learn：送出（X2 照常學），否則清掉。回傳（選字前的第一名, 選了幾次）
+    pub fn commit_target(
+        &mut self,
+        syls: &[String],
+        pieces: &[String],
+        learn: bool,
+    ) -> (String, usize) {
+        self.clear();
+        self.comp.set_sequence(syls);
+        let target = pieces.concat();
+        let mut first = None;
+        let mut picks = 0;
+        loop {
+            self.redecode();
+            let top = self.last.first().map_or(String::new(), |p| p.text());
+            let done = top == target;
+            first.get_or_insert(top.clone());
+            if done || !learn || picks >= pieces.len() {
+                break;
+            }
+            let ci = top
+                .chars()
+                .zip(target.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let (mut p, mut n) = (0, 0);
+            while p + 1 < pieces.len() && n + pieces[p].chars().count() <= ci {
+                n += pieces[p].chars().count();
+                p += 1;
+            }
+            self.comp.set_cursor(p);
+            let Some(f) = self
+                .menu_items(false)
+                .into_iter()
+                .find(|f| f.word == pieces[p..p + f.len].concat())
+            else {
+                break;
+            };
+            self.select(f, false);
+            picks += 1;
+        }
+        if learn {
+            self.commit(0);
+        } else {
+            self.clear();
+        }
+        (first.unwrap(), picks)
+    }
+
     /// 清空組字區，不送出、不學習
     pub fn clear(&mut self) {
         self.keys = 0;

@@ -2,7 +2,8 @@
  * 中英夾雜評測集 eval/mixed.jsonl：取自 build-big-corpus.ts（CORPUS_EN=1）留下的 mixed-heldout.txt
  * （這些片段沒進訓練）。中文串用評測集同一套貪婪分詞給讀音；一段英文（可含空白）是一個原樣 token，
  * 解碼器原樣輸出、LM 當 EN_CLASS 看。text 拿掉中英之間的空白（使用者切英文前不會打空白）。
- * 用法：npx tsx packages/data-pipeline/scripts/build-mixed-eval.ts <mixed-heldout.txt> [N=1000]
+ * 用法：npx tsx packages/data-pipeline/scripts/build-mixed-eval.ts <mixed-heldout.txt> [N=1000] [out=mixed.jsonl]
+ * 科技評測集：build-mixed-eval.ts eval/tech.txt 1000 tech.jsonl（不要求含英文、不洗牌）
  */
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -10,7 +11,8 @@ import type { LexiconEntry } from '@zhuyin/core';
 import { segment } from '../src/build/evalset.js';
 import { PATHS } from '../src/config.js';
 
-const [src, nArg = '1000'] = process.argv.slice(2);
+const [src, nArg = '1000', outName = 'mixed.jsonl'] = process.argv.slice(2);
+const mixed = outName === 'mixed.jsonl';
 if (!src) throw new Error('用法: build-mixed-eval.ts <mixed-heldout.txt> [N]');
 const N = Number(nArg);
 
@@ -28,7 +30,7 @@ for (const line of (await readFile(path.join(PATHS.processed, 'lexicon.jsonl'), 
 let s = 20261017;
 const rng = (): number => ((s = (s * 1664525 + 1013904223) >>> 0), s / 0x100000000);
 const lines = [...new Set((await readFile(src, 'utf8')).split('\n').filter(Boolean))];
-for (let i = lines.length - 1; i > 0; i--) {
+for (let i = mixed ? lines.length - 1 : 0; i > 0; i--) {
   const j = Math.floor(rng() * (i + 1));
   [lines[i], lines[j]] = [lines[j]!, lines[i]!];
 }
@@ -55,9 +57,10 @@ for (const line of lines) {
     han += p.length;
     syllables.push(...seg.syllables);
   }
-  if (ok && han >= 4 && syllables.length > han) out.push(JSON.stringify({ text, syllables }));
+  if (ok && han >= 4 && (!mixed || syllables.length > han))
+    out.push(JSON.stringify({ text, syllables }));
 }
 const meta = JSON.stringify({ seed: 20261017, n: out.length, source: path.basename(src) });
-const file = path.join(PATHS.eval, 'mixed.jsonl');
+const file = path.join(PATHS.eval, outName);
 await writeFile(file, `${meta}\n${out.join('\n')}\n`, 'utf8');
-console.log(`[eval:mixed] ${out.length} 句 → ${file}`);
+console.log(`[eval:${outName}] ${out.length} 句 → ${file}`);

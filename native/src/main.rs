@@ -4,7 +4,10 @@
 //!                                           一設定一行程，用環境變數換設定：ZHUYIN_GAMMA、ZHUYIN_POLY、ZHUYIN_POLY_MINOR、
 //!                                           ZHUYIN_BEAM、ZHUYIN_NBEST（預設 4）；ZHUYIN_LM＝模型檔（預設 data/models/lm.bo.bin）；
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
-//!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個）；
+//!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個；科技集 eval/tech.jsonl）；
+//!                                           ZHUYIN_DOMAIN＝X1 領域詞加分（預設 2，0＝不加）；
+//!   zhuyin-native x2                        X2 能補回多少：照正解選字送出讓 X2 學，印沒學／第一輪／第二輪、學 A（偶數句）量 B（奇數句）的句準；
+//!                                           ZHUYIN_EVAL（預設 eval/tech.jsonl）、ZHUYIN_DOMAIN
 //!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）；
 //!                                           ZHUYIN_INCR=1 逐音節比對增量解碼與全量解碼（不同就 panic），印每步延遲
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
@@ -407,6 +410,9 @@ fn main() {
             if let Some(v) = env("ZHUYIN_POLY_MINOR") {
                 dec.poly_minor_penalty = v;
             }
+            if let Some(v) = env("ZHUYIN_DOMAIN") {
+                dec.domain_bonus = v;
+            }
             if let Some(v) = env("ZHUYIN_BEAM") {
                 dec.beam = v as usize;
             }
@@ -606,6 +612,66 @@ fn main() {
                 done += 1;
             }
             std::fs::write(&args[3], lines.join("\n")).unwrap();
+        }
+        // X2 能補回多少：A＝偶數句、B＝奇數句。照正解選字送出讓 X2 學，量學之前／之後的句準
+        Some("x2") => {
+            if let Ok(v) = std::env::var("ZHUYIN_DOMAIN") {
+                dec.domain_bonus = v.parse().unwrap();
+            }
+            let files = std::env::var("ZHUYIN_EVAL").unwrap_or_else(|_| "eval/tech.jsonl".into());
+            let samples: Vec<Sample> = files.split(',').flat_map(load_samples).collect();
+            // 每個音節的正解字：原樣 token 整段，其他一個字
+            let pieces = |s: &Sample| {
+                let mut rest = s.text.as_str();
+                s.syllables
+                    .iter()
+                    .map(|y| {
+                        let n = if decode::is_literal(y) {
+                            y.len()
+                        } else {
+                            rest.chars().next().map_or(0, char::len_utf8)
+                        };
+                        let (a, b) = rest.split_at(n.min(rest.len()));
+                        rest = b;
+                        a.to_string()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut eng = engine::ImeEngine::new(dec, legal.clone(), Some(x2::UserAdapter::new()));
+            let mut clock = 1.7e12;
+            // 跑一輪：which＝0 只 A、1 只 B、2 全部；回傳句準（%）
+            let mut pass = |eng: &mut engine::ImeEngine, which: usize, learn: bool| {
+                let (mut ok, mut n, mut picks) = (0, 0, 0);
+                for (i, s) in samples.iter().enumerate() {
+                    if which < 2 && i % 2 != which {
+                        continue;
+                    }
+                    clock += 60_000.0;
+                    eng.clock = Some(clock);
+                    let pc = pieces(s);
+                    let (top, k) = eng.commit_target(&s.syllables, &pc, learn);
+                    ok += (top == pc.concat()) as usize;
+                    picks += k;
+                    n += 1;
+                }
+                (100.0 * ok as f64 / n as f64, picks)
+            };
+            let (base, _) = pass(&mut eng, 2, false);
+            let (p1, picks) = pass(&mut eng, 2, true);
+            let (p2, _) = pass(&mut eng, 2, false);
+            println!("全部 {} 句：沒學 {base:.2}%，第一輪（邊學邊打，選字 {picks} 次）{p1:.2}%，第二輪 {p2:.2}%", samples.len());
+            println!(
+                "學習檔 (bySeq, global, 使用者詞, 挖詞)：{:?}",
+                eng.adapter.as_ref().unwrap().stats()
+            );
+            // 學 A、量 B：換一個空的學習檔（先關學習，把學到的詞從解碼器拿掉）
+            eng.set_learning(false);
+            eng.adapter = Some(x2::UserAdapter::new());
+            let (b0, _) = pass(&mut eng, 1, false);
+            let (_, picks) = pass(&mut eng, 0, true);
+            let (b1, _) = pass(&mut eng, 1, false);
+            println!("學 A 量 B：B 沒學 {b0:.2}%，學過 A（選字 {picks} 次）後 {b1:.2}%");
+            done = samples.len() * 4;
         }
         Some("replay") => {
             let clock: Option<f64> = std::env::var("ZHUYIN_CLOCK")
