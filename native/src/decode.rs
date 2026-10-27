@@ -792,6 +792,11 @@ impl Decoder {
 
     /// 拿掉 add_entry 加的詞（學習資料頁的刪除）
     pub fn remove_entry(&mut self, word: &str, readings: &[Vec<String>]) {
+        // X1 詞表的詞不拿掉（使用者詞剛好同名時，關學習／刪除不能連詞表的一起刪）
+        // ponytail: 整個詞跳過，同名但讀音不同的使用者詞也刪不掉；要精確再記詞表讀音
+        if self.domain.contains(word) {
+            return;
+        }
         self.gen += 1;
         self.runtime_words.remove(word);
         for r in readings {
@@ -936,7 +941,10 @@ mod tests {
         let mut d = decoder(&[("ㄢˋ ㄐㄧㄢˋ", "案件"), ("ㄢˋ ㄐㄧㄢˋ", "按鍵")]);
         assert_eq!(d.decode(&r, &DecodeOptions::default())[0].text(), "按鍵");
         // 詞典沒有的領域詞照詞表的讀音加進來
-        assert!(d.has_entry(&rd("ㄔㄨㄥˊ ㄕˋ"), "重試"));
+        let r2 = rd("ㄔㄨㄥˊ ㄕˋ");
+        assert!(d.has_entry(&r2, "重試"));
+        d.remove_entry("重試", std::slice::from_ref(&r2));
+        assert!(d.has_entry(&r2, "重試"));
         d.domain_bonus = 0.0;
         let p = d.decode(&r, &DecodeOptions::default());
         assert_eq!(p[0].score, p[1].score);
