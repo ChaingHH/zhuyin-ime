@@ -13,6 +13,8 @@ const UNK_WORD: &str = "\u{25A1}";
 /// 英文類別符號（decode.ts EN_CLASS）：英文原樣 token 用它查 LM
 const EN_CLASS: &str = "\u{E000}";
 /// JS 的 Math.log(1e-7)：寫死，免得 libm 的末位與 V8 不同
+/// X1 軟體／科技寫作的領域詞表（本專案自編），一律加 domain_bonus
+const DOMAIN_TECH: &str = include_str!("domain/tech.txt");
 const UNK_PENALTY: f64 = -16.11809565095832;
 const NONE: u32 = u32::MAX;
 
@@ -61,6 +63,9 @@ pub struct Decoder {
     pub alt_entry_cap: usize,
     /// 單音節只在原讀音查無詞時才套用 L3 更正
     pub alt_single_only_if_empty: bool,
+    /// X1 領域先驗：domain 裡的詞（DOMAIN_TECH）詞級 log 機率加這麼多；0＝關
+    pub domain_bonus: f64,
+    domain: std::collections::HashSet<&'static str>,
     max_span: usize,
     /// 執行中加的詞（add_entry），詞級分數走 parts_log_prob
     runtime_words: std::collections::HashSet<String>,
@@ -236,7 +241,7 @@ fn prune_beam(bucket: &mut Bucket, beam: usize, paths: &[Path]) -> f64 {
 impl Decoder {
     pub fn new(lm: BackoffLm, lex: Lexicon, a: f64, gamma: f64) -> Self {
         let max_span = lex.max_span().min(10);
-        Decoder {
+        let mut d = Decoder {
             lm,
             lex,
             a,
@@ -247,10 +252,24 @@ impl Decoder {
             entry_cap: 48,
             alt_entry_cap: 8,
             alt_single_only_if_empty: true,
+            domain_bonus: 2.0,
+            domain: Default::default(),
             max_span,
             runtime_words: Default::default(),
             gen: 0,
+        };
+        for line in DOMAIN_TECH.lines().filter(|l| !l.starts_with('#')) {
+            let mut it = line.split(' ');
+            let Some(w) = it.next().filter(|w| !w.is_empty()) else {
+                continue;
+            };
+            d.domain.insert(w);
+            let r: Vec<String> = it.map(String::from).collect();
+            if !r.is_empty() && !d.lex.has(&r, w) {
+                d.add_entry(w, &[r]);
+            }
         }
+        d
     }
 
     /// 解碼音節序列，回傳 N-best（含逐詞拆解）
@@ -429,6 +448,9 @@ impl Decoder {
                         } else {
                             self.lm.word_log_prob(name, w1s, w2s)
                         };
+                        if self.domain_bonus != 0.0 && self.domain.contains(name) {
+                            lp += self.domain_bonus;
+                        }
                         // 破音字單字重罰：破音字幾乎不以單字存在
                         if words.poly(c.word) {
                             lp -= self.poly_penalty;
@@ -906,5 +928,17 @@ mod tests {
         assert_eq!(d.decode(&r, &DecodeOptions::default())[0].text(), "狀態");
         d.remove_entry("狀態", std::slice::from_ref(&r));
         assert!(!d.has_entry(&r, "狀態"));
+    }
+
+    #[test]
+    fn domain_prior() {
+        let r = rd("ㄢˋ ㄐㄧㄢˋ");
+        let mut d = decoder(&[("ㄢˋ ㄐㄧㄢˋ", "案件"), ("ㄢˋ ㄐㄧㄢˋ", "按鍵")]);
+        assert_eq!(d.decode(&r, &DecodeOptions::default())[0].text(), "按鍵");
+        // 詞典沒有的領域詞照詞表的讀音加進來
+        assert!(d.has_entry(&rd("ㄔㄨㄥˊ ㄕˋ"), "重試"));
+        d.domain_bonus = 0.0;
+        let p = d.decode(&r, &DecodeOptions::default());
+        assert_eq!(p[0].score, p[1].score);
     }
 }

@@ -31,7 +31,7 @@
 | L5 | 解碼 | `native/src/decode.rs` `Decoder::decode` | 完成 |
 | L6 | 神經重排 | — | 已封存（tag `archive/l6-l7`） |
 | L7 | 呈現遲滯（防閃動） | — | 已封存（tag `archive/l6-l7`） |
-| X1 | 領域先驗 | — | **未實作** |
+| X1 | 領域先驗 | `native/src/decode.rs` `domain_bonus`、`native/src/domain/tech.txt` | 完成（只有軟體／科技一份詞表，沒有開關） |
 | X2 | 使用者適應 | `native/src/x2.rs` `UserAdapter` | 完成 |
 | X3 | 遙測 | `native/src/noise.rs`（合成錯誤）、`engine.rs` `usage_record`（使用紀錄） | 使用紀錄預設關閉 |
 
@@ -316,6 +316,28 @@ npm workspaces monorepo。套件之間透過各自的 `dist/` 互相引用，所
 
 L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與模糊音表，結果偏樂觀。
 
+### X1 領域先驗（2026-10-27）
+
+使用者是開發者，使用紀錄裡有 按鍵→案件、腳本→房角本 這類錯。LM 是 PTT＋維基訓練的，軟體用語機率偏低。
+
+- 做法：`native/src/domain/tech.txt` 是本專案自編的約 280 個軟體／科技詞（不是萌典或 libchewing 的資料，沒有授權問題）。`Decoder::new` 讀進來：
+  - 詞表裡的詞，詞級 log 機率一律加 `domain_bonus`（預設 2）。
+  - 詞典沒有的詞（約 70 個，如 回傳、雜湊表、組字區）在詞表裡附讀音，走 `add_entry`，分數同執行中加的詞（`parts_log_prob`）再加 `domain_bonus`。
+- 評測集 `eval/tech.jsonl`：`eval/tech.txt` 的 163 句手寫開發者聊天句（含中英夾雜），用 `build-mixed-eval.ts eval/tech.txt 1000 tech.jsonl` 給讀音。逐句查過 `corpus`／`corpus-en`，沒有出現在訓練語料（原本有一句重複，已改寫）。
+- `ZHUYIN_DOMAIN=<δ>` 換加分（0＝只加詞、不加分）。δ 用 dev 選：
+
+| δ | tech 句準（dev／test） | colloquial | written | mixed |
+|---|---|---|---|---|
+| 改前 | 84.05（90.2／77.8） | 78.70 | 82.00 | 81.40 |
+| 0（只加詞） | 84.66（90.2／79.0） | 78.70 | 82.00 | 81.40 |
+| **2（預設）** | **87.12（91.5／82.7）** | 78.70 | 82.00 | 81.50 |
+| 4 | 87.12（91.5／82.7） | 78.70 | 81.80 | 81.50 |
+| 6 | 88.34（91.5／85.2） | 78.70 | 81.80 | 81.60 |
+
+- 注意：評測句與詞表是同一個人寫的，而且寫詞表前看過改前的錯句，tech 的數字偏樂觀；test 只有 82 句，一句 1.2 點。真實效果要用使用紀錄（`usage` 的 eval-out）量，還沒量。
+- 還剩的錯多半不是領域詞：在／再、讀／獨、選字→選自、代碼→代馬。
+- 沒做：領域加權 LM、領域二元加分、不重訓大 LM。詞表要擴充就直接加行；要關掉得加設定（現在沒有）。
+
 ## 7. 根目錄的 `debug-*.ts`
 
 調查與測試腳本。`.ts` 直接 import `packages/*/src`，用 `npx tsx debug-xxx.ts` 跑。其他的 `debug-*.ts`（`debug-prune`、`debug-latency`、`debug-native-parity` 等）已封存在 git tag `archive/ts-engine`。
@@ -346,7 +368,7 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 
 ## 10. 已知限制與未做的部分
 
-- X1 領域先驗沒有實作。
+- X1 領域先驗只有軟體／科技一份詞表、沒有開關（見下面「X1 領域先驗」）。
 - 只有大千排列。
 - 所有程式共用一份組字狀態與中英模式（`pime.rs` 的 `ponytail:` 註記）：換到別的程式打字，前一個程式沒送出的組字會丟掉。
 - 組字中按 Tab（表格以外）、F1–F12、Insert 會被吃掉。

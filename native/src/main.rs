@@ -4,7 +4,8 @@
 //!                                           一設定一行程，用環境變數換設定：ZHUYIN_GAMMA、ZHUYIN_POLY、ZHUYIN_POLY_MINOR、
 //!                                           ZHUYIN_BEAM、ZHUYIN_NBEST（預設 4）；ZHUYIN_LM＝模型檔（預設 data/models/lm.bo.bin）；
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
-//!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個）；
+//!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個；科技集 eval/tech.jsonl）；
+//!                                           ZHUYIN_DOMAIN＝X1 領域詞加分（預設 2，0＝不加）；
 //!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）；
 //!                                           ZHUYIN_INCR=1 逐音節比對增量解碼與全量解碼（不同就 panic），印每步延遲
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
@@ -406,6 +407,9 @@ fn main() {
             }
             if let Some(v) = env("ZHUYIN_POLY_MINOR") {
                 dec.poly_minor_penalty = v;
+            }
+            if let Some(v) = env("ZHUYIN_DOMAIN") {
+                dec.domain_bonus = v;
             }
             if let Some(v) = env("ZHUYIN_BEAM") {
                 dec.beam = v as usize;
