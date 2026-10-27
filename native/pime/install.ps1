@@ -179,11 +179,35 @@ function Pime-Tip {
 function Launcher-Ready {
   $l = @(Get-Process PIMELauncher -ErrorAction SilentlyContinue)
   if (-not $l -or -not (Test-Path $backends)) { return $false }
+  # 有 worker 時只看 worker：watchdog 不讀 backends.json，開機後就一直在
+  $w = @(Launcher-Workers)
+  if ($w) { $l = @($w | ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }) }
   $t = (Get-Item $backends).LastWriteTime
   foreach ($p in $l) {
     try { if (-not $p.StartTime -or $p.StartTime -le $t) { return $false } } catch { return $false }
   }
   $true
+}
+
+# PIME v2.0.0-beta4 起 PIMELauncher 分成兩個行程：watchdog 和 /worker。worker 不管怎麼結束，watchdog 都在 1 秒後
+# 再開一個（PIMELauncher/src/main.rs run_watchdog），新的 worker 重讀 backends.json
+function Launcher-Workers {
+  Get-CimInstance Win32_Process -Filter "Name='PIMELauncher.exe'" |
+    Where-Object { $_.CommandLine -match '\s/worker\b' -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Pime, [StringComparison]::OrdinalIgnoreCase) }
+}
+
+# 只結束 worker，讓 watchdog 重開它、重讀 backends.json：改了 backends.json 不用登出。回傳啟動器是否已經認得新設定。
+# 絕不結束 watchdog、不用 /quit（那樣啟動器就沒了，見檔頭警告）。沒有 worker（beta3 以前的結構）或 PIME 太舊就不做。
+# 代價：重開那 1–2 秒，正在用 PIME 輸入法的程式按鍵直接交給程式（打出英文），之後 DLL 在背景重新連上。
+# 2026-10-27 在 beta4 實測：結束 worker 1 秒後新 worker 起來，Explorer 沒有重開、沒有應用程式錯誤事件（1000／1002）
+function Restart-LauncherWorker {
+  $ver = Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $Pime 'version.txt')
+  if (-not ($ver -and (Pime-VersionOk $ver.Trim()))) { return $false }
+  $w = @(Launcher-Workers)
+  if (-not $w) { return $false }
+  foreach ($p in $w) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+  for ($i = 0; $i -lt 10 -and -not (Launcher-Ready); $i++) { Start-Sleep 1 }
+  Launcher-Ready
 }
 
 # 照 native/src/pime.rs 的 pime_version_ok：2.0.0-beta2 以上（含正式版）的 DLL 才承受得了後端結束
@@ -450,7 +474,11 @@ $registered = [bool](Pime-Tip)
 if (-not $registered) { Register-Dlls '' }
 if (-not $installed) {
   Write-Host "已安裝到 $dest（backends.json 備份在 backends.json.bak）"
-  Write-Host '接著：登出再登入，再執行一次 install.cmd（會把「注音 (zhuyin-native)」加進鍵盤清單）'
+  if (Restart-LauncherWorker) {
+    Write-Host 'PIMELauncher 已重讀設定（只重開 worker），不用登出'
+  } else {
+    Write-Host '接著：登出再登入，再執行一次 install.cmd（會把「注音 (zhuyin-native)」加進鍵盤清單）'
+  }
 } else {
   if (-not $registered) { Write-Host '輸入法沒有註冊在 Windows 裡，已重新註冊：請登出再登入' }
   Write-Host "已更新 $dest（上一版在 $prev，可用 -Rollback 換回）"

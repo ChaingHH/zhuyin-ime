@@ -29,7 +29,7 @@
 
 - PIME 沒裝、`x64\` 或 `x86\PIMETextService.dll` 不見、或已裝的比最新版舊時，下載官方安裝檔、驗 GitHub 給的 SHA-256，再 `/S` 靜默安裝。
 - 不升級的情況：已裝的是 v2.0.0-beta 或更舊（PIME 的安裝程式會停掉啟動器，舊 DLL 會讓所有程式當掉）；PIME 目錄有排在重開機時刪除的檔案（裝好的檔重開機後會被刪掉，而且 beta4 的安裝程式靜默執行時看到這種排程會**直接重開機**，`installer.nsi` `.onInit`）。後者要先重開機再裝。
-- PIME 的安裝程式會重寫 `backends.json`，腳本接著把 zhuyin 加回去；這時要登出再登入，再執行一次 `install.cmd`（同第一次安裝）。
+- PIME 的安裝程式會重寫 `backends.json`，腳本接著把 zhuyin 加回去。啟動器只在啟動時讀 `backends.json`，所以腳本接著用 `Restart-LauncherWorker` 只結束啟動器的 `/worker` 行程：beta4 起 watchdog 會在 1 秒後重開 worker，新的 worker 重讀設定，不用登出（2026-10-27 實測：新 worker 1 秒後起來，Explorer 沒重開、沒有應用程式錯誤事件，切到注音後 `zhuyin-native` 在新 worker 底下啟動、可以打字）。沒有 worker 行程（舊版結構）或 PIME 早於 beta2 時照舊請你登出再登入。第一次安裝本專案（不升級 PIME）也走同一條路。
 - 下載失敗（離線）而 PIME 完整時，照常只裝本專案。
 
 v2.0.0-beta4（2026-10-23）的安裝程式改成先把被鎖的 DLL 改名再排刪除（`macros.nsh` `SafeDeleteFile`），修掉了 2026-10-26「重開機後 DLL 不見」那種情況（[PIME-NOTES.md](PIME-NOTES.md) §4b）。
