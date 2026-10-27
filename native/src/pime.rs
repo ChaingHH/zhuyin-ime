@@ -1131,7 +1131,10 @@ impl Backend {
         }
         // 只有一份組字狀態：換了 client 就丟掉前一個 client 的組字
         // ponytail: 全部 client 共用一個引擎與中英模式；要各程式各自的模式再改成每 client 一份狀態
-        if client != self.owner && method.ends_with("KeyDown") {
+        // 組字只屬於 owner：別的程式的組字被結束、停用、關鍵盤，不能清掉 owner 打到一半的字
+        // （每個程式各有一份 DLL、各自送這些事件，例如搜尋框跳出時前一個程式的組字被結束）
+        let owner = client == self.owner;
+        if !owner && method.ends_with("KeyDown") {
             if let Some(e) = self.eng.as_mut() {
                 e.clear();
             }
@@ -1161,7 +1164,9 @@ impl Backend {
                 None
             }
             "onDeactivate" => {
-                self.clear(&mut r);
+                if owner {
+                    self.clear(&mut r);
+                }
                 if self.win8 {
                     r.insert("removeButton".into(), json!([MODE_BUTTON]));
                 }
@@ -1253,7 +1258,7 @@ impl Backend {
                 None
             }
             "onKeyboardStatusChanged" => {
-                if msg["opened"].as_bool() == Some(false) {
+                if owner && msg["opened"].as_bool() == Some(false) {
                     self.clear(&mut r);
                 }
                 if self.win8 {
@@ -1266,7 +1271,7 @@ impl Backend {
             }
             // 被系統強制結束（切換程式等）：已顯示的組字留在文件裡，引擎這邊清空、不學習
             "onCompositionTerminated" => {
-                if let Some(e) = self.eng.as_mut() {
+                if let Some(e) = self.eng.as_mut().filter(|_| owner) {
                     e.clear();
                 }
                 None
@@ -1600,6 +1605,27 @@ mod tests {
         assert!(!be.gave_up());
         be.broken = Some(Instant::now() - RETRY);
         assert!(!be.gave_up());
+    }
+
+    #[test]
+    fn other_client_keeps_composition() {
+        let mut be = backend();
+        let mut e = crate::testutil::engine(&[("ㄔㄚˊ", "查")]);
+        crate::testutil::type_syllables(&mut e, "ㄔㄚˊ");
+        be.eng = Some(e);
+        be.owner = "c1".into();
+        be.active.insert("c1".into());
+        assert!(be.composing());
+        for m in [
+            r#"c2|{"method":"onCompositionTerminated","forced":true,"seqNum":1}"#,
+            r#"c2|{"method":"onKeyboardStatusChanged","opened":false,"seqNum":2}"#,
+            r#"c2|{"method":"onDeactivate","seqNum":3}"#,
+        ] {
+            respond(&mut be, m);
+            assert!(be.composing(), "{m}");
+        }
+        respond(&mut be, r#"c1|{"method":"onCompositionTerminated","forced":true,"seqNum":4}"#);
+        assert!(!be.composing());
     }
 
     #[test]
