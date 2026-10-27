@@ -899,12 +899,13 @@ impl Backend {
             }));
     }
 
-    /// 把引擎狀態寫進回應：組字字串、游標（UTF-16 單位）、選字視窗（cols＝DLL 目前的欄數）
+    /// 把引擎狀態寫進回應：組字字串、游標（字數，不是 UTF-16 單位）、選字視窗（cols＝DLL 目前的欄數）。
+    /// DLL 自己把字數換成 UTF-16 位置（PIMEClient.cpp updateComposition；beta4 起是 compositionCursorToUtf16Position，
+    /// EasyIME/PIME#938）。以前送 UTF-16 單位，組字裡有擴展 B 區的字（𠮷）時游標會跑到後面
     fn show(r: &mut Map<String, Value>, st: &EngineState, cols: usize) {
-        let chars: Vec<char> = st.composition.chars().collect();
+        let chars = st.composition.chars().count();
         let pend = st.pending.as_deref().map_or(0, |p| p.chars().count());
-        let upto = (st.cursor + pend).min(chars.len());
-        let cursor: usize = chars[..upto].iter().map(|c| c.len_utf16()).sum();
+        let cursor = (st.cursor + pend).min(chars);
         r.insert("compositionString".into(), json!(st.composition));
         r.insert("compositionCursor".into(), json!(cursor));
         match &st.menu {
@@ -1455,11 +1456,28 @@ fn pime_version_ok(v: &str) -> bool {
 
 #[cfg(test)]
 #[test]
+fn cursor_counts_chars_not_utf16() {
+    let mut r = Map::new();
+    let st = EngineState {
+        composition: "𠮷野ㄒ".into(),
+        last_legal: true,
+        text: None,
+        cursor: 2,
+        pending: Some("ㄒ".into()),
+        menu: None,
+    };
+    Backend::show(&mut r, &st, 1);
+    assert_eq!(r["compositionCursor"], json!(3));
+}
+
+#[cfg(test)]
+#[test]
 fn pime_versions() {
     for (v, ok) in [
         ("2.0.0-beta", false),
         ("2.0.0-beta2", true),
         ("2.0.0-beta3", true),
+        ("2.0.0-beta4", true),
         ("2.0.0", true),
         ("2.1.0", true),
         ("1.3.0", false),

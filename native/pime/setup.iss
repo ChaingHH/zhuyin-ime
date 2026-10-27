@@ -3,13 +3,16 @@
 ; 第三方授權聲明（THIRD-PARTY-NOTICES.txt、LICENSE-LGPL-2.1.txt）由 install.ps1 -Stage 組進 dist\zhuyin\，跟著裝進 PIME\zhuyin\。
 ; Setup.exe 只是把檔案帶過去，再呼叫同一支 install.ps1 -From：安全規則完全相同
 ; （不停 PIMELauncher、被鎖的檔案改名不覆寫、保留 zhuyin.prev\、可 -Rollback）。
-; 電腦上沒有 PIME 時，先用內附的 PIME v2.0.0-beta3 官方安裝檔（vendor\，build-setup.ps1 下載）靜默安裝。
-; 已經有 PIME 就不動它（執行中更新 PIME 會停掉啟動器，見 install.ps1 檔頭警告）。
+; 內附 build-setup.ps1 當時最新的 PIME 官方安裝檔（vendor\，驗 SHA-256），交給 install.ps1 -PimeSetup：
+; 沒有 PIME、DLL 不見、或已裝的比內附的舊時靜默安裝（規則見 install.ps1 的 Update-Pime）。
 ; 第一次安裝寫一個 RunOnce：登出再登入時把「注音 (zhuyin-native)」加進鍵盤清單（install.ps1 -Keyboard only）。
 
 #define AppName "注音 (zhuyin-native) for PIME"
 #define AppVersion "1.0.3"
-#define PimeSetup "PIME-2.0.0-beta3-setup.exe"
+; build-setup.ps1 用 /DPimeSetup=<檔名> 傳進來（vendor\ 裡最新的 PIME 安裝檔）
+#ifndef PimeSetup
+  #error 請用 build-setup.cmd 編（它會下載最新的 PIME 安裝檔並傳 /DPimeSetup）
+#endif
 
 [Setup]
 AppId={{64B60746-4570-4343-A34A-85C12F03A93B}
@@ -55,24 +58,12 @@ begin
   Result := First;
 end;
 
-{ 沒有 PIME 就先靜默安裝內附的 PIME。回傳非空字串＝中止安裝並顯示這段話 }
+{ PIME 由 install.ps1 -PimeSetup 安裝或升級（ssPostInstall）。這裡只記下是不是第一次安裝 }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Code: Integer;
   S: AnsiString;
 begin
   Result := '';
-  { DLL 不見（PIME 重裝時排在重開機的刪除把 x64\ 刪掉）也重裝 PIME：backends.json 還在，只看它會跳過 }
-  if not FileExists(Backends()) or not FileExists(ExpandConstant('{commonpf32}\PIME\x64\PIMETextService.dll')) then
-  begin
-    ExtractTemporaryFile('{#PimeSetup}');
-    if not Exec(ExpandConstant('{tmp}\{#PimeSetup}'), '/S', '', SW_SHOW, ewWaitUntilTerminated, Code)
-      or not FileExists(Backends()) then
-    begin
-      Result := '安裝 PIME 失敗（結束碼 ' + IntToStr(Code) + '）。可以先到 https://github.com/EasyIME/PIME/releases 手動安裝 PIME，再執行這個安裝程式。';
-      exit;
-    end;
-  end;
   First := not (LoadStringFromFile(Backends(), S) and (Pos('zhuyin-native.exe', String(S)) > 0));
 end;
 
@@ -136,9 +127,10 @@ begin
   if CurStep = ssPostInstall then
   begin
     Log := ExpandConstant('{app}\install.log');
+    ExtractTemporaryFile('{#PimeSetup}');
     Exec('powershell.exe',
       '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install.ps1') +
-      '" -From "' + ExpandConstant('{app}\zhuyin') + '" -Log "' + Log + '"',
+      '" -From "' + ExpandConstant('{app}\zhuyin') + '" -PimeSetup "' + ExpandConstant('{tmp}\{#PimeSetup}') + '" -Log "' + Log + '"',
       '', SW_HIDE, ewWaitUntilTerminated, Code);
     if Code <> 0 then
       MsgBox('安裝失敗。詳細記錄：' + #13#10 + Log, mbError, MB_OK)

@@ -25,19 +25,26 @@
 
 它們做的事和下面「步驟」一節的指令相同，安全規則也一樣：不停 PIME、被鎖的檔案改名不覆寫、保留上一版。按「否」拒絕權限時，什麼都不會改。
 
-建議同時把 PIME 升到 **v2.0.0-beta3 以上**：上游已修掉「啟動器停掉時讓所有程式當掉」的錯誤（`docs/MS-CANDIDATES.md` §5.4）。
+`install.cmd` 會順便把 PIME 升到 GitHub 上最新的一版（含 beta，`install.ps1` 的 `Update-Pime`；`-NoPimeUpdate` 不升級）：
+
+- PIME 沒裝、`x64\` 或 `x86\PIMETextService.dll` 不見、或已裝的比最新版舊時，下載官方安裝檔、驗 GitHub 給的 SHA-256，再 `/S` 靜默安裝。
+- 不升級的情況：已裝的是 v2.0.0-beta 或更舊（PIME 的安裝程式會停掉啟動器，舊 DLL 會讓所有程式當掉）；PIME 目錄有排在重開機時刪除的檔案（裝好的檔重開機後會被刪掉，而且 beta4 的安裝程式靜默執行時看到這種排程會**直接重開機**，`installer.nsi` `.onInit`）。後者要先重開機再裝。
+- PIME 的安裝程式會重寫 `backends.json`，腳本接著把 zhuyin 加回去；這時要登出再登入，再執行一次 `install.cmd`（同第一次安裝）。
+- 下載失敗（離線）而 PIME 完整時，照常只裝本專案。
+
+v2.0.0-beta4（2026-10-23）的安裝程式改成先把被鎖的 DLL 改名再排刪除（`macros.nsh` `SafeDeleteFile`），修掉了 2026-10-26「重開機後 DLL 不見」那種情況（[PIME-NOTES.md](PIME-NOTES.md) §4b）。
 
 ## 給沒有 repo 的人：Setup.exe
 
 要給別人安裝（對方不需要 repo、Rust）時，做一個 `zhuyin-native-setup.exe`：
 
 1. 安裝 [Inno Setup 6](https://jrsoftware.org/isdl.php)。它的安裝程式能不能不用系統管理員權限、只裝給自己，沒有查證；編譯本身（`ISCC.exe`）不需要系統管理員權限。
-2. 雙擊 `native\pime\build-setup.cmd`：建置 → 組出 `native\pime\dist\zhuyin\` → 下載 PIME v2.0.0-beta3 官方安裝檔到 `native\pime\vendor\`（驗 SHA-256，不進 git）→ 編出 `native\pime\dist\zhuyin-native-setup.exe`。沒裝 Inno Setup 時只會組好檔案並說明。
+2. 雙擊 `native\pime\build-setup.cmd`：建置 → 組出 `native\pime\dist\zhuyin\` → 下載 GitHub 上最新的 PIME 官方安裝檔到 `native\pime\vendor\`（驗 GitHub 給的 SHA-256，不進 git）→ 用 `/DPimeSetup=<檔名>` 編出 `native\pime\dist\zhuyin-native-setup.exe`。沒裝 Inno Setup 時只會組好檔案並說明。
 3. 把 `zhuyin-native-setup.exe` 給對方（或上傳到 GitHub Releases）。執行時會要系統管理員權限，結束時跳出結果，之後登出再登入。
 
 Setup.exe 做的事：
 
-- 對方沒有 PIME（找不到 `backends.json`）：先用內附的 PIME 安裝檔 `/S` 靜默安裝。已經有 PIME 就不動它（執行中更新 PIME 會停掉啟動器，見 `install.ps1` 檔頭警告）。
+- 把內附的 PIME 安裝檔交給 `install.ps1 -PimeSetup`：規則同上面 `install.cmd` 的 PIME 升級（沒裝、DLL 不見、比內附的舊才裝）。
 - 第一次安裝（`backends.json` 裡還沒有 zhuyin）：在提權帳號的 HKCU `RunOnce` 寫一筆，登入時跑 `install.ps1 -Keyboard only -WaitReady 120`，等啟動器讀到 zhuyin 後把它加進鍵盤清單。用別的管理員帳號提權時會寫到那個帳號，使用者要自己到「設定」加入。
 - 其餘只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，所以安全規則完全一樣。它在 `C:\ProgramData\zhuyin-native-setup\` 留一份 `install.ps1` 與檔案副本，給「新增或移除程式」裡的解除安裝用。
 
@@ -145,7 +152,7 @@ PIME 是 v2.0.0-beta2 以上時預設就開（後端讀 PIME 目錄的 `version.
 
 沒有實機驗證過，因為本機的 PIME 還是 beta 版。已驗證的只有後端這一側（換掉執行檔的修改時間後，卸載完就以結束碼 0 結束；沒開 `hotUpdate` 就不會結束）。
 
-注意：PIME master（beta3 之後）在重開前會清空整個請求佇列（EasyIME/PIME#943）。重新連上的程式如果剛好在那 1 秒內送 `init`，可能要等到逾時（15 秒）才回應。升級到 beta3 之後的版本前要再檢查一次。
+注意（v2.0.0-beta4，已讀原始碼、沒實機驗證）：啟動器重開後端前，會清空那 1 秒內排隊的請求（EasyIME/PIME#943，`backend_manager.rs` 的 `while stdin_rx.try_recv().is_ok() {}`）。beta4 的 DLL 改成在背景連線（`AsyncConnector`），連上之前 `ensureConnected` 回 false，按鍵直接交給程式；連線握手的逾時是 15 秒（`kServerStartupTimeoutMs`）。所以重新連上的程式如果剛好在那 1 秒內送出握手，最壞會有 15 秒按鍵都變成英文，之後自己恢復。只在後端結束時發生（`hotUpdate` 換執行檔、後端當掉），平常閒置卸載不結束行程，不受影響。
 
 ### 換回上一版
 

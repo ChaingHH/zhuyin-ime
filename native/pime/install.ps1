@@ -14,6 +14,9 @@
 #   .\install.ps1 -From <目錄>    用已經組好的 zhuyin\ 資料夾安裝（Setup.exe 用；不需要 repo 與 Rust）
 #   -WaitReady <秒>              -Keyboard only 先等 PIME 啟動器讀到 zhuyin 最多這麼久（Setup.exe 寫的 RunOnce 登入時用）
 #   -Log <檔案>                   把輸出寫進記錄檔（install.cmd 提權執行時用，原視窗再顯示出來）
+#   安裝／更新時順便把 PIME 升到最新版（Update-Pime）：預設從 GitHub 下載最新的 PIME 安裝檔（含 beta），
+#   -PimeSetup <檔案> 改用這個安裝檔（Setup.exe 內附的），-NoPimeUpdate 不動 PIME
+#   .\install.ps1 -FetchPime <目錄>  只下載最新的 PIME 安裝檔（驗 SHA-256）到目錄，印出路徑（build-setup.ps1 用）
 # 一般使用者請直接雙擊同目錄的 install.cmd／uninstall.cmd／rollback.cmd（docs/PIME-INSTALL.md）
 # 參數：-Pime PIME 安裝目錄、-Data 本專案 data\ 目錄（要有 lm.bo.bin、lexicon.bin、syllables.json）
 # 結束碼：0 成功、1 失敗、2 要先登出再登入再跑一次（這次沒改 PIME）
@@ -33,7 +36,10 @@ param(
   [ValidateSet('only', 'remove')][string]$Keyboard = '',
   [string]$From = '',
   [int]$WaitReady = 0,
-  [string]$Log = ''
+  [string]$Log = '',
+  [string]$PimeSetup = '',
+  [switch]$NoPimeUpdate,
+  [string]$FetchPime = ''
 )
 $ErrorActionPreference = 'Stop'
 if ($Log) { Start-Transcript -Path $Log -Force | Out-Null }
@@ -190,6 +196,70 @@ function Pime-VersionOk([string]$v) {
   -not $pre
 }
 
+# 可以拿字串比大小的版本鍵：2.0.0-beta4 → 2.0.0 加 beta 序號；正式版（沒有後綴或 -stable）排在同號的 beta 後面
+function Pime-VersionKey([string]$v) {
+  $base, $pre = $v.Trim().TrimStart('v') -split '-', 2
+  $b = [version]'0.0'
+  [void][version]::TryParse($base, [ref]$b)
+  $n = if (-not $pre -or $pre -eq 'stable') { [int]::MaxValue } elseif ($pre -match '^beta(\d*)$') { [int]('0' + $Matches[1]) } else { 0 }
+  '{0:D5}.{1:D5}.{2:D5}.{3:D10}' -f $b.Major, $b.Minor, [Math]::Max($b.Build, 0), $n
+}
+
+# 下載 GitHub 上最新的 PIME 安裝檔（含 beta；只考慮 Pime-VersionOk 的版本），用 API 給的 SHA-256 驗證。
+# 回傳 @{ Version; Path }；已經下載過、雜湊相同就不再下載
+function Get-LatestPime([string]$dir) {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  # PowerShell 5.1 畫下載進度條會讓下載慢上數十倍
+  $ProgressPreference = 'SilentlyContinue'
+  $rels = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'zhuyin-native-install' } 'https://api.github.com/repos/EasyIME/PIME/releases?per_page=20'
+  $best = $rels | Where-Object { -not $_.draft } | ForEach-Object {
+    $a = $_.assets | Where-Object { $_.name -like '*-setup.exe' -and $_.digest -like 'sha256:*' } | Select-Object -First 1
+    if ($a) { [pscustomobject]@{ Version = $_.tag_name.TrimStart('v'); Asset = $a } }
+  } | Where-Object { Pime-VersionOk $_.Version } | Sort-Object { Pime-VersionKey $_.Version } | Select-Object -Last 1
+  if (-not $best) { throw 'GitHub 上找不到可用的 PIME 安裝檔（要 2.0.0-beta2 以上、附 SHA-256）' }
+  $path = Join-Path $dir $best.Asset.name
+  $hash = $best.Asset.digest.Substring(7)
+  if (-not ((Test-Path $path) -and (Get-FileHash $path).Hash -eq $hash)) {
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Invoke-WebRequest -UseBasicParsing -OutFile $path $best.Asset.browser_download_url
+    if ((Get-FileHash $path).Hash -ne $hash) { Remove-Item $path -Force; throw "$($best.Asset.name) 的 SHA-256 和 GitHub 上的不同，沒有安裝" }
+  }
+  @{ Version = $best.Version; Path = $path }
+}
+
+# PIME 目錄裡有沒有排在重開機才刪的檔案（PIME 重裝時刪不掉被鎖的 DLL 就這樣排）。有的話不能裝 PIME：
+# 裝好的新檔下次開機會被刪掉（2026-10-26 x64\、x86\ 不見就是這樣），而 2.0.0-beta4 的安裝程式靜默執行時
+# 看到這種排程會直接重開機（installer.nsi .onInit：PENDING_REBOOT_QUESTION /SD IDYES → Reboot）
+function Pime-PendingDelete {
+  $ops = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+  [bool]($ops | Where-Object { $_ -and $_.IndexOf($Pime, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+}
+
+# PIME 沒裝、DLL 不見、或比 $ver 舊時，靜默安裝 $setup。回傳有沒有裝。
+# PIME 的安裝程式會停掉 PIMELauncher 再重開，並重寫 backends.json（之後的步驟會把 zhuyin 加回去，要登出再登入才生效）。
+# 已裝的 PIME 是 2.0.0-beta 或更舊時，停掉啟動器會讓所有程式當掉（檔頭警告），所以那時不升級
+function Update-Pime([string]$setup, [string]$ver) {
+  $cur = Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $Pime 'version.txt')
+  $cur = if ($cur) { $cur.Trim() } else { '' }
+  $broken = [bool]($dlls | Where-Object { -not (Test-Path $_) })
+  if (-not $broken -and (Pime-VersionKey $cur) -ge (Pime-VersionKey $ver)) {
+    Write-Host "PIME $cur 已經是最新版"
+    return $false
+  }
+  if ($cur -and -not $broken -and -not (Pime-VersionOk $cur)) {
+    Write-Host "PIME $cur 太舊，執行中升級會讓程式當掉，沒有升級。請登出再登入後，自己執行 PIME $ver 的安裝檔" -ForegroundColor Yellow
+    return $false
+  }
+  if (Pime-PendingDelete) {
+    Write-Host "PIME 有檔案排在重開機時刪除，現在裝 PIME $ver 的話，裝好的檔案重開機後會被刪掉。請先重新開機，再執行一次" -ForegroundColor Yellow
+    return $false
+  }
+  Write-Host "安裝 PIME $ver（目前：$(if ($cur) { $cur } else { '沒有' })$(if ($broken) { '，DLL 不見' })）"
+  $p = Start-Process $setup '/S' -Wait -PassThru
+  if ($p.ExitCode -ne 0) { throw "PIME 安裝程式失敗（結束碼 $($p.ExitCode)）" }
+  $true
+}
+
 # 改目前使用者的鍵盤清單（等同在「設定」裡加入／移除鍵盤；不動 backends.json）。回傳有沒有改
 #   only    PIME 的輸入法只留本專案（微軟注音等非 PIME 的保留，PIME 壞掉時還能打字）
 #   remove  拿掉本專案
@@ -252,6 +322,11 @@ function Ready-ToRemove {
 if ($Stage) {
   Put-Files (Join-Path $Stage $name) (Source-Files)
   Write-Host "已組出 $(Join-Path $Stage $name)"
+  Finish
+}
+
+if ($FetchPime) {
+  Write-Output (Get-LatestPime $FetchPime).Path
   Finish
 }
 
@@ -329,6 +404,20 @@ function Restart-Backend {
   if (-not $ps) { return $false }
   $ps | Stop-Process -Force -ErrorAction SilentlyContinue
   $true
+}
+
+# PIME 升到最新版（DLL 不見時也重裝）。一定要在讀 backends.json 之前：PIME 的安裝程式會重寫它。
+# 下載失敗（離線）而 PIME 完整時照常安裝本專案
+if (-not $NoPimeUpdate) {
+  try {
+    $setup = if ($PimeSetup) {
+      @{ Path = $PimeSetup; Version = ([IO.Path]::GetFileName($PimeSetup) -replace '^PIME-(.+)-setup\.exe$', '$1') }
+    } else { Get-LatestPime (Join-Path $env:TEMP 'zhuyin-pime-setup') }
+    if (Update-Pime $setup.Path $setup.Version) { Write-Host "已安裝 PIME $($setup.Version)" }
+  } catch {
+    if ($dlls | Where-Object { -not (Test-Path $_) }) { throw }
+    Write-Host "沒有更新 PIME（$($_.Exception.Message)），照常安裝" -ForegroundColor Yellow
+  }
 }
 
 # DLL 不見時登錄檔還在（Pime-Tip 照樣找得到），每個程式都載不到輸入法、按鍵原樣放行。

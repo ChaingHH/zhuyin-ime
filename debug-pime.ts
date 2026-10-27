@@ -205,9 +205,9 @@ function checkReply(method: string, seqNum: number, r: Record<string, unknown>, 
   opt('candidateList', (v) => Array.isArray(v) && v.every(isStr), 'string 陣列（get<string>）');
   opt('compositionCursor', isUint, '非負整數');
   if ('compositionCursor' in r && isStr(r['compositionString'])) {
-    // DLL 逐 UTF-16 碼元往前數，超過長度會讀到字串外
-    if ((r['compositionCursor'] as number) > (r['compositionString'] as string).length)
-      bad('compositionCursor 超過組字字串長度（UTF-16）');
+    // DLL 把游標當字數（代理對算一個字，EasyIME/PIME#938），超過字數就指到字串外
+    if ((r['compositionCursor'] as number) > [...(r['compositionString'] as string)].length)
+      bad('compositionCursor 超過組字字串的字數');
   }
   opt('candidateCursor', isUint, '非負整數');
   if ('candidateCursor' in r && Array.isArray(r['candidateList'])) {
