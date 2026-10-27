@@ -687,6 +687,30 @@ impl ImeEngine {
         let chosen = candidates.get(k.min(candidates.len().saturating_sub(1)));
         let text = chosen.map_or(String::new(), |p| p.text());
         let at = self.now();
+        // 選字蓋掉的詞（沒選字時的第一名裡有、送出的同一位置沒有）：是使用者詞就把次數降回 1
+        let replaced: Vec<String> = match chosen {
+            Some(chosen) if !self.fixed.is_empty() && self.adapter.is_some() => {
+                let spans = |p: &DecodePath| {
+                    let mut i = 0;
+                    p.breakdown
+                        .iter()
+                        .map(|b| {
+                            i += b.reading.len();
+                            (i - b.reading.len(), b.word.clone())
+                        })
+                        .collect::<HashSet<_>>()
+                };
+                let kept = spans(chosen);
+                self.decode_fixed(&[], None).first().map_or(vec![], |top| {
+                    spans(top)
+                        .into_iter()
+                        .filter(|x| !kept.contains(x))
+                        .map(|x| x.1)
+                        .collect()
+                })
+            }
+            _ => vec![],
+        };
         if self.usage {
             if let Some(chosen) = chosen {
                 let line = self.usage_record(chosen, at);
@@ -701,6 +725,9 @@ impl ImeEngine {
                     || is_literal(&b.reading[0])
                     || (b.reading.len() == 1 && b.word == b.reading[0])
             };
+            for w in &replaced {
+                adapter.demote(w);
+            }
             // 1) 選字覆寫學習
             for b in &chosen.breakdown {
                 if !opaque(b) {
@@ -709,26 +736,46 @@ impl ImeEngine {
             }
             // 2) 造詞挖掘：連續 2–4 個單字詞、頭尾不是虛字 → 記一次，兩次送出都出現才入格；
             // 3) 這串字裡有選過的字（頭尾不是虛字）、或選過的多字詞 → 使用者詞
-            // ponytail: 長度取「連續單字」整串（同 TS）；要精確長度再加手動造詞鍵
+            //    選過的字連成一段（≥2 字）就照選的邊界存（我剛跟|鈺婷|開完會 只存 鈺婷）；
+            //    只選了零散的單字才取「連續單字」整串
             let picked: HashSet<(usize, &str)> = self
                 .fixed
                 .iter()
                 .map(|f| (f.pos, f.word.as_str()))
                 .collect();
             let mut ops: Vec<(bool, String, Vec<String>)> = vec![]; // (使用者詞?, 詞, 讀音)
-            let (mut chars, mut rd, mut any) = (String::new(), vec![], false);
-            let flush =
-                |ops: &mut Vec<_>, chars: &mut String, rd: &mut Vec<String>, any: &mut bool| {
-                    let n = chars.chars().count();
-                    // 選過的字太長的一串不存、挖詞最多 MINED_MAX 字（多半是整句沒斷好）；頭尾是虛字的不存
-                    let max = if *any { USER_PHRASE_MAX } else { MINED_MAX };
-                    if n >= 2 && n <= max && edge_ok(chars) {
-                        ops.push((*any, std::mem::take(chars), std::mem::take(rd)));
+                                                                    // 一串連續單字：字、讀音、各字是不是選過的
+            let (mut chars, mut rd, mut marks) = (vec![], vec![], vec![]);
+            let flush = |ops: &mut Vec<_>,
+                         chars: &mut Vec<String>,
+                         rd: &mut Vec<String>,
+                         marks: &mut Vec<bool>| {
+                let n = chars.len();
+                let any = marks.contains(&true);
+                let mut segs = vec![];
+                let mut i = 0;
+                while i < n {
+                    let j = (i..n).find(|&j| marks[j] != marks[i]).unwrap_or(n);
+                    if marks[i] && j - i >= 2 {
+                        segs.push((i, j));
                     }
-                    chars.clear();
-                    rd.clear();
-                    *any = false;
-                };
+                    i = j;
+                }
+                if segs.is_empty() {
+                    segs.push((0, n));
+                }
+                for (i, j) in segs {
+                    let w = chars[i..j].concat();
+                    // 選過的字太長的一串不存、挖詞最多 MINED_MAX 字（多半是整句沒斷好）；頭尾是虛字的不存
+                    let max = if any { USER_PHRASE_MAX } else { MINED_MAX };
+                    if j - i >= 2 && j - i <= max && edge_ok(&w) {
+                        ops.push((any, w, rd[i..j].to_vec()));
+                    }
+                }
+                chars.clear();
+                rd.clear();
+                marks.clear();
+            };
             let mut at_pos = 0;
             let mut picked_at = vec![];
             for b in &chosen.breakdown {
@@ -736,18 +783,18 @@ impl ImeEngine {
                 picked_at.push(is_picked);
                 // 空格等原樣字元是詞界：不併進造詞
                 if opaque(b) || b.word.chars().count() != 1 {
-                    flush(&mut ops, &mut chars, &mut rd, &mut any);
+                    flush(&mut ops, &mut chars, &mut rd, &mut marks);
                     if is_picked && b.word.chars().count() > 1 && !opaque(b) {
                         ops.push((true, b.word.clone(), b.reading.clone()));
                     }
                 } else {
-                    chars.push_str(&b.word);
+                    chars.push(b.word.clone());
                     rd.extend(b.reading.iter().cloned());
-                    any |= is_picked;
+                    marks.push(is_picked);
                 }
                 at_pos += b.reading.len();
             }
-            flush(&mut ops, &mut chars, &mut rd, &mut any);
+            flush(&mut ops, &mut chars, &mut rd, &mut marks);
 
             // 4) 選過的單字左右都是多字詞（狀態|欄）：併進相鄰的詞存成使用者詞，
             //    左邊優先，合起來 ≤ USER_PHRASE_MAX 字，不跨原樣字元與 □（同 TS）
@@ -1147,6 +1194,29 @@ mod tests {
         assert_eq!(e.state(true).composition, "你好");
         e.set_learning(true);
         assert_eq!(e.state(true).composition, "擬好");
+    }
+
+    #[test]
+    fn picked_span_learned_and_use_count_grows() {
+        let mut e = engine(LEX);
+        let syl = rd("ㄨㄛˇ ㄋㄧˇ ㄏㄠˇ ㄌㄢˊ ㄨㄟˋ");
+        let pieces = |t: &str| t.chars().map(String::from).collect::<Vec<_>>();
+        let boost = |e: &ImeEngine| {
+            e.adapter
+                .as_ref()
+                .unwrap()
+                .modifier_for("ㄋㄧˇ ㄏㄠˇ", "擬號", 0.0)
+        };
+        // 整串單字 我擬號欄位 頭是虛字、存不了；只存選過的 擬號
+        assert_eq!(e.commit_target(&syl, &pieces("我擬號欄位"), true).1, 2);
+        assert!(e.decoder.has_entry(&rd("ㄋㄧˇ ㄏㄠˇ"), "擬號"));
+        assert_eq!(boost(&e), 8.0);
+        // 再用一次（不用選）：次數 2，加成變高
+        assert_eq!(e.commit_target(&syl, &pieces("我擬號欄位"), true).1, 0);
+        assert_eq!(boost(&e), 8.0 + 6.0 * 2f64.ln());
+        // 改成別的：回到基本加成
+        e.commit_target(&syl, &pieces("我你好欄位"), true);
+        assert_eq!(boost(&e), 8.0);
     }
 
     #[test]

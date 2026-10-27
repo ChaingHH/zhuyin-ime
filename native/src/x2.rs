@@ -22,6 +22,8 @@ const GLOBAL_FACTOR: f64 = 0.35;
 const MANUAL_PHRASE_BOOST: f64 = 8.0;
 /// 手動造詞每多一個音節再加多少（算到 6 音節；同 TS manualPhraseBoostPerSyllable）
 const MANUAL_PHRASE_BOOST_PER_SYLLABLE: f64 = 10.0;
+/// 使用者詞每多用一次（送出裡有它）再加 MANUAL_USE_BOOST × ln(次數)；使用者改掉它（選了別的）就回到 1 次
+const MANUAL_USE_BOOST: f64 = 6.0;
 
 /// 挖詞要在幾次送出出現過才加進解碼器（同 TS MINED_MIN_FREQ）：只出現一次的多半是斷錯的片段
 const MINED_MIN_FREQ: f64 = 2.0;
@@ -47,6 +49,7 @@ struct Rec {
 }
 
 /// 使用者詞條（詞是 phrases 的鍵）。JSON 欄位順序固定：word, readings, provenance, manual?, freq?, lastAt?
+/// freq：挖詞是出現次數；使用者詞是用過幾次（沒有＝1）
 struct Phrase {
     readings: Vec<Vec<String>>,
     provenance: Vec<String>,
@@ -191,7 +194,18 @@ impl UserAdapter {
         self.added += !m.contains_key(word) as usize + !self.global.contains_key(word) as usize;
         bump(m, word, at);
         bump(&mut self.global, word, at);
+        if let Some(p) = self.phrases.get_mut(word).filter(|p| p.is_manual()) {
+            p.freq = Some(p.freq.unwrap_or(1.0) + 1.0);
+            p.last_at = Some(at);
+        }
         self.maybe_compact();
+    }
+
+    /// 使用者把第一名裡的這個使用者詞改成別的：用過的次數回到 1（加成回到基本值）
+    pub fn demote(&mut self, word: &str) {
+        if let Some(p) = self.phrases.get_mut(word).filter(|p| p.is_manual()) {
+            p.freq = None;
+        }
     }
 
     /// U(w)；seq_key＝上下文音節以空白相接（呼叫端每次解碼算一次）
@@ -202,7 +216,10 @@ impl UserAdapter {
         if self.phrases.get(word).is_some_and(Phrase::is_manual) {
             // 讀音越長加成越大，算到 6 音節（同 TS manualPhraseBoostPerSyllable）
             let extra = seq_key.split(' ').count().min(6).saturating_sub(2) as f64;
-            return MANUAL_PHRASE_BOOST + MANUAL_PHRASE_BOOST_PER_SYLLABLE * extra;
+            let uses = self.phrases[word].freq.unwrap_or(1.0);
+            return MANUAL_PHRASE_BOOST
+                + MANUAL_PHRASE_BOOST_PER_SYLLABLE * extra
+                + MANUAL_USE_BOOST * uses.ln();
         }
         let mut u = 0.0;
         if let Some(r) = self.by_seq.get(seq_key).and_then(|m| m.get(word)) {
@@ -223,6 +240,10 @@ impl UserAdapter {
     }
 
     pub fn set_user_phrase(&mut self, word: &str, reading: &[String]) {
+        // 已經是使用者詞：次數由 record_selection 算，這裡不重設
+        if self.phrases.get(word).is_some_and(Phrase::is_manual) {
+            return;
+        }
         self.added += !self.phrases.contains_key(word) as usize;
         self.phrases.insert(
             word.into(),
@@ -550,6 +571,19 @@ mod tests {
             MANUAL_PHRASE_BOOST + 4.0 * MANUAL_PHRASE_BOOST_PER_SYLLABLE
         );
         assert_eq!(a.stats(), (0, 0, 1, 0));
+    }
+
+    #[test]
+    fn manual_phrase_use_count_survives_json() {
+        let mut a = UserAdapter::new();
+        let r = rd("ㄓㄨㄤˋ ㄊㄞˋ");
+        a.set_user_phrase("狀態", &r);
+        a.record_selection(&r, "狀態", T0);
+        let b = UserAdapter::from_json(&a.to_json()).unwrap();
+        assert_eq!(
+            b.modifier_for("a b", "狀態", T0),
+            MANUAL_PHRASE_BOOST + MANUAL_USE_BOOST * 2f64.ln()
+        );
     }
 
     #[test]

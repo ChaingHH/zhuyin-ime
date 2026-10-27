@@ -673,9 +673,9 @@ fn main() {
                 .iter()
                 .map(|(_, ss)| run(&mut eng, &ss.iter().collect::<Vec<_>>(), false))
                 .collect();
-            for uses in 0..=2 {
+            for uses in 0..=4 {
                 if uses > 0 {
-                    run(&mut eng, &of(&format!("learn{uses}")), true);
+                    run(&mut eng, &of(&format!("learn{}", 2 - uses % 2)), true);
                 }
                 let r = run(&mut eng, &test, false);
                 let hit = r.iter().filter(|x| x.1).count();
