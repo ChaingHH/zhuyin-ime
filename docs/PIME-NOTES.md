@@ -216,6 +216,14 @@ PIME 三欄的量法相同：直接驅動後端，不含 TSF 開銷。
 
 同時修掉的另一個問題（沒有證據是這次的原因）：別的 client 的 `onCompositionTerminated`／`onDeactivate`／`onKeyboardStatusChanged(false)` 會清掉 owner 打到一半的組字。PIME 的 DLL 一個程式一份、各自送這些事件，`pime.rs` 只有一份組字，現在只理 owner 送來的（測試 `other_client_keeps_composition`）。
 
+更正（2026-10-27）：使用者的意思是「注音偶爾壞掉、只能打英文，在哪個程式都一樣」，不是搜尋框。上面 DLL 不見的狀況會讓所有按鍵原樣放行，正好就是「只能打英文」，10-26 11:41 之後一直是這樣。重開機之前的偶發狀況，可能的原因與修正：
+
+- **Shift 誤切到英文**：以前只要 Shift 按下到放開之間沒有別的**按鍵**就切換，所以按著 Shift 想事情、Shift＋點選文字、Shift＋滾輪都會切到英文。現在按著超過 0.5 秒（`SHIFT_TAP`）、放開時 keyStates 有滑鼠鍵、或按著時 `GetAsyncKeyState` 看到點過滑鼠，都不切換（同微軟注音）。測試 `shift_tap_only_when_short_and_no_mouse`，`debug-pime.ts` 行為檢查「Shift 按著 0.7 秒不切換」「Shift＋滑鼠不切換」。
+- **圖示騙人**：中英模式全部程式共用，但 `changeButton` 只送給按 Shift 的那個程式；別的程式的圖示還是「中」，打出來卻是英文。現在每個 client 記著自己的圖示畫的是哪個模式（`shown_mode`），不同就在它下一則回應帶 `changeButton`。測試 `other_client_icon_follows_mode`。
+- 沒改：鍵盤被關掉（`onKeyboardStatusChanged` opened=false，例如程式或 Ctrl+Space 關掉輸入法）時，PIME 把按鍵原樣放行，圖示變灰。再按一次 Ctrl+Space 或點圖示就會打開。
+
+下次再發生時要看工作列的輸入法圖示：「英」＝被切到英文（按右 Shift 切回）；灰色＝輸入法被關掉（Ctrl+Space）；不是「注音 (zhuyin-native)」＝ Windows 換到別的鍵盤（Win+Space 換回）；圖示是「中」卻打出英文＝後端或 DLL 出問題，看 `backend.log` 和 `C:\Program Files (x86)\PIMEd\PIMETextService.dll` 在不在。
+
 ## 5. 初次安裝（2026-10-17，已被取代）
 
 > **警告：不要照這一節做。** 第 4 步「結束 `PIMELauncher.exe`」會讓所有用著 PIME 的程式當掉（§4）。`install.ps1` 的參數與行為也已經改了（改名取代、`-Rollback`、不重複 `regsvr32`）。現在的安裝方式見 [PIME-INSTALL.md](PIME-INSTALL.md)。
