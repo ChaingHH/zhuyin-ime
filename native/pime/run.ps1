@@ -102,10 +102,10 @@ try {
   if ($p.ExitCode -eq 2) { Later "還沒移除完：請登出再登入，再雙擊一次 uninstall.cmd。記錄檔：$log" }
   if ($p.ExitCode -ne 0) { Done $false "$($title)失敗。記錄檔：$log" }
   if ($Action -eq 'install') {
-    # 鍵盤清單只留本專案這個 PIME 輸入法（一般權限、只改使用者設定；第一次安裝時 PIME 還不認得 zhuyin，會請使用者登出後再跑一次）
+    # 鍵盤清單加入本專案，其他輸入法不動（一般權限、只改使用者設定；第一次安裝時 PIME 還不認得 zhuyin，會請使用者登出後再跑一次）
     Write-Host ''
     Write-Host '3. 鍵盤清單…'
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Keyboard only
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Keyboard add
     if ($LASTEXITCODE -ne 0) { Write-Host '  鍵盤清單沒改成，可到「設定」自己加入「注音 (zhuyin-native)」' -ForegroundColor Yellow }
   }
   $next = @{

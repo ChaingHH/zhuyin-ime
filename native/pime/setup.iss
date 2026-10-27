@@ -5,7 +5,7 @@
 ; （不停 PIMELauncher、被鎖的檔案改名不覆寫、保留 zhuyin.prev\、可 -Rollback）。
 ; 內附 build-setup.ps1 當時最新的 PIME 官方安裝檔（vendor\，驗 SHA-256），交給 install.ps1 -PimeSetup：
 ; 沒有 PIME、DLL 不見、或已裝的比內附的舊時靜默安裝（規則見 install.ps1 的 Update-Pime）。
-; 第一次安裝寫一個 RunOnce：登出再登入時把「注音 (zhuyin-native)」加進鍵盤清單（install.ps1 -Keyboard only）。
+; 第一次安裝寫一個 RunOnce：登出再登入時把「注音 (zhuyin-native)」加進鍵盤清單（install.ps1 -Keyboard add）。
 
 #define AppName "注音 (zhuyin-native) for PIME"
 #define AppVersion "1.0.3"
@@ -41,7 +41,7 @@ Source: "vendor\{#PimeSetup}"; Flags: dontcopy
 
 [Registry]
 ; ponytail: 用別的管理員帳號提權時寫到那個帳號，使用者要自己到「設定」加入鍵盤
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\RunOnce"; ValueType: string; ValueName: "zhuyin-native-keyboard"; ValueData: "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\install.ps1"" -Keyboard only -WaitReady 120"; Check: FirstInstall
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\RunOnce"; ValueType: string; ValueName: "zhuyin-native-keyboard"; ValueData: "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\install.ps1"" -Keyboard add -WaitReady 120"; Check: FirstInstall
 
 [Code]
 var

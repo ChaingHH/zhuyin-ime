@@ -4,15 +4,15 @@
 #   .\install.ps1 -Rollback       用 zhuyin.prev\ 換回上一版（需系統管理員）。換之前把目前這版備份成 zhuyin.next\
 #   .\install.ps1 -Uninstall      移除（需系統管理員）。zhuyin 還在任何鍵盤清單裡、或後端還在跑時什麼都不改、結束碼 2，
 #                                 要先登出再登入再跑一次（見下面的警告）
-#   .\install.ps1 -Keyboard only|remove   只改目前使用者的鍵盤清單（一般權限；run.ps1 用）。
-#                                 only：PIME 的輸入法只留本專案，啟動器還不認得 zhuyin 時不改；
+#   .\install.ps1 -Keyboard add|remove   只改目前使用者的鍵盤清單（一般權限；run.ps1 用）。
+#                                 add：加入本專案、其他輸入法照舊（原本有的留著），啟動器還不認得 zhuyin 時不改；
 #                                 remove：拿掉本專案，拿掉了或還有人在用時結束碼 2（要登出）
 #   .\install.ps1 -RestoreAll     用 backends.json.full 還原舊版 -OnlyZhuyin 拿掉的輸入法（跑完馬上登出）
 # 不再提供 -OnlyZhuyin（從 backends.json 拿掉其他後端）：PIME 執行中拿掉後端，鍵盤清單裡還留著那些輸入法，
-# Explorer 的 DLL 一呼叫就找不到後端，一秒當一次直到登出（2026-10-20 12:05）。只留本專案改由 -Keyboard only 調整使用者的鍵盤清單。
+# Explorer 的 DLL 一呼叫就找不到後端，一秒當一次直到登出（2026-10-20 12:05）。改由 -Keyboard add 調整使用者的鍵盤清單。
 # 同樣的理由，-Uninstall 只在沒人用 zhuyin 時才改 backends.json、regsvr32、刪檔
 #   .\install.ps1 -From <目錄>    用已經組好的 zhuyin\ 資料夾安裝（Setup.exe 用；不需要 repo 與 Rust）
-#   -WaitReady <秒>              -Keyboard only 先等 PIME 啟動器讀到 zhuyin 最多這麼久（Setup.exe 寫的 RunOnce 登入時用）
+#   -WaitReady <秒>              -Keyboard add 先等 PIME 啟動器讀到 zhuyin 最多這麼久（Setup.exe 寫的 RunOnce 登入時用）
 #   -Log <檔案>                   把輸出寫進記錄檔（install.cmd 提權執行時用，原視窗再顯示出來）
 #   安裝／更新時順便把 PIME 升到最新版（Update-Pime）：預設從 GitHub 下載最新的 PIME 安裝檔（含 beta），
 #   -PimeSetup <檔案> 改用這個安裝檔（Setup.exe 內附的），-NoPimeUpdate 不動 PIME
@@ -33,7 +33,7 @@ param(
   [switch]$Uninstall,
   [switch]$RestoreAll,
   [switch]$Rollback,
-  [ValidateSet('only', 'remove')][string]$Keyboard = '',
+  [ValidateSet('add', 'remove')][string]$Keyboard = '',
   [string]$From = '',
   [int]$WaitReady = 0,
   [string]$Log = '',
@@ -255,13 +255,19 @@ function Update-Pime([string]$setup, [string]$ver) {
     return $false
   }
   Write-Host "安裝 PIME $ver（目前：$(if ($cur) { $cur } else { '沒有' })$(if ($broken) { '，DLL 不見' })）"
+  # PIME 的安裝程式會把它所有的輸入法（新酷音、小麥注音等）加進鍵盤清單（2026-10-27 裝 beta4 後多了 5 個，
+  # Windows 還切到新酷音）。裝完把清單換回裝之前的樣子：原本有的留著，原本沒有的拿掉。
+  # ponytail: 用別的管理員帳號提權時讀寫的是那個帳號的清單，使用者自己的清單不會換回
+  $before = Get-WinUserLanguageList
   $p = Start-Process $setup '/S' -Wait -PassThru
   if ($p.ExitCode -ne 0) { throw "PIME 安裝程式失敗（結束碼 $($p.ExitCode)）" }
+  Set-WinUserLanguageList $before -Force
+  Write-Host '鍵盤清單：換回安裝 PIME 之前的樣子'
   $true
 }
 
 # 改目前使用者的鍵盤清單（等同在「設定」裡加入／移除鍵盤；不動 backends.json）。回傳有沒有改
-#   only    PIME 的輸入法只留本專案（微軟注音等非 PIME 的保留，PIME 壞掉時還能打字）
+#   add     加入本專案，其他輸入法不動（原本有新酷音就留著；沒有的由 Update-Pime 裝完 PIME 後拿掉）
 #   remove  拿掉本專案
 function Set-Keyboard([string]$mode) {
   $langs = Get-WinUserLanguageList
@@ -281,7 +287,8 @@ function Set-Keyboard([string]$mode) {
     }
     if (-not $zh) { $langs.Add('zh-Hant-TW'); $zh = $langs | Where-Object LanguageTag -eq 'zh-Hant-TW' }
     $pimeTip = "0404:$tip"
-    $keep = @($zh.InputMethodTips | Where-Object { -not $_.ToUpper().StartsWith($pimeTip) }) + "$pimeTip$profileGuid"
+    $keep = @($zh.InputMethodTips)
+    if (-not ($keep -match [regex]::Escape($profileGuid))) { $keep += "$pimeTip$profileGuid" }
   }
   if (($zh.InputMethodTips -join ',') -eq ($keep -join ',')) { return $false }
   $zh.InputMethodTips.Clear()
@@ -330,10 +337,10 @@ if ($FetchPime) {
   Finish
 }
 
-if ($Keyboard -eq 'only') {
+if ($Keyboard -eq 'add') {
   # 登入時 RunOnce 和 PIMELauncher（HKLM Run）一起啟動，先後不定
   for ($i = 0; $i -lt $WaitReady -and -not ((Pime-Tip) -and (Launcher-Ready)); $i++) { Start-Sleep 1 }
-  if (Set-Keyboard 'only') { Write-Host '鍵盤清單：PIME 的輸入法只留「注音 (zhuyin-native)」（要其他的可到「設定」加回）' }
+  if (Set-Keyboard 'add') { Write-Host '鍵盤清單：已加入「注音 (zhuyin-native)」' }
   Finish
 }
 if ($Keyboard -eq 'remove') {

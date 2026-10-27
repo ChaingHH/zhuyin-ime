@@ -45,7 +45,7 @@ v2.0.0-beta4（2026-10-23）的安裝程式改成先把被鎖的 DLL 改名再�
 Setup.exe 做的事：
 
 - 把內附的 PIME 安裝檔交給 `install.ps1 -PimeSetup`：規則同上面 `install.cmd` 的 PIME 升級（沒裝、DLL 不見、比內附的舊才裝）。
-- 第一次安裝（`backends.json` 裡還沒有 zhuyin）：在提權帳號的 HKCU `RunOnce` 寫一筆，登入時跑 `install.ps1 -Keyboard only -WaitReady 120`，等啟動器讀到 zhuyin 後把它加進鍵盤清單。用別的管理員帳號提權時會寫到那個帳號，使用者要自己到「設定」加入。
+- 第一次安裝（`backends.json` 裡還沒有 zhuyin）：在提權帳號的 HKCU `RunOnce` 寫一筆，登入時跑 `install.ps1 -Keyboard add -WaitReady 120`，等啟動器讀到 zhuyin 後把它加進鍵盤清單。用別的管理員帳號提權時會寫到那個帳號，使用者要自己到「設定」加入。
 - 其餘只是把檔案帶過去，再呼叫同一支 `install.ps1 -From`，所以安全規則完全一樣。它在 `C:\ProgramData\zhuyin-native-setup\` 留一份 `install.ps1` 與檔案副本，給「新增或移除程式」裡的解除安裝用。
 
 解除安裝也分兩次，和 `uninstall.cmd` 一樣：
@@ -104,10 +104,10 @@ Setup.exe 做的事：
 
 4. 登出再登入，讓 PIME 重新讀 `backends.json`。
 
-5. 加入鍵盤：用一般權限的 PowerShell 執行下面的指令（PIME 的輸入法只留本專案）。或到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤 > 新增鍵盤」自己加入「注音 (zhuyin-native)」。
+5. 加入鍵盤：用一般權限的 PowerShell 執行下面的指令（加入本專案，其他輸入法不動）。或到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤 > 新增鍵盤」自己加入「注音 (zhuyin-native)」。
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Keyboard only
+   powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\native\pime\install.ps1 -Keyboard add
    ```
 
 6. 用 `Win + 空白鍵` 切到它，開始打字。
@@ -170,7 +170,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 只留「注音 (zhuyin-native)」（預設）
 
-`install.cmd` 裝完會用一般權限調整**你的鍵盤清單**（`install.ps1 -Keyboard only`）：加入「注音 (zhuyin-native)」，PIME 的其他輸入法（新酷音、小麥注音等）拿掉。微軟注音這類非 PIME 的鍵盤保留，PIME 出問題時還能打字。
+`install.cmd` 裝完會用一般權限調整**你的鍵盤清單**（`install.ps1 -Keyboard add`）：加入「注音 (zhuyin-native)」，其他輸入法照舊。PIME 的安裝程式會把它所有的輸入法（新酷音等）加進清單，`Update-Pime` 裝完 PIME 會把清單換回裝之前的樣子：原本有的留著，原本沒有的拿掉（2026-10-27 以前是「PIME 的輸入法只留本專案」）。
 
 - 只在 PIME 已經認得 zhuyin 時才改：每個 `PIMELauncher.exe` 都要在 `backends.json` 最後一次修改之後才啟動。第一次安裝時不成立，所以只提示「登出再登入後，再執行一次 install.cmd」。
 - 這和在「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」裡加入、移除鍵盤是同一件事。要其他輸入法，到那裡加回來。
