@@ -331,6 +331,9 @@ function Restart-Backend {
   $true
 }
 
+# DLL 不見時登錄檔還在（Pime-Tip 照樣找得到），每個程式都載不到輸入法、按鍵原樣放行。
+# 2026-10-26 重開機後 x64\、x86\ 整個不見，完全打不出注音（docs/PIME-NOTES.md §4b）
+foreach ($d in $dlls) { if (-not (Test-Path $d)) { throw "找不到 $d：PIME 不完整，先重新安裝 PIME（不用先解除安裝），再執行一次" } }
 $files = Source-Files
 $oldExe = Join-Path $dest 'zhuyin-native.exe'
 $exeChanged = -not ((Test-Path $oldExe) -and (Get-FileHash $oldExe).Hash -eq (Get-FileHash $files['zhuyin-native.exe']).Hash)

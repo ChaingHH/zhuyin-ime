@@ -283,10 +283,13 @@ const press = async (
 // right：右 Shift（掃描碼 0x36）
 // rollover：Shift 按著時才放開這個鍵（快打時前一個注音鍵常晚放開）。
 // keyUp=false：模擬遊戲，DLL 拿不到 edit session，不會送 onKeyUp
+// holdMs：按著多久才放開；mouse：放開時滑鼠左鍵還按著（Shift＋拖曳選取）
 const shiftTap = async (
   right = false,
   rollover?: string,
   keyUp = true,
+  holdMs = 0,
+  mouse = false,
 ): Promise<Record<string, unknown>> => {
   const ev = {
     charCode: 0,
@@ -309,8 +312,11 @@ const shiftTap = async (
     });
     check(!up['return'], `Shift 按著時放開 ${rollover} 不該被攔下`);
   }
+  if (holdMs) await new Promise((r) => setTimeout(r, holdMs));
   keyStates[0x10] = 0;
+  keyStates[0x01] = mouse ? 0x80 : 0;
   const f = await call({ method: 'filterKeyUp', ...ev, keyStates });
+  keyStates[0x01] = 0;
   return f['return'] && keyUp ? call({ method: 'onKeyUp', ...ev, keyStates }) : f;
 };
 const check = (ok: boolean, what: string): void => {
@@ -359,6 +365,9 @@ async function smoke(): Promise<void> {
   };
   check((await shiftMenu()) === '11', '預設左右兩個開關都勾');
   check((await toggles(false)) && (await toggles(true)), '預設左右 Shift 都切換');
+  // 不算單按（同微軟注音）：按著超過 0.5 秒、放開時滑鼠鍵還按著
+  check(!('changeButton' in (await shiftTap(false, undefined, true, 700))), 'Shift 按著 0.7 秒不切換');
+  check(!('changeButton' in (await shiftTap(false, undefined, true, 0, true))), 'Shift＋滑鼠不切換');
   // 關掉左 Shift
   noSession(await call({ method: 'onCommand', id: 2, type: 2 }), '選單：左 Shift 開關');
   check((await shiftMenu()) === '01', '左 Shift 開關取消勾選');

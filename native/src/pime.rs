@@ -30,6 +30,22 @@ extern "system" {
     fn GetLocalTime(t: *mut [u16; 8]);
 }
 
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vk: i32) -> i16;
+}
+
+/// 從上次呼叫到現在有沒有按過滑鼠鍵（左、右、中）。低位元「之後按過」是全系統共用的，
+/// 別的程式先讀走就看不到：只會少擋，不會誤擋
+fn mouse_pressed() -> bool {
+    [1, 2, 4]
+        .iter()
+        .fold(false, |any, &vk| unsafe { GetAsyncKeyState(vk) } as u16 & 0x8001 != 0 || any)
+}
+
+/// Shift 按著超過這麼久才放開不算單按（同微軟注音；按著 Shift 想事情、Shift＋點選都不切換）
+const SHIFT_TAP: Duration = Duration::from_millis(500);
+
 /// 現在的當地時間 "2026-10-21 13:11:42"
 fn now_str() -> String {
     let mut t = [0u16; 8];
@@ -226,6 +242,8 @@ struct Key {
     shift: bool,
     /// 這個 Shift 是右邊那顆
     right_shift: bool,
+    /// 滑鼠鍵按著（keyStates 的 VK_LBUTTON／RBUTTON／MBUTTON）
+    mouse: bool,
 }
 
 fn key_of(msg: &Value) -> Key {
@@ -247,6 +265,7 @@ fn key_of(msg: &Value) -> Key {
         ctrl: down(VK_CONTROL) && !down(VK_MENU),
         shift: down(VK_SHIFT),
         right_shift: msg["scanCode"].as_u64() == Some(SCAN_RSHIFT) || down(VK_RSHIFT),
+        mouse: down(1) || down(2) || down(4),
     }
 }
 
@@ -313,6 +332,11 @@ pub struct Backend {
     owner: String,
     /// 單按 Shift：按下 Shift 後到放開前沒有按別的鍵
     shift_alone: bool,
+    /// 這次 Shift 按下的時間（自動重複的按下不重設）
+    shift_at: Instant,
+    /// 每個 client 的語言列圖示目前畫的是哪個模式。模式全部 client 共用：在一個程式切了英文，
+    /// 別的程式的圖示還是「中」、打出來卻是英文，看起來像注音壞掉
+    shown_mode: HashMap<String, Mode>,
     /// 組字中切換了模式、還沒重畫組字區（遊戲常沒有 onKeyUp）：下一個鍵在 onKeyDown 補畫
     stale: bool,
     /// 哪一邊的 Shift 單按會切換中英：config.json 的 "shiftToggle"，"both"｜"left"｜"right"｜"none"
@@ -362,6 +386,8 @@ impl Backend {
             win8: true,
             owner: String::new(),
             shift_alone: false,
+            shift_at: Instant::now(),
+            shown_mode: HashMap::new(),
             stale: false,
             shift_toggle: "both",
             layout: Layout::Dachen,
@@ -916,11 +942,11 @@ impl Backend {
         r.insert("showCandidates".into(), json!(false));
     }
 
-    /// 只換模式、更新語言列圖示。沒有 edit session 的回應（onCommand、filterKeyUp）只能用這個：
+    /// 只換模式（語言列圖示由 handle 最後依 shown_mode 換）。沒有 edit session 的回應（onCommand、filterKeyUp）只能用這個：
     /// PIME 的 DLL 在沒有 session 時收到 showMessage 會解參考空指標，宿主程式直接當掉。
     /// 組字區不送出：接著打的英文併進組字區（ImeEngine::on_key），後打的字還能改前面的中文；
     /// 打到一半的注音切英文時丟掉（toggle_mode）
-    fn flip_mode(&mut self, r: &mut Map<String, Value>) {
+    fn flip_mode(&mut self) {
         if let Some(e) = self.eng.as_mut() {
             e.toggle_mode();
         }
@@ -929,7 +955,6 @@ impl Backend {
         } else {
             Mode::Zhuyin
         };
-        self.mode_button(r, "changeButton");
     }
 
     /// 組字中切換後重畫組字區（要 edit session）：只剩半個注音、被丟掉的話清掉畫面上的組字
@@ -948,6 +973,10 @@ impl Backend {
         if k.vk as usize == VK_SHIFT {
             let (l, r) = shift_sides(self.shift_toggle);
             let side_ok = if k.right_shift { r } else { l };
+            if !self.shift_alone {
+                self.shift_at = Instant::now();
+                mouse_pressed(); // 清掉「之後按過」，放開時才看得出按著 Shift 時有沒有點
+            }
             self.shift_alone = !k.ctrl_alt && side_ok;
             return false;
         }
@@ -1060,6 +1089,7 @@ impl Backend {
     fn leave(&mut self, client: &str) {
         self.active.remove(client);
         self.sent_cols.remove(client);
+        self.shown_mode.remove(client);
         if self.active.is_empty() {
             self.unload();
         }
@@ -1131,7 +1161,10 @@ impl Backend {
         }
         // 只有一份組字狀態：換了 client 就丟掉前一個 client 的組字
         // ponytail: 全部 client 共用一個引擎與中英模式；要各程式各自的模式再改成每 client 一份狀態
-        if client != self.owner && method.ends_with("KeyDown") {
+        // 組字只屬於 owner：別的程式的組字被結束、停用、關鍵盤，不能清掉 owner 打到一半的字
+        // （每個程式各有一份 DLL、各自送這些事件，例如搜尋框跳出時前一個程式的組字被結束）
+        let owner = client == self.owner;
+        if !owner && method.ends_with("KeyDown") {
             if let Some(e) = self.eng.as_mut() {
                 e.clear();
             }
@@ -1148,6 +1181,7 @@ impl Backend {
                 self.read_settings();
                 self.table = false;
                 self.sent_cols.insert(client.to_string(), 1);
+                self.shown_mode.insert(client.to_string(), self.mode);
                 r.insert(
                     "customizeUI".into(),
                     json!({
@@ -1161,7 +1195,9 @@ impl Backend {
                 None
             }
             "onDeactivate" => {
-                self.clear(&mut r);
+                if owner {
+                    self.clear(&mut r);
+                }
                 if self.win8 {
                     r.insert("removeButton".into(), json!([MODE_BUTTON]));
                 }
@@ -1173,7 +1209,12 @@ impl Backend {
             "filterKeyUp" => {
                 let k = key_of(msg);
                 let is_shift = k.vk as usize == VK_SHIFT;
-                let toggle = is_shift && self.shift_alone;
+                // 按太久、按著時點過滑鼠（Shift＋點選文字）不算單按
+                let toggle = is_shift
+                    && self.shift_alone
+                    && self.shift_at.elapsed() < SHIFT_TAP
+                    && !k.mouse
+                    && !mouse_pressed();
                 // 只有 Shift 放開才重設：快打注音時常是「按 Shift → 才放開前一個注音鍵 → 放開 Shift」，
                 // 前一個鍵的放開不算按了別的鍵，否則打字中按 Shift 切不過去（同網頁測試台）
                 if is_shift {
@@ -1185,7 +1226,7 @@ impl Backend {
                 // 沒拿到 onKeyUp 就在下一個鍵補畫（stale）
                 if toggle {
                     let composing = self.composing();
-                    self.flip_mode(&mut r);
+                    self.flip_mode();
                     self.stale = composing;
                     Some(composing)
                 } else {
@@ -1200,7 +1241,7 @@ impl Backend {
             // 不能送 showMessage／commitString／compositionString。組字中按圖示不切換（組字會沒地方送出）
             "onCommand" => {
                 match msg["id"].as_i64() {
-                    Some(ID_MODE) if !self.composing() => self.flip_mode(&mut r),
+                    Some(ID_MODE) if !self.composing() => self.flip_mode(),
                     Some(id @ (ID_SHIFT_LEFT | ID_SHIFT_RIGHT)) => {
                         let (l, r) = shift_sides(self.shift_toggle);
                         self.shift_toggle = if id == ID_SHIFT_LEFT {
@@ -1253,7 +1294,7 @@ impl Backend {
                 None
             }
             "onKeyboardStatusChanged" => {
-                if msg["opened"].as_bool() == Some(false) {
+                if owner && msg["opened"].as_bool() == Some(false) {
                     self.clear(&mut r);
                 }
                 if self.win8 {
@@ -1266,7 +1307,7 @@ impl Backend {
             }
             // 被系統強制結束（切換程式等）：已顯示的組字留在文件裡，引擎這邊清空、不學習
             "onCompositionTerminated" => {
-                if let Some(e) = self.eng.as_mut() {
+                if let Some(e) = self.eng.as_mut().filter(|_| owner) {
                     e.clear();
                 }
                 None
@@ -1280,6 +1321,12 @@ impl Backend {
         };
         if let Some(v) = ret {
             r.insert("return".into(), json!(v));
+        }
+        // 這個程式的圖示跟目前的模式不同（在別的程式切過、或這次切了）：順便換掉。
+        // changeButton 不需要 edit session，哪個方法的回應都能帶
+        if self.active.contains(client) && self.shown_mode.get(client) != Some(&self.mode) {
+            self.mode_button(&mut r, "changeButton");
+            self.shown_mode.insert(client.to_string(), self.mode);
         }
         if self.simplified {
             to_simplified(&mut r);
@@ -1600,6 +1647,72 @@ mod tests {
         assert!(!be.gave_up());
         be.broken = Some(Instant::now() - RETRY);
         assert!(!be.gave_up());
+    }
+
+    #[test]
+    fn other_client_keeps_composition() {
+        let mut be = backend();
+        let mut e = crate::testutil::engine(&[("ㄔㄚˊ", "查")]);
+        crate::testutil::type_syllables(&mut e, "ㄔㄚˊ");
+        be.eng = Some(e);
+        be.owner = "c1".into();
+        be.active.insert("c1".into());
+        assert!(be.composing());
+        for m in [
+            r#"c2|{"method":"onCompositionTerminated","forced":true,"seqNum":1}"#,
+            r#"c2|{"method":"onKeyboardStatusChanged","opened":false,"seqNum":2}"#,
+            r#"c2|{"method":"onDeactivate","seqNum":3}"#,
+        ] {
+            respond(&mut be, m);
+            assert!(be.composing(), "{m}");
+        }
+        respond(&mut be, r#"c1|{"method":"onCompositionTerminated","forced":true,"seqNum":4}"#);
+        assert!(!be.composing());
+    }
+
+    const SHIFT_DOWN: &str = r#"{"method":"filterKeyDown","keyCode":16,"scanCode":54,"keyStates":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128],"seqNum":1}"#;
+    const SHIFT_UP: &str = r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[],"seqNum":2}"#;
+    const SHIFT_UP_MOUSE: &str = r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[0,128],"seqNum":2}"#;
+
+    /// 送一則請求，回應的 JSON（去掉 "PIME_MSG|client|"）
+    fn send(be: &mut Backend, client: &str, m: &str) -> Value {
+        let line = respond(be, &format!("{client}|{m}")).unwrap();
+        serde_json::from_str(line.splitn(3, '|').nth(2).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn shift_tap_only_when_short_and_no_mouse() {
+        let mut be = backend();
+        send(&mut be, "c1", r#"{"method":"onActivate","seqNum":0}"#);
+        send(&mut be, "c1", SHIFT_DOWN);
+        send(&mut be, "c1", SHIFT_UP);
+        assert!(be.mode == Mode::English, "單按切換");
+        // Shift 放開時滑鼠鍵還按著（Shift＋拖曳選取）
+        send(&mut be, "c1", SHIFT_DOWN);
+        send(&mut be, "c1", SHIFT_UP_MOUSE);
+        assert!(be.mode == Mode::English);
+        // 按太久；中間的自動重複不重設時間
+        send(&mut be, "c1", SHIFT_DOWN);
+        be.shift_at -= SHIFT_TAP;
+        send(&mut be, "c1", SHIFT_DOWN);
+        send(&mut be, "c1", SHIFT_UP);
+        assert!(be.mode == Mode::English);
+    }
+
+    #[test]
+    fn other_client_icon_follows_mode() {
+        let mut be = backend();
+        send(&mut be, "c1", r#"{"method":"onActivate","seqNum":0}"#);
+        send(&mut be, "c2", r#"{"method":"onActivate","seqNum":0}"#);
+        send(&mut be, "c1", SHIFT_DOWN);
+        let up = send(&mut be, "c1", SHIFT_UP);
+        assert!(up["changeButton"][0]["icon"].as_str().unwrap().ends_with("en.ico"));
+        // c2 的圖示還是「中」：c2 的下一則請求帶 changeButton，只帶一次
+        let k = r#"{"method":"filterKeyDown","keyCode":65,"keyStates":[],"seqNum":3}"#;
+        let r2 = send(&mut be, "c2", k);
+        assert!(r2["changeButton"][0]["icon"].as_str().unwrap().ends_with("en.ico"));
+        assert!(send(&mut be, "c2", k).get("changeButton").is_none());
+        assert!(send(&mut be, "c1", k).get("changeButton").is_none());
     }
 
     #[test]
