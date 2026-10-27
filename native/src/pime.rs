@@ -38,9 +38,10 @@ extern "system" {
 /// 從上次呼叫到現在有沒有按過滑鼠鍵（左、右、中）。低位元「之後按過」是全系統共用的，
 /// 別的程式先讀走就看不到：只會少擋，不會誤擋
 fn mouse_pressed() -> bool {
-    [1, 2, 4]
-        .iter()
-        .fold(false, |any, &vk| unsafe { GetAsyncKeyState(vk) } as u16 & 0x8001 != 0 || any)
+    [1, 2, 4].iter().fold(
+        false,
+        |any, &vk| unsafe { GetAsyncKeyState(vk) } as u16 & 0x8001 != 0 || any,
+    )
 }
 
 /// Shift 按著超過這麼久才放開不算單按（同微軟注音；按著 Shift 想事情、Shift＋點選都不切換）
@@ -1734,13 +1735,18 @@ mod tests {
             respond(&mut be, m);
             assert!(be.composing(), "{m}");
         }
-        respond(&mut be, r#"c1|{"method":"onCompositionTerminated","forced":true,"seqNum":4}"#);
+        respond(
+            &mut be,
+            r#"c1|{"method":"onCompositionTerminated","forced":true,"seqNum":4}"#,
+        );
         assert!(!be.composing());
     }
 
     const SHIFT_DOWN: &str = r#"{"method":"filterKeyDown","keyCode":16,"scanCode":54,"keyStates":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,128],"seqNum":1}"#;
-    const SHIFT_UP: &str = r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[],"seqNum":2}"#;
-    const SHIFT_UP_MOUSE: &str = r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[0,128],"seqNum":2}"#;
+    const SHIFT_UP: &str =
+        r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[],"seqNum":2}"#;
+    const SHIFT_UP_MOUSE: &str =
+        r#"{"method":"filterKeyUp","keyCode":16,"scanCode":54,"keyStates":[0,128],"seqNum":2}"#;
 
     /// 送一則請求，回應的 JSON（去掉 "PIME_MSG|client|"）
     fn send(be: &mut Backend, client: &str, m: &str) -> Value {
@@ -1774,11 +1780,17 @@ mod tests {
         send(&mut be, "c2", r#"{"method":"onActivate","seqNum":0}"#);
         send(&mut be, "c1", SHIFT_DOWN);
         let up = send(&mut be, "c1", SHIFT_UP);
-        assert!(up["changeButton"][0]["icon"].as_str().unwrap().ends_with("en.ico"));
+        assert!(up["changeButton"][0]["icon"]
+            .as_str()
+            .unwrap()
+            .ends_with("en.ico"));
         // c2 的圖示還是「中」：c2 的下一則請求帶 changeButton，只帶一次
         let k = r#"{"method":"filterKeyDown","keyCode":65,"keyStates":[],"seqNum":3}"#;
         let r2 = send(&mut be, "c2", k);
-        assert!(r2["changeButton"][0]["icon"].as_str().unwrap().ends_with("en.ico"));
+        assert!(r2["changeButton"][0]["icon"]
+            .as_str()
+            .unwrap()
+            .ends_with("en.ico"));
         assert!(send(&mut be, "c2", k).get("changeButton").is_none());
         assert!(send(&mut be, "c1", k).get("changeButton").is_none());
     }

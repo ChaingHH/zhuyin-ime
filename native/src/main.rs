@@ -6,8 +6,9 @@
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
 //!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個；科技集 eval/tech.jsonl）；
 //!                                           ZHUYIN_DOMAIN＝X1 領域詞加分（預設 2，0＝不加）；
-//!   zhuyin-native x2                        X2 能補回多少：照正解選字送出讓 X2 學，印沒學／第一輪／第二輪、學 A（偶數句）量 B（奇數句）的句準；
-//!                                           ZHUYIN_EVAL（預設 eval/tech.jsonl）、ZHUYIN_DOMAIN
+//!   zhuyin-native x2 [cell.jsonl]           X2 新詞／加強既有詞（eval/x2-new.jsonl、eval/x2-habit.jsonl）：照正解選字送出，
+//!                                           用 0／1／2 次後量 test 句的目標詞召回；附帶損害＝學完後 ZHUYIN_EVAL 各檔
+//!                                           （預設三個主評測集＋tech）逐句和沒學比；ZHUYIN_DOMAIN
 //!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）；
 //!                                           ZHUYIN_INCR=1 逐音節比對增量解碼與全量解碼（不同就 panic），印每步延遲
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
@@ -82,6 +83,9 @@ fn mem(label: &str) {
 struct Sample {
     text: String,
     syllables: Vec<String>,
+    /// x2-new／x2-habit 才有：learn1／learn2／test、目標詞
+    split: String,
+    word: String,
 }
 
 /// 增量解碼 == 全量解碼：逐音節打、刪掉中間一個再補回、中途選字後接著打；steps＝[全量, 增量] 每步毫秒
@@ -171,6 +175,8 @@ fn load_samples(file: &str) -> Vec<Sample> {
                     .iter()
                     .map(|x| x.as_str().unwrap().to_string())
                     .collect(),
+                split: v["split"].as_str().unwrap_or_default().to_string(),
+                word: v["word"].as_str().unwrap_or_default().to_string(),
             }
         })
         .collect()
@@ -613,13 +619,22 @@ fn main() {
             }
             std::fs::write(&args[3], lines.join("\n")).unwrap();
         }
-        // X2 能補回多少：A＝偶數句、B＝奇數句。照正解選字送出讓 X2 學，量學之前／之後的句準
+        // X2 兩格（eval/x2-new.jsonl 新詞、eval/x2-habit.jsonl 既有詞的習慣寫法）：照正解選字送出，
+        // 學 learn1（用 1 次）、再學 learn2（用 2 次），每次量 test 句的目標詞 top-1 召回與句準；
+        // 附帶損害：學完兩次後 ZHUYIN_EVAL 各檔逐句和沒學比（對→錯的句子印到 stderr）
         Some("x2") => {
             if let Ok(v) = std::env::var("ZHUYIN_DOMAIN") {
                 dec.domain_bonus = v.parse().unwrap();
             }
-            let files = std::env::var("ZHUYIN_EVAL").unwrap_or_else(|_| "eval/tech.jsonl".into());
-            let samples: Vec<Sample> = files.split(',').flat_map(load_samples).collect();
+            let cell = load_samples(args.get(2).map_or("eval/x2-new.jsonl", String::as_str));
+            let side: Vec<(String, Vec<Sample>)> = std::env::var("ZHUYIN_EVAL")
+                .unwrap_or_else(|_| {
+                    "eval/colloquial.jsonl,eval/written.jsonl,eval/mixed.jsonl,eval/tech.jsonl"
+                        .into()
+                })
+                .split(',')
+                .map(|f| (f.to_string(), load_samples(f)))
+                .collect();
             // 每個音節的正解字：原樣 token 整段，其他一個字
             let pieces = |s: &Sample| {
                 let mut rest = s.text.as_str();
@@ -639,39 +654,82 @@ fn main() {
             };
             let mut eng = engine::ImeEngine::new(dec, legal.clone(), Some(x2::UserAdapter::new()));
             let mut clock = 1.7e12;
-            // 跑一輪：which＝0 只 A、1 只 B、2 全部；回傳句準（%）
-            let mut pass = |eng: &mut engine::ImeEngine, which: usize, learn: bool| {
-                let (mut ok, mut n, mut picks) = (0, 0, 0);
-                for (i, s) in samples.iter().enumerate() {
-                    if which < 2 && i % 2 != which {
-                        continue;
-                    }
-                    clock += 60_000.0;
-                    eng.clock = Some(clock);
-                    let pc = pieces(s);
-                    let (top, k) = eng.commit_target(&s.syllables, &pc, learn);
-                    ok += (top == pc.concat()) as usize;
-                    picks += k;
-                    n += 1;
-                }
-                (100.0 * ok as f64 / n as f64, picks)
+            // 跑一串句子，回傳每句（第一名對不對, 第一名有沒有目標詞）
+            let mut run = |eng: &mut engine::ImeEngine, ss: &[&Sample], learn: bool| {
+                ss.iter()
+                    .map(|s| {
+                        clock += 60_000.0;
+                        eng.clock = Some(clock);
+                        let pc = pieces(s);
+                        let (top, _) = eng.commit_target(&s.syllables, &pc, learn);
+                        let w = s.word.split('/').next().unwrap();
+                        (top == pc.concat(), top.contains(w), top)
+                    })
+                    .collect::<Vec<_>>()
             };
-            let (base, _) = pass(&mut eng, 2, false);
-            let (p1, picks) = pass(&mut eng, 2, true);
-            let (p2, _) = pass(&mut eng, 2, false);
-            println!("全部 {} 句：沒學 {base:.2}%，第一輪（邊學邊打，選字 {picks} 次）{p1:.2}%，第二輪 {p2:.2}%", samples.len());
+            let of = |split: &str| cell.iter().filter(|s| s.split == split).collect::<Vec<_>>();
+            let test = of("test");
+            let mut before: Vec<_> = side
+                .iter()
+                .map(|(_, ss)| run(&mut eng, &ss.iter().collect::<Vec<_>>(), false))
+                .collect();
+            for uses in 0..=2 {
+                if uses > 0 {
+                    run(&mut eng, &of(&format!("learn{uses}")), true);
+                }
+                let r = run(&mut eng, &test, false);
+                let hit = r.iter().filter(|x| x.1).count();
+                let ok = r.iter().filter(|x| x.0).count();
+                println!(
+                    "用 {uses} 次：目標詞召回 {hit}/{} = {:.1}%，句準 {:.1}%",
+                    r.len(),
+                    100.0 * hit as f64 / r.len() as f64,
+                    100.0 * ok as f64 / r.len() as f64
+                );
+                for (s, x) in test.iter().zip(&r) {
+                    if !x.1 {
+                        eprintln!("[miss{uses}] {} {} → {}", s.word, s.text, x.2);
+                    }
+                }
+            }
             println!(
                 "學習檔 (bySeq, global, 使用者詞, 挖詞)：{:?}",
                 eng.adapter.as_ref().unwrap().stats()
             );
-            // 學 A、量 B：換一個空的學習檔（先關學習，把學到的詞從解碼器拿掉）
-            eng.set_learning(false);
-            eng.adapter = Some(x2::UserAdapter::new());
-            let (b0, _) = pass(&mut eng, 1, false);
-            let (_, picks) = pass(&mut eng, 0, true);
-            let (b1, _) = pass(&mut eng, 1, false);
-            println!("學 A 量 B：B 沒學 {b0:.2}%，學過 A（選字 {picks} 次）後 {b1:.2}%");
-            done = samples.len() * 4;
+            let mut after: Vec<_> = side
+                .iter()
+                .map(|(_, ss)| run(&mut eng, &ss.iter().collect::<Vec<_>>(), false))
+                .collect();
+            // x2-habit 的 word 是「習慣/常用」：附帶損害把兩種寫法算同一個答案
+            let same: Vec<(&str, &str)> =
+                cell.iter().filter_map(|s| s.word.split_once('/')).collect();
+            let norm = |t: &str| same.iter().fold(t.to_string(), |t, (a, b)| t.replace(a, b));
+            for ((_, ss), v) in side
+                .iter()
+                .cycle()
+                .zip(before.iter_mut().chain(after.iter_mut()))
+            {
+                for (s, x) in ss.iter().zip(v.iter_mut()) {
+                    x.0 = norm(&x.2) == norm(&s.text);
+                }
+            }
+            for (((f, ss), b), a) in side.iter().zip(&before).zip(&after) {
+                let acc = |v: &[(bool, bool, String)]| {
+                    100.0 * v.iter().filter(|x| x.0).count() as f64 / v.len() as f64
+                };
+                let lost: Vec<_> = (0..ss.len()).filter(|&i| b[i].0 && !a[i].0).collect();
+                let won = (0..ss.len()).filter(|&i| !b[i].0 && a[i].0).count();
+                println!(
+                    "附帶 {f}：{:.2}% → {:.2}%（對→錯 {}、錯→對 {won}）",
+                    acc(b),
+                    acc(a),
+                    lost.len()
+                );
+                for i in lost {
+                    eprintln!("[lost] {}", ss[i].text);
+                }
+                done += ss.len() * 2;
+            }
         }
         Some("replay") => {
             let clock: Option<f64> = std::env::var("ZHUYIN_CLOCK")

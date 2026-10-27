@@ -857,7 +857,7 @@ impl ImeEngine {
     }
 
     /// 評測用（main.rs x2）：放入音節序列，模擬使用者照正解選字。pieces＝每個音節的正解字。
-    /// 每次從第一個錯的音節開候選清單，選第一個（長詞在前）和正解相符的詞，清單裡沒有就停。
+    /// 每次從第一個錯的詞的開頭開候選清單，選第一個（長詞在前）和正解相符的詞，清單裡沒有就停。
     /// learn：送出（X2 照常學），否則清掉。回傳（選字前的第一名, 選了幾次）
     pub fn commit_target(
         &mut self,
@@ -888,12 +888,20 @@ impl ImeEngine {
                 n += pieces[p].chars().count();
                 p += 1;
             }
-            self.comp.set_cursor(p);
-            let Some(f) = self
-                .menu_items(false)
-                .into_iter()
-                .find(|f| f.word == pieces[p..p + f.len].concat())
-            else {
+            // 使用者把游標移到第一名裡那個錯的詞的開頭選詞；那裡選不到正解才從錯的字開始
+            let mut start = 0;
+            for b in &self.last[0].breakdown {
+                if start + b.reading.len() > p {
+                    break;
+                }
+                start += b.reading.len();
+            }
+            let Some(f) = [start, p].into_iter().find_map(|q| {
+                self.comp.set_cursor(q);
+                self.menu_items(false)
+                    .into_iter()
+                    .find(|f| f.word == pieces[q..q + f.len].concat())
+            }) else {
                 break;
             };
             self.select(f, false);
