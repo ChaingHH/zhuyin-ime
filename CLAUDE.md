@@ -76,7 +76,7 @@ PIME（架構、協定、生命週期、當機事故的細節與理由見 `docs/
 - 每則帶 seqNum 的請求（含 close）都要回同一個 seqNum：PIMELauncher（beta3 的 Rust 版）15 秒沒收到回應就殺掉後端重開（2026-10-21 不回 close，每關一個程式 15 秒後打字就斷掉）。
 - PIME 的 DLL 在 RPC 失敗（啟動器停了、2 秒沒回、後端死掉）時會讓所有用著它的程式當掉（Explorer 一秒一次），所以**絕不停 PIMELauncher**、後端每則請求都要很快回且不能在處理中結束。
 - `install.ps1` 用改名取代覆寫、不停 PIME、**不從 `backends.json` 拿掉其他後端**（2026-10-20 這樣做讓 Explorer 連續當機；「只留本專案」由 `run.ps1` 改使用者的鍵盤清單），`-Rollback` 換回 `zhuyin.prev\`。
-- 檢查：`debug-pime.ts` 會依 DLL 的讀法檢查每則回應的格式與時間；`ZHUYIN_DATA=<data> npx tsx debug-pime.ts zhuyin [N]` 先做行為檢查（含點圖示、右鍵選單、選字反白、表格展開、清單最後一項是注音、選字後游標、視窗外 ↑ 換字、只用左／右 Shift、半形／Ctrl 全形標點、使用紀錄）再打 N（預設 1500）句；隨機按鍵壓力測試 `ZHUYIN_DATA=data npx tsx debug-pime-fuzz.ts [按鍵數] [種子]`（stderr 有 panicked 就算失敗）。
+- 檢查：`debug-pime.ts` 會依 DLL 的讀法檢查每則回應的格式與時間；`ZHUYIN_DATA=<data> npx tsx debug-pime.ts zhuyin [N]` 先做行為檢查（含點圖示、右鍵選單、選字反白、表格展開、清單最後一項是注音、選字後游標、視窗外 ↑ 換字、只用左／右 Shift、半形／Ctrl 全形標點、組字中 Tab／F1–F12／Insert 先送出再放行、使用紀錄）再打 N（預設 1500）句；隨機按鍵壓力測試 `ZHUYIN_DATA=data npx tsx debug-pime-fuzz.ts [按鍵數] [種子]`（stderr 有 panicked 就算失敗）。
 - 安裝：使用者文件 `docs/PIME-INSTALL.md`；安裝檔與 `install.ps1` 在 `native/pime/`；使用者雙擊 `install.cmd`／`uninstall.cmd`／`rollback.cmd`（`run.ps1`：一般權限建置、只把 `install.ps1` 提權、記錄檔顯示結果），`build-setup.cmd` 用 Inno Setup 編單一 Setup.exe（`install.ps1 -From`）；`run.ps1 stage` 只組檔案不動系統，可拿來測（不要自己執行安裝）。
 
 和其他輸入法比較（數字見 `docs/PIME-NOTES.md` §2）：PIME 新酷音／小麥注音用 `npx tsx debug-pime.ts chewing|mcbopomofo [N]` 直接驅動 PIME 後端（模擬 TSF DLL 的 stdin/stdout 協定，不佔鍵盤；新酷音會學進 `%APPDATA%\PIME\chewing\chewing.sqlite3`，跑前先刪）。微軟注音只能走 GUI：`debug-ms-keys.ts` 產生大千 VK 序列，`debug-ime-bench.ps1 -Ime ms` 包住 `debug-ms-bopomofo.ps1`（SendInput 打進自己的 WinForms 文字框；要 IMM `ImmSetOpenStatus` 才會進中文模式、`timeBeginPeriod(1)` 才跑得快；前景被搶就中止；PIME 在這個文字框裡收不到按鍵），會佔用鍵盤，使用者不在電腦前才能跑。

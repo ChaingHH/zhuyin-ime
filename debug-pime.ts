@@ -71,6 +71,9 @@ const keyOf = (code: string): [number, number] => {
     ArrowLeft: [0x25, 0],
     ArrowRight: [0x27, 0],
     Tab: [0x09, 0x09],
+    F1: [0x70, 0],
+    F12: [0x7b, 0],
+    Insert: [0x2d, 0],
     Home: [0x24, 0],
     PageUp: [0x21, 0],
     ControlLeft: [0x11, 0],
@@ -748,6 +751,23 @@ async function smoke(): Promise<void> {
   );
   check(!(await press('KeyV', '\x16')).eaten, '沒在組字時 Ctrl+V 放行');
   keyStates[0x11] = 0;
+
+  // Tab（沒開選字視窗）、F1–F12、Insert：先送出組字，按鍵交給應用程式；開著選字視窗時 Tab 展開表格
+  for (const k of ['Tab', 'F1', 'F12', 'Insert']) {
+    for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+    const p = await press(k);
+    check(
+      p.last['return'] === false && p.out.length === 1 && p.last['compositionString'] === '',
+      `組字中 ${k}：先送出「${p.out}」，再交給應用程式`,
+    );
+    check(!(await press(k)).eaten, `沒在組字時 ${k} 放行`);
+  }
+  for (const c of ['KeyS', 'KeyU', 'Digit3']) await press(c);
+  await press('ArrowDown');
+  const tabMenu = await press('Tab');
+  check(tabMenu.eaten && tabMenu.out === '', '開著選字視窗時 Tab 不送出');
+  await press('Escape');
+  await press('Escape');
 }
 
 const init = await call({

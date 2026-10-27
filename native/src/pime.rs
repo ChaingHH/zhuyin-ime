@@ -1012,9 +1012,10 @@ impl Backend {
             Self::show(r, &st, cols);
             return true;
         }
-        // Ctrl／Alt 組合鍵（Ctrl+V 貼上、Ctrl+Z、Ctrl+S…）：先送出組字（同 Enter），按鍵交給應用程式。
+        // Ctrl／Alt 組合鍵（Ctrl+V 貼上、Ctrl+Z、Ctrl+S…）與 Tab（沒開選字視窗）、F1–F12、Insert：
+        // 先送出組字（同 Enter），按鍵交給應用程式。
         // DLL 先套用回應（commitString）再看 return，所以應用程式收到按鍵時字已經在文件裡
-        if k.ctrl_alt {
+        if k.ctrl_alt || matches!(k.vk, 0x2d | 0x70..=0x7b) || k.vk == 0x09 && !self.menu_open() {
             if let Some(e) = self.eng.as_mut().filter(|e| e.is_composing()) {
                 let text = e.commit(0);
                 self.dirty = true;
@@ -1023,7 +1024,7 @@ impl Backend {
             }
             return false;
         }
-        // 組字中的其他鍵（Tab、F1…）吃掉，不讓它插進組字中間
+        // 組字中其他沒對應的鍵（Pause…）吃掉，不讓它插進組字中間
         let Some(code) = k.code.as_deref() else {
             return true;
         };
@@ -1600,6 +1601,55 @@ mod tests {
         assert!(!be.gave_up());
         be.broken = Some(Instant::now() - RETRY);
         assert!(!be.gave_up());
+    }
+
+    /// filterKeyDown（攔下才送 onKeyDown）→ onKeyDown 的回應；回傳（最後一則回應, 是否攔下）
+    fn press(be: &mut Backend, vk: u32) -> (Value, bool) {
+        let ev = format!(r#""keyCode":{vk},"charCode":0,"keyStates":[]"#);
+        let f = respond(
+            be,
+            &format!(r#"c1|{{"method":"filterKeyDown","seqNum":1,{ev}}}"#),
+        )
+        .unwrap();
+        let f: Value = serde_json::from_str(f.split_once("c1|").unwrap().1).unwrap();
+        if f["return"] != json!(true) {
+            return (f, false);
+        }
+        let d = respond(
+            be,
+            &format!(r#"c1|{{"method":"onKeyDown","seqNum":2,{ev}}}"#),
+        )
+        .unwrap();
+        let d: Value = serde_json::from_str(d.split_once("c1|").unwrap().1).unwrap();
+        let eaten = d["return"] == json!(true);
+        (d, eaten)
+    }
+
+    #[test]
+    fn tab_fkeys_insert_commit_and_pass() {
+        let mut be = backend();
+        be.eng = Some(crate::testutil::engine(&[("ㄋㄧˇ", "你")]));
+        // Tab、F1、F12、Insert：送出組字後交給應用程式
+        for vk in [0x09, 0x70, 0x7b, 0x2d] {
+            for c in ['S', 'U', '3'] {
+                assert!(press(&mut be, c as u32).1);
+            }
+            let (r, eaten) = press(&mut be, vk);
+            assert!(!eaten, "vk {vk:#x} 要放行");
+            assert_eq!(r["commitString"], json!("你"), "vk {vk:#x}");
+            assert_eq!(r["compositionString"], json!(""));
+            assert!(!be.composing());
+            // 沒在組字時照樣放行
+            assert!(!press(&mut be, vk).1);
+        }
+        // 開著選字視窗時 Tab 是展開表格，不送出
+        for c in ['S', 'U', '3'] {
+            press(&mut be, c as u32);
+        }
+        press(&mut be, 0x28);
+        assert!(be.menu_open());
+        assert!(press(&mut be, 0x09).1);
+        assert!(be.composing());
     }
 
     #[test]

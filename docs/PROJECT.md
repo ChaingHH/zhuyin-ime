@@ -24,7 +24,7 @@
 | 層 | 名稱 | 實作位置 | 狀態 |
 |---|---|---|---|
 | L0 | 按鍵事件 | `native/src/pime.rs`（PIME 的 keyCode → `KeyboardEvent.code`） | 完成 |
-| L1 | 鍵盤映射 | `native/src/keymap.rs` | 完成（只有大千） |
+| L1 | 鍵盤映射 | `native/src/keymap.rs` | 完成（大千／倚天／許氏／IBM／倚天 26） |
 | L2 | 槽位組字 | `native/src/slots.rs` `CompositionBuffer` | 完成 |
 | L3 | 假設展開（運動／認知通道） | `native/src/l3.rs` `Channel` | 完成，只用合成錯誤評測過 |
 | L4 | 詞格 | `native/src/decode.rs` `span_cands` | 完成 |
@@ -127,7 +127,7 @@ Rust，相依只有 `indexmap`、`serde_json`。其他檔案：`lexicon.rs`（�
 
 **L1 鍵盤映射**（`keymap.rs`）
 
-- 只有大千排列 `DACHEN`。聲調鍵固定：Space=一聲、6=ˊ、3=ˇ、4=ˋ、7=˙。
+- `Layout`：大千（預設）／倚天／許氏／IBM／倚天 26，鍵位照 libchewing key_str；config `layout` 或右鍵選單切換。大千的聲調鍵：Space=一聲、6=ˊ、3=ˇ、4=ˋ、7=˙。
 - `syllable_to_key_codes`：音節 → 鍵碼序列。`keys` 指令與合成錯誤用它把音節變回鍵流。
 - `key_neighbors`：標準 ANSI 交錯鍵盤上中心距離 ≤ 1.3 的鍵。
 
@@ -347,7 +347,5 @@ L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與�
 ## 10. 已知限制與未做的部分
 
 - X1 領域先驗沒有實作。
-- 只有大千排列。
 - 所有程式共用一份組字狀態與中英模式（`pime.rs` 的 `ponytail:` 註記）：換到別的程式打字，前一個程式沒送出的組字會丟掉。
-- 組字中按 Tab（表格以外）、F1–F12、Insert 會被吃掉。
 - L3 的評測只有合成錯誤；使用紀錄能收真實資料，但預設關閉，也看不到送出後才在應用程式裡改的錯字。
