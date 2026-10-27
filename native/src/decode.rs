@@ -242,7 +242,7 @@ impl Decoder {
             a,
             gamma,
             beam: 200,
-            poly_penalty: 2.5,
+            poly_penalty: 1.0,
             poly_minor_penalty: 6.0,
             entry_cap: 48,
             alt_entry_cap: 8,

@@ -54,7 +54,17 @@ pub fn to_eval(text: &str, source: &str) -> String {
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
     {
-        let syl: Vec<&str> = r["syl"].as_str().unwrap_or("").split(' ').collect();
+        // 原樣的空白 token 在以空白連接的 syl 裡變成兩個空字串，還原成一個 " "
+        let mut syl: Vec<&str> = Vec::new();
+        let mut parts = r["syl"].as_str().unwrap_or("").split(' ');
+        while let Some(p) = parts.next() {
+            if p.is_empty() {
+                parts.next();
+                syl.push(" ");
+            } else {
+                syl.push(p);
+            }
+        }
         lines.push(json!({"text": r["out"], "syllables": syl}).to_string());
     }
     lines.join("\n") + "\n"
@@ -66,7 +76,7 @@ mod tests {
 
     const LOG: &str = r#"{"t":1,"syl":"ㄋㄧˇ ㄏㄠˇ","top1":"你好","out":"你好","picks":[],"l3":[],"bs":1,"keys":7}
 not json
-{"t":2,"syl":"ㄕˋ ㄐㄧㄢ","top1":"市間","out":"事件","picks":[{"pos":0,"len":2,"from":"市間","to":"事件"}],"l3":[["ㄕˋ","ㄕˋ"]],"bs":0,"keys":9}
+{"t":2,"syl":"ㄕˋ   ㄐㄧㄢ","top1":"市間","out":"事件","picks":[{"pos":0,"len":2,"from":"市間","to":"事件"}],"l3":[["ㄕˋ","ㄕˋ"]],"bs":0,"keys":9}
 "#;
 
     #[test]
@@ -97,7 +107,7 @@ not json
     fn to_eval_format() {
         assert_eq!(
             to_eval(LOG, "usage"),
-            "{\"source\":\"usage\"}\n{\"text\":\"你好\",\"syllables\":[\"ㄋㄧˇ\",\"ㄏㄠˇ\"]}\n{\"text\":\"事件\",\"syllables\":[\"ㄕˋ\",\"ㄐㄧㄢ\"]}\n"
+            "{\"source\":\"usage\"}\n{\"text\":\"你好\",\"syllables\":[\"ㄋㄧˇ\",\"ㄏㄠˇ\"]}\n{\"text\":\"事件\",\"syllables\":[\"ㄕˋ\",\" \",\"ㄐㄧㄢ\"]}\n"
         );
     }
 }
