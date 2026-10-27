@@ -203,6 +203,19 @@ PIME 三欄的量法相同：直接驅動後端，不含 TSF 開銷。
 
 後端這邊要守的規則（`debug-pime.ts` 會檢查）：每則請求都要在 2 秒內回（檢查器 1 秒就報錯），而且後端不能在處理請求時結束。
 
+## 4b. 事故：PIME 的 DLL 整個不見，完全打不出注音（2026-10-26，2026-10-27 查到）
+
+使用者回報「查詢常常打不出注音」。解碼器沒問題（重播 ㄔㄚˊㄒㄩㄣˊ 得到「查詢」）。查到的狀態（2026-10-27）：
+
+- `C:\Program Files (x86)\PIME\` 只剩 `PIMELauncher.exe`、`Uninstall.exe`、`backends.json*`、`version.txt`、`zhuyin\`、`zhuyin.prev\`。`x64\`、`x86\`（`PIMETextService.dll`）、`python\`、`node\`、`go-backend\` 都不見，`where /r C:\ PIMETextService.dll` 找不到。資料夾修改時間 10-26 11:41＝那次開機時間（10-26 11:02 意外關機，事件 41／6008）。
+- 登錄檔還在：`HKCR\CLSID\{35F67E9D-…}\InprocServer32` 指向 `x64\PIMETextService.dll`。所以鍵盤清單還有這個輸入法，但沒有程式載得到它，按鍵原樣放行。
+- `backend.log` 最後一次「啟動」是 10-26 09:24，`usage.jsonl` 最後寫入 10-26 10:46：重開機後啟動器一次也沒開過後端。
+- 推論（沒查證）：`Uninstall.exe` 的時間是 10-21 12:36，那時重裝過 PIME。用著的 DLL 刪不掉，NSIS 排到下次開機才刪；10-21 之後一直只登出沒重開機，10-26 意外重開時才執行。
+
+修正：使用者重新執行 PIME 的安裝檔（`PIME-2.0.0-beta3-setup.exe`，不用先解除安裝），再跑一次 `install.cmd`、登出再登入。`install.ps1` 現在找不到 DLL 就停下來說明（`Pime-Tip` 只看登錄檔，看不出來），`setup.iss` 在 DLL 不見時也會重裝 PIME。
+
+同時修掉的另一個問題（沒有證據是這次的原因）：別的 client 的 `onCompositionTerminated`／`onDeactivate`／`onKeyboardStatusChanged(false)` 會清掉 owner 打到一半的組字。PIME 的 DLL 一個程式一份、各自送這些事件，`pime.rs` 只有一份組字，現在只理 owner 送來的（測試 `other_client_keeps_composition`）。
+
 ## 5. 初次安裝（2026-10-17，已被取代）
 
 > **警告：不要照這一節做。** 第 4 步「結束 `PIMELauncher.exe`」會讓所有用著 PIME 的程式當掉（§4）。`install.ps1` 的參數與行為也已經改了（改名取代、`-Rollback`、不重複 `regsvr32`）。現在的安裝方式見 [PIME-INSTALL.md](PIME-INSTALL.md)。

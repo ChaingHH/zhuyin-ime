@@ -62,7 +62,8 @@ var
   S: AnsiString;
 begin
   Result := '';
-  if not FileExists(Backends()) then
+  { DLL 不見（PIME 重裝時排在重開機的刪除把 x64\ 刪掉）也重裝 PIME：backends.json 還在，只看它會跳過 }
+  if not FileExists(Backends()) or not FileExists(ExpandConstant('{commonpf32}\PIME\x64\PIMETextService.dll')) then
   begin
     ExtractTemporaryFile('{#PimeSetup}');
     if not Exec(ExpandConstant('{tmp}\{#PimeSetup}'), '/S', '', SW_SHOW, ewWaitUntilTerminated, Code)
