@@ -87,12 +87,20 @@ export class LexiconIndex {
         pairs.push({ key: r.join(' '), w, f: e.freq ?? 0 });
       }
     }
+    // 詞依 UTF-8 位元組排序（同 Rust 的 str 比較）：Rust find_word 載入後第一次要排序，
+    // 已排好的輸入只要 O(n)（未排序的 26 萬詞約 30ms，佔引擎載入的六成）
+    const enc = new TextEncoder();
+    const bytesOf = words.map((w) => enc.encode(w));
+    const order = words.map((_, i) => i).sort((a, b) => Buffer.compare(bytesOf[a]!, bytesOf[b]!));
+    const rank = new Uint32Array(words.length);
+    order.forEach((w, i) => (rank[w] = i));
+    const sorted = order.map((i) => words[i]!);
     pairs.sort((x, y) => y.f - x.f);
     const lists = new Map<string, number[]>();
     for (const p of pairs) {
       const l = lists.get(p.key);
-      if (l) l.push(p.w);
-      else lists.set(p.key, [p.w]);
+      if (l) l.push(rank[p.w]!);
+      else lists.set(p.key, [rank[p.w]!]);
     }
     const rd: number[] = [];
     const rdOff = new Uint32Array(lists.size + 1);
@@ -108,7 +116,7 @@ export class LexiconIndex {
     }
     return new LexiconIndex(
       syllables,
-      words,
+      sorted,
       Uint16Array.from(rd),
       rdOff,
       Uint32Array.from(wl),

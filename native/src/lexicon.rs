@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 pub struct Lexicon {
     syl_id: HashMap<String, u16>,
-    /// 所有詞串在一起；第 i 個詞是 text[woff[i]..woff[i+1]]
+    /// 所有詞以換行串在一起；第 i 個詞是 text[woff[i]..woff[i+1]-1]
     text: String,
     woff: Vec<u32>,
     rd: Vec<u16>,
@@ -85,14 +85,20 @@ impl Lexicon {
             .filter_map(|l| l.split_once('\t'))
             .map(|(w, r)| (w.to_string(), r.to_string()))
             .collect();
-        let mut text = String::new();
+        // 直接沿用 words 段（換行分隔），不逐詞複製
+        let text = std::str::from_utf8(seg("words")).unwrap().to_string();
         let mut woff = vec![0u32];
-        let mut poly = vec![];
-        for w in lines("words") {
-            text.push_str(w);
-            woff.push(text.len() as u32);
-            poly.push(w.chars().count() == 1 && poly_set.contains_key(w));
+        if !text.is_empty() {
+            woff.extend(text.match_indices('\n').map(|(i, _)| i as u32 + 1));
+            woff.push(text.len() as u32 + 1);
         }
+        let poly = woff
+            .windows(2)
+            .map(|o| {
+                let w = &text[o[0] as usize..o[1] as usize - 1];
+                w.len() <= 4 && w.chars().count() == 1 && poly_set.contains_key(w)
+            })
+            .collect();
         let rd: Vec<u16> = u16s("rd");
         let rd_off: Vec<u32> = u32s("rdOff");
         // 與 TS 相同的開放定址表（cap ≥ n/0.6 的 2 的冪）
@@ -141,7 +147,7 @@ impl Lexicon {
     pub fn word(&self, i: u32) -> &str {
         let i = i as usize;
         if i < self.base_count() {
-            &self.text[self.woff[i] as usize..self.woff[i + 1] as usize]
+            &self.text[self.woff[i] as usize..self.woff[i + 1] as usize - 1]
         } else {
             &self.added[i - self.base_count()]
         }
