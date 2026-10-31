@@ -8,7 +8,7 @@
 ; 第一次安裝寫一個 RunOnce：登出再登入時把「注音 (zhuyin-native)」加進鍵盤清單（install.ps1 -Keyboard add）。
 
 #define AppName "注音 (zhuyin-native) for PIME"
-#define AppVersion "1.0.4"
+#define AppVersion "1.0.5"
 ; build-setup.ps1 用 /DPimeSetup=<檔名> 傳進來（vendor\ 裡最新的 PIME 安裝檔）
 #ifndef PimeSetup
   #error 請用 build-setup.cmd 編（它會下載最新的 PIME 安裝檔並傳 /DPimeSetup）
