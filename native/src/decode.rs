@@ -63,6 +63,13 @@ pub struct Decoder {
     pub alt_entry_cap: usize,
     /// 單音節只在原讀音查無詞時才套用 L3 更正
     pub alt_single_only_if_empty: bool,
+    /// 解碼後的單字局部修正（refine）的門檻；None＝關。預設 0（2026-10-30：沒打錯 ±0.1、
+    /// 合成錯誤 +1.4／+1.4 句準）
+    pub refine_margin: Option<f64>,
+    /// refine 用的 L3 代價倍率（格裡的代價是為整格調的，單字修正可以另調）
+    pub refine_cost_scale: f64,
+    /// refine 扣掉的一元機率差權重（0＝不扣）
+    pub refine_uni: f64,
     /// X1 領域先驗：domain 裡的詞（DOMAIN_TECH）詞級 log 機率加這麼多；0＝關
     pub domain_bonus: f64,
     domain: std::collections::HashSet<&'static str>,
@@ -115,8 +122,11 @@ struct Cand {
 pub struct SpanCand {
     pub word: String,
     pub cost: f64,
+    /// 採用的讀音（L3 更正後）
+    pub reading: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct WordBreakdown {
     pub word: String,
     /// 採用的讀音（L3 更正後的意圖音節）
@@ -252,6 +262,9 @@ impl Decoder {
             entry_cap: 48,
             alt_entry_cap: 8,
             alt_single_only_if_empty: true,
+            refine_margin: Some(0.0),
+            refine_cost_scale: 1.0,
+            refine_uni: 0.0,
             domain_bonus: 2.0,
             domain: Default::default(),
             max_span,
@@ -440,30 +453,11 @@ impl Decoder {
                     for c in cands {
                         let name = words.name(c.word);
                         let name = if is_english(name) { EN_CLASS } else { name };
-                        let mut lp = if !self.runtime_words.is_empty()
-                            && self.runtime_words.contains(name)
-                            && !self.lm.knows_word(name)
-                        {
-                            self.parts_log_prob(name, w1s, w2s)
-                        } else {
-                            self.lm.word_log_prob(name, w1s, w2s)
-                        };
-                        if self.domain_bonus != 0.0 && self.domain.contains(name) {
-                            lp += self.domain_bonus;
-                        }
-                        // 破音字單字重罰：破音字幾乎不以單字存在
-                        if words.poly(c.word) {
-                            lp -= self.poly_penalty;
-                            // 次要讀音（將讀 ㄑㄧㄤ）再罰；在詞裡（將進酒）不罰
-                            let read = c
-                                .fix
-                                .as_ref()
-                                .map_or(seq[pos].as_str(), |(_, s)| s.as_str());
-                            if self.lex.poly_set.get(name).is_some_and(|m| m != read) {
-                                lp -= self.poly_minor_penalty;
-                            }
-                        }
-                        lpws.push(lp);
+                        let read = c
+                            .fix
+                            .as_ref()
+                            .map_or(seq[pos].as_str(), |(_, s)| s.as_str());
+                        lpws.push(self.word_lp(name, words.poly(c.word), read, w1s, w2s));
                         lpcs.push(if gamma == 0.0 {
                             0.0
                         } else {
@@ -608,7 +602,182 @@ impl Decoder {
                 },
             );
         }
+        let mut out = out;
+        if let Some(m) = self.refine_margin {
+            if let Some(r) = out.first().and_then(|t| self.refine(t, seq, o, m)) {
+                let t = r.text();
+                out.retain(|d| d.text() != t);
+                out.insert(0, r);
+                out.truncate(n_best);
+            }
+        }
         out
+    }
+
+    /// 詞級 log 機率（未乘 a）：LM（執行中加的詞走 parts_log_prob）＋X1＋破音單字罰分。
+    /// name 是 LM 看到的詞；read 是單字採用的讀音（判斷次要讀音）
+    fn word_lp(&self, name: &str, poly: bool, read: &str, w1: &str, w2: &str) -> f64 {
+        let mut lp = if !self.runtime_words.is_empty()
+            && self.runtime_words.contains(name)
+            && !self.lm.knows_word(name)
+        {
+            self.parts_log_prob(name, w1, w2)
+        } else {
+            self.lm.word_log_prob(name, w1, w2)
+        };
+        if self.domain_bonus != 0.0 && self.domain.contains(name) {
+            lp += self.domain_bonus;
+        }
+        // 破音字單字重罰：破音字幾乎不以單字存在
+        if poly {
+            lp -= self.poly_penalty;
+            // 次要讀音（將讀 ㄑㄧㄤ）再罰；在詞裡（將進酒）不罰
+            if self.lex.poly_set.get(name).is_some_and(|m| m != read) {
+                lp -= self.poly_minor_penalty;
+            }
+        }
+        lp
+    }
+
+    /// 一條拆解的整句分數（同格裡的算法，不含 L3 代價）：詞級＋字級＋X2＋句尾
+    fn path_score(&self, bd: &[WordBreakdown], o: &DecodeOptions) -> f64 {
+        let (a, gamma) = (self.a, self.gamma);
+        let (mut w1, mut w2) = (String::new(), String::new());
+        let (mut c1, mut c2) = (BOS, BOS);
+        let (mut pos, mut s) = (0, 0.0);
+        for b in bd {
+            let len = b.reading.len();
+            let name = if is_english(&b.word) {
+                EN_CLASS
+            } else {
+                b.word.as_str()
+            };
+            if name == UNK_WORD {
+                s += a * UNK_PENALTY;
+            } else {
+                let poly = name.chars().count() == 1 && self.lex.poly_set.contains_key(name);
+                s += a * self.word_lp(name, poly, &b.reading[0], &w1, &w2);
+                if gamma != 0.0 {
+                    s += gamma * self.lm.char_sequence_log_prob(name, (c1, c2));
+                }
+                s += o.modifier.map_or(0.0, |f| f(name, pos, len));
+            }
+            (c1, c2) = shift(c1, c2, name);
+            w1 = std::mem::replace(&mut w2, name.to_string());
+            pos += len;
+        }
+        s += a * self.lm.word_log_prob(EOS, &w1, &w2);
+        if gamma != 0.0 {
+            s += gamma * self.lm.char_sequence_log_prob(EOS, (c1, c2));
+        }
+        s
+    }
+
+    /// 把 top 第 pos 個音節換成單字 word（讀音 reading）後的整句 LM 分數（不含 X2、L3 代價）。
+    /// 蓋住 pos 的詞拆成前段／word／後段：同一個位置的候選都拆得一樣，只拿來互相比。
+    /// 位置落在原樣 token（英文）或字數與音節數不同的詞上回 None
+    pub fn context_score(&self, top: &DecodePath, pos: usize, word: &str, reading: &str) -> Option<f64> {
+        let mut bd = vec![];
+        let mut at = 0;
+        for b in &top.breakdown {
+            let len = b.reading.len();
+            if (at..at + len).contains(&pos) {
+                let chars: Vec<char> = b.word.chars().collect();
+                if chars.len() != len || is_literal(&b.reading[0]) {
+                    return None;
+                }
+                let k = pos - at;
+                if k > 0 {
+                    bd.push(WordBreakdown {
+                        word: chars[..k].iter().collect(),
+                        reading: b.reading[..k].to_vec(),
+                    });
+                }
+                bd.push(WordBreakdown {
+                    word: word.to_string(),
+                    reading: vec![reading.to_string()],
+                });
+                if k + 1 < len {
+                    bd.push(WordBreakdown {
+                        word: chars[k + 1..].iter().collect(),
+                        reading: b.reading[k + 1..].to_vec(),
+                    });
+                }
+            } else {
+                bd.push(b.clone());
+            }
+            at += len;
+        }
+        (pos < at).then(|| self.path_score(&bd, &DecodeOptions::default()))
+    }
+
+    /// 解碼後的單字局部修正：top 裡照原讀音打的單字（不在固定段），換成 L3 更正讀音的字，
+    /// 整句分數扣掉更正代價後多出 margin 以上才換，由左到右逐字貪婪。
+    /// 補 alt_single_only_if_empty 擋掉的「有字的音節打錯」（ㄇㄛˊ→ㄇㄟˊ：魔跳出→沒跳出），格不變。
+    /// ponytail: 只修第一名、不重新斷詞；第一名斷錯就救不回來
+    fn refine(
+        &self,
+        top: &DecodePath,
+        seq: &[String],
+        o: &DecodeOptions,
+        margin: f64,
+    ) -> Option<DecodePath> {
+        let alts = o.alternatives?;
+        let mut cur: Vec<WordBreakdown> = top.breakdown.clone();
+        let mut base = self.path_score(&cur, o);
+        let mut gain = 0.0;
+        let mut pos = 0;
+        for i in 0..cur.len() {
+            let len = cur[i].reading.len();
+            let ok = len == 1
+                && cur[i].reading[0] == seq[pos]
+                && cur[i].word != UNK_WORD
+                && !is_literal(&seq[pos])
+                && !o.fixed.iter().any(|f| f.pos <= pos && pos < f.pos + f.len);
+            if ok {
+                let orig = cur[i].clone();
+                let mut best: Option<(f64, f64, WordBreakdown)> = None;
+                for h in alts.get(pos).map_or(&[][..], |v| v) {
+                    if h.cost == 0.0 {
+                        continue;
+                    }
+                    let mut ids = vec![];
+                    self.lex
+                        .each(std::slice::from_ref(&h.syl), self.alt_entry_cap, |w| {
+                            ids.push(w)
+                        });
+                    for w in ids {
+                        cur[i] = WordBreakdown {
+                            word: self.lex.word(w).to_string(),
+                            reading: vec![h.syl.clone()],
+                        };
+                        // 扣掉換成常用字本身的好處（一元機率差 × refine_uni），只留上下文的貢獻
+                        let cost = h.cost * self.refine_cost_scale
+                            + self.refine_uni
+                                * self.a
+                                * (self.lm.word_unigram(&cur[i].word)
+                                    - self.lm.word_unigram(&orig.word));
+                        let d = self.path_score(&cur, o) - cost - base;
+                        if d > margin && best.as_ref().map_or(true, |b| d > b.0) {
+                            best = Some((d, cost, cur[i].clone()));
+                        }
+                    }
+                }
+                cur[i] = match best {
+                    Some((d, cost, b)) => {
+                        base += d + cost;
+                        gain += d;
+                        b
+                    }
+                    None => orig,
+                };
+            }
+            pos += len;
+        }
+        (gain > 0.0).then(|| DecodePath {
+            score: top.score + gain,
+            breakdown: cur,
+        })
     }
 
     /// span 候選再套固定段：與固定段重疊的 span 只有恰好等於該段的那個詞能走；None＝走不通
@@ -621,7 +790,7 @@ impl Decoder {
         words: &mut Words,
     ) -> Option<Vec<Cand>> {
         let alts = o.alternatives;
-        let cands = self.cands(seq, pos, len, alts, self.entry_cap, words);
+        let cands = self.cands(seq, pos, len, alts, self.entry_cap, false, words);
         let Some(f) = o
             .fixed
             .iter()
@@ -638,7 +807,8 @@ impl Decoder {
             .filter(|c| words.name(c.word) == f.word)
             .collect();
         if out.is_empty() {
-            out = self.cands(seq, pos, len, alts, usize::MAX, words);
+            // 選字視窗列的單音節更正字（span_cands）也要走得通
+            out = self.cands(seq, pos, len, alts, usize::MAX, true, words);
             out.retain(|c| words.name(c.word) == f.word);
         }
         // 選字清單最後一項「注音本身」：照原樣輸出那個音節（同原樣 token），不查詞典
@@ -652,7 +822,9 @@ impl Decoder {
         (!out.is_empty()).then_some(out)
     }
 
-    /// (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價（位置照第一次出現）
+    /// (起點, 長度) 的候選詞：原讀音 + 每詞最多一處 L3 更正。同詞取最低代價（位置照第一次出現）。
+    /// single_alts：不管 alt_single_only_if_empty，單音節一律展開（選字視窗與使用者選定的固定段用）
+    #[allow(clippy::too_many_arguments)]
     fn cands(
         &self,
         seq: &[String],
@@ -660,6 +832,7 @@ impl Decoder {
         len: usize,
         alts: Option<&[Vec<Hypothesis>]>,
         cap: usize,
+        single_alts: bool,
         words: &mut Words,
     ) -> Vec<Cand> {
         let obs = &seq[pos..pos + len];
@@ -699,7 +872,7 @@ impl Decoder {
         take(&mut best, obs, None, 0.0, cap);
         // 單音節更正只在觀察音節查無任何詞時才做（見 TS spanCands）
         if let Some(alts) = alts {
-            if !(len == 1 && self.alt_single_only_if_empty && !best.is_empty()) {
+            if single_alts || !(len == 1 && self.alt_single_only_if_empty && !best.is_empty()) {
                 let mut r = obs.to_vec();
                 for i in 0..len {
                     for h in alts.get(pos + i).map_or(&[][..], |v| v) {
@@ -728,11 +901,18 @@ impl Decoder {
             lex: &self.lex,
             extra: vec![],
         };
-        let cs = self.cands(seq, pos, len, alts, usize::MAX, &mut words);
+        let cs = self.cands(seq, pos, len, alts, usize::MAX, true, &mut words);
         cs.iter()
-            .map(|c| SpanCand {
-                word: words.name(c.word).to_string(),
-                cost: c.cost,
+            .map(|c| {
+                let mut reading = seq[pos..pos + len].to_vec();
+                if let Some((i, syl)) = &c.fix {
+                    reading[*i] = syl.clone();
+                }
+                SpanCand {
+                    word: words.name(c.word).to_string(),
+                    cost: c.cost,
+                    reading,
+                }
             })
             .collect()
     }
@@ -921,6 +1101,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("你", 3.0), ("擬", 3.0)]
         );
+    }
+
+    #[test]
+    fn refine_single_char() {
+        // ㄇㄛˊ 有字，格裡不做單音節更正；refine 解碼後才把 魔 換成 沒（X2 加成代替 LM 的上下文）
+        let mut d = decoder(&[("ㄇㄛˊ", "魔"), ("ㄇㄟˊ", "沒"), ("ㄊㄧㄠˋ", "跳")]);
+        d.refine_margin = None;
+        let h = |s: &str, cost: f64| Hypothesis {
+            syl: s.into(),
+            cost,
+        };
+        let alts = vec![
+            vec![h("ㄇㄛˊ", 0.0), h("ㄇㄟˊ", 3.0)],
+            vec![h("ㄊㄧㄠˋ", 0.0)],
+        ];
+        let m = |w: &str, _: usize, _: usize| if w == "沒" { 10.0 } else { 0.0 };
+        let o = DecodeOptions {
+            modifier: Some(&m),
+            alternatives: Some(&alts),
+            ..Default::default()
+        };
+        let seq = rd("ㄇㄛˊ ㄊㄧㄠˋ");
+        assert_eq!(d.decode(&seq, &o)[0].text(), "魔跳");
+        d.refine_margin = Some(0.0);
+        let p = d.decode(&seq, &o);
+        assert_eq!(p[0].text(), "沒跳");
+        assert_eq!(p[0].breakdown[0].reading, rd("ㄇㄟˊ"));
+        assert!(p.iter().filter(|x| x.text() == "沒跳").count() == 1);
+        // 贏不過門檻（10 − 3 < 8）就不換
+        d.refine_margin = Some(8.0);
+        assert_eq!(d.decode(&seq, &o)[0].text(), "魔跳");
+        // 選字視窗列出 沒（排在照打讀音的字後面），選了之後格走得通
+        let c = d.span_cands(&seq, 0, 1, Some(&alts));
+        assert_eq!(
+            c.iter().map(|c| c.word.as_str()).collect::<Vec<_>>(),
+            ["魔", "沒"]
+        );
+        let fixed = [FixedSpan {
+            pos: 0,
+            len: 1,
+            word: "沒".into(),
+        }];
+        let p = d.decode(
+            &seq,
+            &DecodeOptions {
+                alternatives: Some(&alts),
+                fixed: &fixed,
+                ..Default::default()
+            },
+        );
+        assert_eq!(p[0].text(), "沒跳");
+        assert_eq!(p[0].breakdown[0].reading, rd("ㄇㄟˊ"));
     }
 
     #[test]

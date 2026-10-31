@@ -6,12 +6,14 @@
 //!                                           ZHUYIN_NOISE＝key,cog 注入錯誤（noise.rs，例 0.03,0.03）；
 //!                                           ZHUYIN_EVAL＝評測檔（逗號分隔，取代預設三個；科技集 eval/tech.jsonl）；
 //!                                           ZHUYIN_DOMAIN＝X1 領域詞加分（預設 2，0＝不加）；
+//!                                           ZHUYIN_REFINE＝門檻（預設 0）或 off：L3 開時解碼後再做單字局部修正，ZHUYIN_REFINE_COST＝它的代價倍率（預設 1）；
 //!   zhuyin-native x2 [cell.jsonl]           X2 新詞／加強既有詞（eval/x2-new.jsonl、eval/x2-habit.jsonl）：照正解選字送出，
 //!                                           用 0／1／2 次後量 test 句的目標詞召回；附帶損害＝學完後 ZHUYIN_EVAL 各檔
 //!                                           （預設三個主評測集＋tech）逐句和沒學比；ZHUYIN_DOMAIN
 //!                                           ZHUYIN_L3=1 開 L3，或 ZHUYIN_L3_SCALE＝s（代價 × s，可加 ZHUYIN_L3_NASAL、ZHUYIN_L3_MAXALTS）；
 //!                                           ZHUYIN_INCR=1 逐音節比對增量解碼與全量解碼（不同就 panic），印每步延遲
 //!   zhuyin-native dump <out> [nBest] [l3]   同 debug-decode-dump.ts 的格式：`詞|詞\t分數[\t讀音]`
+//!   zhuyin-native menu | habit              實驗：選字視窗的更正字排法、學使用者的打錯習慣（exp.rs）
 //!   zhuyin-native keys <out>                L1/L2：評測句的大千按鍵 → 音節序列
 //!   zhuyin-native l3 <in> <out> <s>         L3：解碼 debug-native-parity.ts 倒出的有錯輸入
 //!   zhuyin-native replay <events> <out> [adapter-out]
@@ -28,6 +30,7 @@
 //! 資料目錄：ZHUYIN_DATA（預設 data），要有 models/lm.bo.bin、processed/lexicon.bin、processed/syllables.json。
 mod decode;
 mod engine;
+mod exp;
 mod keymap;
 mod l3;
 mod learned_web;
@@ -80,7 +83,7 @@ fn mem(label: &str) {
     );
 }
 
-struct Sample {
+pub(crate) struct Sample {
     text: String,
     syllables: Vec<String>,
     /// x2-new／x2-habit 才有：learn1／learn2／test、目標詞
@@ -422,6 +425,18 @@ fn main() {
             if let Some(v) = env("ZHUYIN_BEAM") {
                 dec.beam = v as usize;
             }
+            // ZHUYIN_REFINE＝門檻（預設 0）或 off：解碼後的單字局部修正（decode.rs refine，要配 L3）
+            match std::env::var("ZHUYIN_REFINE").as_deref() {
+                Ok("off") => dec.refine_margin = None,
+                Ok(v) => dec.refine_margin = Some(v.parse().unwrap()),
+                Err(_) => {}
+            }
+            if let Some(v) = env("ZHUYIN_REFINE_COST") {
+                dec.refine_cost_scale = v;
+            }
+            if let Some(v) = env("ZHUYIN_REFINE_UNI") {
+                dec.refine_uni = v;
+            }
             let n_best = env("ZHUYIN_NBEST").map_or(4, |v| v as usize);
             // ZHUYIN_L3_SCALE＝s：開 L3、代價＝初始值 × s（同 l3 指令）；ZHUYIN_L3：開 L3、預設代價
             let ch = match env("ZHUYIN_L3_SCALE") {
@@ -598,6 +613,8 @@ fn main() {
             }
             std::fs::write(&args[2], lines.join("\n")).unwrap();
         }
+        Some("menu") => exp::menu(&dec, &legal, &eval_samples()),
+        Some("habit") => exp::habit(&dec, &legal, &eval_samples()),
         Some("l3") => {
             // 每行一句有錯輸入（音節以空白分隔）→ 每行 top-1 的詞序與分數
             let input = std::fs::read_to_string(&args[2]).unwrap();

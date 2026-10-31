@@ -11,6 +11,91 @@ use std::collections::{HashMap, HashSet};
 
 const UNK: &str = "\u{25A1}";
 const MENU_PAGE: usize = 9;
+/// L3 更正字在選字視窗的排法（實驗用，見 main.rs `menu`）
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MenuRank {
+    /// 只照 L3 代價
+    Cost,
+    /// 代價 − 一元機率
+    Unigram,
+    /// 單字照整句上下文分數（Decoder::context_score − 代價），多字詞照 Unigram
+    Context,
+    /// Context，再把上下文最好的更正字提到第二個（代價 × 0.33 後贏過現在的字才提）
+    Promote,
+}
+
+/// 從 start 開始的候選詞：照打讀音的詞先列（長詞在前、同長度依詞頻），L3 更正讀音的詞排在最後。
+/// top：目前的解碼結果（Context／Promote 用；None 就退回 Unigram）
+pub fn menu_order(
+    dec: &Decoder,
+    seq: &[String],
+    start: usize,
+    alts: Option<&[Vec<Hypothesis>]>,
+    top: Option<&DecodePath>,
+    rank: MenuRank,
+) -> Vec<FixedSpan> {
+    let mut exact = vec![];
+    let mut corrected: Vec<(FixedSpan, f64)> = vec![];
+    for len in (1..=seq.len() - start).rev() {
+        for c in dec.span_cands(seq, start, len, alts) {
+            let f = FixedSpan {
+                pos: start,
+                len,
+                word: c.word,
+            };
+            if c.cost == 0.0 {
+                exact.push(f);
+                continue;
+            }
+            // 同代價的更正字很多（ㄇㄛˊ 有一百多個）：常用字在前，否則 沒 排到第十頁
+            let uni = c.cost - dec.a * dec.lm.word_unigram(&f.word);
+            let ctx = match (rank, top, len) {
+                (MenuRank::Context | MenuRank::Promote, Some(t), 1) => dec
+                    .context_score(t, start, &f.word, &c.reading[0])
+                    .map(|s| c.cost - s),
+                _ => None,
+            };
+            let key = match rank {
+                MenuRank::Cost => c.cost,
+                MenuRank::Unigram => uni,
+                // 有上下文分數的單字排在沒有的前面
+                MenuRank::Context | MenuRank::Promote => ctx.map_or(1e6 + uni, |k| k),
+            };
+            corrected.push((f, key));
+        }
+    }
+    corrected.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+    let promote = match (rank, top, corrected.first()) {
+        (MenuRank::Promote, Some(t), Some((f, _))) if f.len == 1 => {
+            // top 在 start 那個音節的字
+            let mut at = 0;
+            let mut cur = String::new();
+            for b in &t.breakdown {
+                if (at..at + b.reading.len()).contains(&start) {
+                    cur = b.word.chars().nth(start - at).map(String::from).unwrap_or_default();
+                }
+                at += b.reading.len();
+            }
+            let c = dec.span_cands(seq, start, 1, alts);
+            let c = c.iter().find(|c| c.word == f.word).unwrap();
+            match (
+                dec.context_score(t, start, &f.word, &c.reading[0]),
+                dec.context_score(t, start, &cur, &seq[start]),
+            ) {
+                (Some(a), Some(b)) => a - 0.33 * c.cost > b,
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    let mut rest = corrected.into_iter().map(|(f, _)| f);
+    if promote {
+        let first = rest.next().unwrap();
+        exact.insert(exact.len().min(1), first);
+    }
+    exact.extend(rest);
+    exact
+}
 /// 選了也不併進相鄰詞的單字（commit 規則 4；同 engine.ts STANDALONE）
 const STANDALONE: &str = "他她它牠祂你妳您我的地得在再那哪這是了著過也都就";
 /// 送出時自動存的使用者詞最多幾個字（規則 3、4；同 engine.ts USER_PHRASE_MAX）
@@ -190,6 +275,10 @@ pub struct ImeEngine {
     /// 這次組字按了幾個鍵、幾次退格（使用紀錄用）
     keys: usize,
     backspaces: usize,
+    /// 選字視窗裡 L3 更正字的排法（menu_order）；PIME 的實驗開關 menuPromote 換成 Promote
+    pub menu_rank: MenuRank,
+    /// 學打錯習慣（L3 Channel::learn）：送出時，選字選了 L3 更正讀音的字就記一次。PIME 的實驗開關 typoLearning
+    pub typo_learning: bool,
     /// 增量解碼的格（每打一個音節只補新的部分）；組字清空、學習開關時作廢
     lattice: RefCell<Lattice>,
     /// 這次組字的 X2 時間：整段固定，增量解碼重用的前綴才和全量相同（半衰期 14 天，差異可忽略）
@@ -210,6 +299,8 @@ impl ImeEngine {
             fixed: vec![],
             menu: None,
             page_size: MENU_PAGE,
+            menu_rank: MenuRank::Unigram,
+            typo_learning: false,
             usage: false,
             usage_lines: vec![],
             keys: 0,
@@ -303,34 +394,26 @@ impl ImeEngine {
         self.comp.cursor()
     }
 
-    /// 從游標開始的所有候選詞。with_reading：清單最後加上游標後那個音節的注音本身（微軟注音，同 TS）
-    fn menu_items(&self, with_reading: bool) -> Vec<FixedSpan> {
+    /// 選字的起點：游標後那個音節。游標在最後、或游標後是原樣 token（英文、標點、空格，沒有別的字可換）時，
+    /// 改換游標前最近的字（打完「你好，」按 ↓ 換「好」）；前面也沒有字＝None
+    fn menu_start(&self) -> Option<usize> {
         let seq = self.comp.sequence();
-        let start = self.cursor().min(seq.len() - 1);
-        // 原樣 token（英文、標點、空格）沒有別的字可換
-        if is_literal(&seq[start]) {
+        let c = self.cursor();
+        if c < seq.len() && !is_literal(&seq[c]) {
+            return Some(c);
+        }
+        (0..c.min(seq.len())).rev().find(|&i| !is_literal(&seq[i]))
+    }
+
+    /// 從選字起點（menu_start）開始的所有候選詞。with_reading：清單最後加上那個音節的注音本身（微軟注音，同 TS）
+    fn menu_items(&self, with_reading: bool) -> Vec<FixedSpan> {
+        let Some(start) = self.menu_start() else {
             return vec![];
-        }
+        };
+        let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
-        let mut exact = vec![];
-        let mut corrected: Vec<(FixedSpan, f64)> = vec![];
-        for len in (1..=seq.len() - start).rev() {
-            for c in self.decoder.span_cands(seq, start, len, alts.as_deref()) {
-                let f = FixedSpan {
-                    pos: start,
-                    len,
-                    word: c.word,
-                };
-                if c.cost == 0.0 {
-                    exact.push(f);
-                } else {
-                    corrected.push((f, c.cost));
-                }
-            }
-        }
-        // 照打讀音的詞先列（長詞在前、同長度依詞頻）；L3 更正讀音的詞依代價排在最後
-        corrected.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
-        exact.extend(corrected.into_iter().map(|(f, _)| f));
+        let top = self.last.first().filter(|_| self.last_seq == seq);
+        let mut exact = menu_order(&self.decoder, seq, start, alts.as_deref(), top, self.menu_rank);
         let syl = &seq[start];
         if with_reading && !is_literal(syl) {
             exact.push(FixedSpan {
@@ -361,7 +444,9 @@ impl ImeEngine {
         if items.is_empty() {
             return;
         }
-        let start = self.cursor().min(self.comp.sequence().len() - 1);
+        let Some(start) = self.menu_start() else {
+            return;
+        };
         let mut cur = None;
         let mut at = 0;
         for b in self.last.first().map_or(&[][..], |p| &p.breakdown[..]) {
@@ -717,6 +802,28 @@ impl ImeEngine {
                 self.usage_lines.push(line);
             }
         }
+        if let (Some(ch), Some(chosen), true) = (self.channel.as_mut(), chosen, self.typo_learning) {
+            // 送出的讀音都記（算比例用）；選字選了更正讀音的字才算一次打錯。
+            // ponytail: 只看選字，退格重打（打 ㄇㄛˊ、退掉改打 ㄇㄟˊ）沒記；要記得在 slots 比對退掉的音節
+            let seq = self.comp.sequence();
+            let mut at_pos = 0;
+            for b in &chosen.breakdown {
+                let picked = self
+                    .fixed
+                    .iter()
+                    .any(|f| f.pos == at_pos && f.word == b.word);
+                for (j, r) in b.reading.iter().enumerate() {
+                    if is_literal(r) {
+                        continue;
+                    }
+                    ch.observe(r);
+                    if picked && seq.get(at_pos + j).is_some_and(|o| o != r) {
+                        ch.learn(&seq[at_pos + j], r);
+                    }
+                }
+                at_pos += b.reading.len();
+            }
+        }
         if let (Some(adapter), Some(chosen)) = (self.adapter.as_mut().filter(|a| a.enabled), chosen)
         {
             // 選了注音本身（清單最後一項）的段落：和原樣字元一樣不學，免得注音變成使用者詞（同 TS）
@@ -1037,6 +1144,71 @@ mod tests {
         // 疊字旁刪字：在 0 刪了一個 a，相同前綴不超過編輯位置，所以作廢的是第一個 a
         let m = remapper(&rd("a a b"), &rd("a b"), 0);
         assert_eq!((m(0, 1), m(1, 1), m(2, 1)), (None, Some(0), Some(1)));
+    }
+
+    #[test]
+    fn menu_falls_back_to_char_before_literal() {
+        let mut e = engine(LEX);
+        type_syllables(&mut e, "ㄋㄧˇ ㄏㄠˇ");
+        e.on_punct("，");
+        // 游標在最後、最後是標點：↓ 換前一個字（好）
+        e.on_key("ArrowDown", None, false);
+        let m = e.menu.as_ref().expect("選字視窗");
+        assert!(m.items.iter().all(|f| f.pos == 1) && m.items.iter().any(|f| f.word == "號"));
+        e.on_key("Digit2", None, false);
+        assert_eq!(e.state(true).composition, "你號，");
+        // 選完游標在標點前，再按 ↓ 還是換「號」那一格；游標在第一個字前就換第一個字
+        e.on_key("ArrowDown", None, false);
+        assert!(e.menu.as_ref().unwrap().items.iter().all(|f| f.pos == 1));
+        e.on_key("Escape", None, false);
+        e.on_key("Home", None, false);
+        e.on_key("ArrowDown", None, false);
+        assert!(e.menu.as_ref().unwrap().items.iter().all(|f| f.pos == 0));
+        e.on_key("Escape", None, false);
+        // 只有標點時沒有字可換
+        e.clear();
+        type_syllables(&mut e, "ㄋㄧˇ");
+        e.on_punct("，");
+        e.on_key("Home", None, false);
+        e.on_key("ArrowRight", None, false);
+        e.on_key("ArrowRight", None, false);
+        e.on_key("ArrowDown", None, false);
+        assert!(e.menu.as_ref().unwrap().items.iter().all(|f| f.pos == 0));
+    }
+
+    #[test]
+    fn typo_learning_from_picks() {
+        let lex = &[("ㄇㄛˊ", "魔"), ("ㄇㄟˊ", "沒")];
+        let mut e = engine(lex);
+        e.channel = Some(Channel::new(
+            crate::testutil::legal(lex, &[]),
+            Default::default(),
+        ));
+        type_syllables(&mut e, "ㄇㄛˊ");
+        // 選字視窗有 沒（更正讀音）；關著時選了也不學
+        assert!(e.menu_items(false).iter().any(|f| f.word == "沒"));
+        let pick = |e: &mut ImeEngine| {
+            e.select(
+                FixedSpan {
+                    pos: 0,
+                    len: 1,
+                    word: "沒".into(),
+                },
+                false,
+            );
+            e.commit(0)
+        };
+        assert_eq!(pick(&mut e), "沒");
+        assert!(!e.channel.as_ref().unwrap().has_learned());
+        e.typo_learning = true;
+        type_syllables(&mut e, "ㄇㄛˊ");
+        assert_eq!(pick(&mut e), "沒");
+        let l = e.channel.as_ref().unwrap().learned_list();
+        assert_eq!((l[0].0.as_str(), l[0].1.as_str(), l[0].2), ("ㄛ", "ㄟ", 1.0));
+        // 沒選字（照打的讀音送出）只記出現次數
+        type_syllables(&mut e, "ㄇㄛˊ");
+        assert_eq!(e.commit(0), "魔");
+        assert_eq!(e.channel.as_ref().unwrap().learned_list()[0].2, 1.0);
     }
 
     #[test]

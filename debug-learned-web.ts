@@ -1,4 +1,4 @@
-// 學習資料頁的刪除（native/src/learned_web.rs、pime.rs delete_learned）端到端檢查：
+// 總控台（學習資料頁，native/src/learned_web.rs、pime.rs delete_learned／web_action）端到端檢查：
 // 開一個後端（暫存的 adapter.json、ZHUYIN_NO_OPEN 不開瀏覽器），打「狀態欄」選字學成使用者詞，
 // 從右鍵選單開學習資料頁，檢查安全限制（token、Host、Origin），刪掉這個詞，再打一次確認學習沒了、檔案也存了。
 //   ZHUYIN_DATA=data npx tsx debug-learned-web.ts
@@ -22,6 +22,7 @@ const child = spawn(
       ZHUYIN_CONFIG: join(dir, 'config.json'),
       ZHUYIN_LOG: 'off',
       ZHUYIN_NO_OPEN: '1',
+      ZHUYIN_SAVE_SECS: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   },
@@ -165,6 +166,56 @@ const usageFile = join(dir, 'usage.jsonl');
 check(existsSync(usageFile), '送出後寫出 usage.jsonl');
 check((await http('GET', url)).text.includes('"commits":1'), '頁面顯示使用紀錄統計');
 await http('POST', `${origin}/close?t=${token}`, { Origin: origin }); // 這次 GET 算一個頁面，關掉，下面的頁面數才對
+
+// 實驗性功能（總控台）：預設值、開關寫進 config.json、馬上生效
+const pageState = async () => {
+  const t = (await http('GET', url)).text;
+  await http('POST', `${origin}/close?t=${token}`, { Origin: origin });
+  return t;
+};
+const st0 = await pageState();
+check(
+  st0.includes('"experiments":{"l3":true,"refine":true,"menuPromote":false,"typoLearning":false}'),
+  '頁面有實驗性功能的狀態（預設 l3、refine 開）',
+);
+check(await actOk({ op: 'menuPromote', on: true }), '打開「選字視窗先列最可能的更正字」');
+check(await actOk({ op: 'typoLearning', on: true }), '打開「學我的打錯習慣」');
+const cfg = readFileSync(join(dir, 'config.json'), 'utf8');
+check(cfg.includes('"menuPromote": true') && cfg.includes('"typoLearning": true'), 'config.json 寫入實驗開關');
+// 魔跳出東西（ㄇㄛˊ 是打錯的 ㄇㄟˊ）：游標移到開頭、開選字視窗，沒 排在第二個；選它送出就學到 ㄛ→ㄟ
+const MO = ['ㄇㄛˊ', 'ㄊㄧㄠˋ', 'ㄔㄨ', 'ㄉㄨㄥ', 'ㄒㄧ'].flatMap((s) => syllableToKeyCodes(s));
+VK['Home'] = [0x24, 0];
+for (const c of MO) await press(c);
+await press('Home');
+const list = ((await press('ArrowDown'))['candidateList'] ?? []) as string[];
+check(list.indexOf('沒') === 1, `更正字「沒」提到第二個（${list.slice(0, 4).join(' ')}）`);
+await press('Digit2');
+const moOut = String((await press('Enter'))['commitString'] ?? '');
+check(moOut.startsWith('沒'), `選了「沒」送出（${moOut}）`);
+check((await pageState()).includes('"typos":[["ㄛ","ㄟ",1.0,false]]'), '頁面列出學到的 ㄛ→ㄟ（還不算習慣）');
+// 送出後隔 ZHUYIN_SAVE_SECS 存檔，學到的打錯習慣跟著 adapter.json 存
+await new Promise((r) => setTimeout(r, 1500));
+const typosFile = join(dir, 'typos.json');
+check(
+  existsSync(typosFile) && readFileSync(typosFile, 'utf8').includes('["ㄛ","ㄟ",1.0]'),
+  '學到的打錯習慣存進 typos.json',
+);
+check(await actOk({ op: 'clearTypos' }), '清除學到的打錯習慣');
+check(
+  (await pageState()).includes('"typos":[]') && !existsSync(typosFile),
+  '清除後沒有學到的打錯習慣、typos.json 刪掉',
+);
+check(await actOk({ op: 'l3', on: false }), '關掉打錯自動更正');
+await press('Home'); // 沒有組字：放行
+for (const c of MO) await press(c);
+await press('Home');
+const noL3 = ((await press('ArrowDown'))['candidateList'] ?? []) as string[];
+check(!noL3.includes('沒'), 'L3 關掉後選字視窗沒有更正字');
+await press('Digit1');
+await press('Enter');
+check(await actOk({ op: 'l3', on: true }), '打開打錯自動更正');
+for (const op of ['menuPromote', 'typoLearning']) await actOk({ op, on: false });
+
 check(await actOk({ op: 'clearAll' }), '全部清除');
 check(!existsSync(usageFile), '全部清除刪掉使用紀錄');
 check(!readFileSync(adapterFile, 'utf8').includes('"狀態欄"'), '全部清除後 adapter.json 沒有學到的詞');

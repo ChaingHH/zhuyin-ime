@@ -95,7 +95,7 @@ const ID_MODE: i64 = 1;
 /// 右鍵選單：左、右 Shift 各一個開關（打勾＝單按會切換中英）。id 4 是舊版的「左右都切換」，不再用
 const ID_SHIFT_LEFT: i64 = 2;
 const ID_SHIFT_RIGHT: i64 = 3;
-/// 右鍵選單：用瀏覽器開學習資料與使用紀錄的頁面（learned.html；開關與清除都在頁面上）
+/// 右鍵選單：用瀏覽器開總控台（learned.html：學習資料、使用紀錄、打錯更正與實驗性功能；開關與清除都在頁面上）
 const ID_SHOW_LEARNED: i64 = 5;
 // id 6 是舊版的「標點用半形」，不再用
 /// 右鍵選單「鍵盤排列」子選單：id ID_LAYOUT＋keymap::LAYOUTS 的索引（子選單本身用 ID_LAYOUT_MENU）
@@ -309,9 +309,28 @@ fn load(cfg: &Config) -> Result<(ImeEngine, bool), String> {
     }
     let mut eng = ImeEngine::new(dec, legal.clone(), adapter);
     if cfg.l3 {
-        eng.channel = Some(l3::Channel::new(legal, Default::default()));
+        eng.channel = Some(new_channel(cfg, legal));
     }
     Ok((eng, save_ok))
+}
+
+/// 學到的打錯習慣存在 adapter.json 旁的 typos.json（l3.rs learned_json）
+fn typos_file(cfg: &Config) -> Option<PathBuf> {
+    cfg.adapter_file
+        .as_ref()
+        .map(|f| f.with_file_name("typos.json"))
+}
+
+/// L3 通道，讀回學到的打錯習慣
+fn new_channel(cfg: &Config, legal: HashSet<String>) -> l3::Channel {
+    let mut ch = l3::Channel::new(legal, Default::default());
+    if let Some(v) = typos_file(cfg)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    {
+        ch.load_learned(&v);
+    }
+    ch
 }
 
 pub struct Backend {
@@ -347,6 +366,12 @@ pub struct Backend {
     usage: bool,
     /// 學習（X2，config.json 的 "learning"，預設開）：關掉時不學、已學到的也不用（ImeEngine::set_learning）
     learning: bool,
+    /// 實驗性功能（學習資料頁的「實驗性功能」開關，存在 config.json）：
+    /// refine＝解碼後的單字局部修正（預設開）、menuPromote＝選字視窗把上下文最好的更正字提到第二個（預設關）、
+    /// typoLearning＝學打錯習慣（預設關，學到的存 typos.json）。數字見 docs/MEMORY.md「有字的音節打錯」
+    refine: bool,
+    menu_promote: bool,
+    typo_learning: bool,
     /// 簡體輸出（config.json 的 "simplified"，預設關）：只轉回應裡的組字、候選、送出文字（t2s.rs）
     simplified: bool,
     /// 選字視窗是否展開成表格（→／Tab 展開、← 收回；視窗關掉就回到清單）
@@ -393,6 +418,9 @@ impl Backend {
             layout: Layout::Dachen,
             usage: false,
             learning: true,
+            refine: true,
+            menu_promote: false,
+            typo_learning: false,
             simplified: false,
             table: false,
             layout_key: false,
@@ -425,7 +453,8 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、learning、simplified、idleSecs（閒置幾秒卸載）、l3（下次載入生效）。
+    /// 讀 config.json：shiftToggle（"both"｜"left"｜"right"｜"none"，其他值當 both）、usageLog、learning、simplified、idleSecs（閒置幾秒卸載）、
+    /// l3、實驗性功能 refine／menuPromote／typoLearning（馬上套用，apply_experiments）。
     /// 檔案裡有的項目蓋過環境變數與預設；每次 onActivate 重讀，改了不用重開
     fn read_settings(&mut self) {
         let s = self.settings();
@@ -438,6 +467,14 @@ impl Backend {
             .unwrap_or_default();
         self.usage = s.get("usageLog").and_then(Value::as_bool).unwrap_or(false);
         self.learning = s.get("learning").and_then(Value::as_bool).unwrap_or(true);
+        let flag = |k: &str, d: bool| s.get(k).and_then(Value::as_bool).unwrap_or(d);
+        self.refine = flag("refine", true);
+        self.menu_promote = flag("menuPromote", false);
+        self.typo_learning = flag("typoLearning", false);
+        if let Some(l3) = s.get("l3").and_then(Value::as_bool) {
+            self.cfg.l3 = l3;
+        }
+        self.apply_experiments();
         self.simplified = s
             .get("simplified")
             .and_then(Value::as_bool)
@@ -454,9 +491,6 @@ impl Backend {
         if let Some(secs_v) = s.get("idleSecs").and_then(Value::as_f64) {
             self.cfg.idle = secs(secs_v, 300.0);
         }
-        if let Some(l3) = s.get("l3").and_then(Value::as_bool) {
-            self.cfg.l3 = l3;
-        }
         self.hot_update = s
             .get("hotUpdate")
             .and_then(Value::as_bool)
@@ -472,6 +506,39 @@ impl Backend {
                 .filter(|n| (6..=72).contains(n))
                 .unwrap_or(CAND_FONT_SIZE),
         );
+    }
+
+    /// 把 l3／實驗性功能的設定套到引擎（載入中才有事做）
+    fn apply_experiments(&mut self) {
+        let Some(e) = self.eng.as_mut() else {
+            return;
+        };
+        match (self.cfg.l3, e.channel.is_some()) {
+            (true, false) => {
+                let ch = new_channel(&self.cfg, crate::load_legal(&self.cfg.data));
+                e.channel = Some(ch.relayout(self.layout));
+            }
+            (false, true) => {
+                // 關 L3 前先存學到的打錯習慣
+                if let (Some(f), Some(ch)) = (typos_file(&self.cfg), e.channel.as_ref()) {
+                    if ch.has_learned() {
+                        write_atomic(&f, &ch.learned_json().to_string());
+                    }
+                }
+                e.channel = None;
+            }
+            _ => {}
+        }
+        e.decoder.refine_margin = self.refine.then_some(0.0);
+        e.menu_rank = if self.menu_promote {
+            crate::engine::MenuRank::Promote
+        } else {
+            crate::engine::MenuRank::Unigram
+        };
+        e.typo_learning = self.typo_learning;
+        if let Some(ch) = e.channel.as_mut() {
+            ch.set_use_learned(self.typo_learning);
+        }
     }
 
     fn menu_open(&self) -> bool {
@@ -559,12 +626,44 @@ impl Backend {
             "usage": self.usage,
             "usageBytes": log.as_ref().map_or(0, String::len),
             "usageSummary": log.as_deref().map(crate::usage::summary),
+            "experiments": {
+                "l3": self.cfg.l3,
+                "refine": self.refine,
+                "menuPromote": self.menu_promote,
+                "typoLearning": self.typo_learning,
+            },
+            "typos": self.typos().map(|v| {
+                v.into_iter()
+                    .map(|(a, b, n, on)| json!([a, b, n, on]))
+                    .collect::<Vec<_>>()
+            }),
         });
         // 嵌在 <script> 裡：拆開 "</" 才不會被當成 </script>
         LEARNED_HTML
             .replacen("/*DATA*/null", &data.replace("</", "<\\/"), 1)
             .replacen("/*STATE*/null", &state.to_string().replace("</", "<\\/"), 1)
             .replacen("/*TOKEN*/\"\"", &json!(token).to_string(), 1)
+    }
+
+    /// 學到的打錯習慣：引擎載入中用記憶體裡的，否則讀 typos.json
+    fn typos(&self) -> Option<Vec<(String, String, f64, bool)>> {
+        if let Some(ch) = self.eng.as_ref().and_then(|e| e.channel.as_ref()) {
+            return Some(ch.learned_list());
+        }
+        let s = std::fs::read_to_string(typos_file(&self.cfg)?).ok()?;
+        let mut ch = l3::Channel::new(HashSet::new(), Default::default());
+        ch.load_learned(&serde_json::from_str(&s).ok()?);
+        Some(ch.learned_list())
+    }
+
+    /// 清掉學到的打錯習慣（記憶體與 typos.json）
+    fn clear_typos(&mut self) {
+        if let Some(ch) = self.eng.as_mut().and_then(|e| e.channel.as_mut()) {
+            ch.clear_learned();
+        }
+        if let Some(f) = typos_file(&self.cfg) {
+            let _ = std::fs::remove_file(f);
+        }
     }
 
     /// 學習資料頁的刪除（learned_web 的 POST /delete）。引擎載入中就改記憶體裡的資料、從解碼器拿掉詞、馬上存檔；
@@ -636,9 +735,22 @@ impl Backend {
                 self.write_setting("usageLog", json!(on));
             }
             ("clearUsage", _) => self.clear_usage(),
+            // 實驗性功能與 L3：馬上套用（apply_experiments）、寫進 config.json
+            (op @ ("l3" | "refine" | "menuPromote" | "typoLearning"), Some(on)) => {
+                match op {
+                    "l3" => self.cfg.l3 = on,
+                    "refine" => self.refine = on,
+                    "menuPromote" => self.menu_promote = on,
+                    _ => self.typo_learning = on,
+                }
+                self.apply_experiments();
+                self.write_setting(op, json!(on));
+            }
+            ("clearTypos", _) => self.clear_typos(),
             // 全部清除：使用紀錄、學習資料（換成空的；讀不懂的舊檔也蓋掉）、唯讀快照 learned.html
             ("clearAll", _) => {
                 self.clear_usage();
+                self.clear_typos();
                 let Some(f) = self.cfg.adapter_file.clone() else {
                     return false;
                 };
@@ -816,6 +928,7 @@ impl Backend {
                     }
                     self.eng = Some(eng);
                     self.save_ok = save_ok;
+                    self.apply_experiments();
                     eprintln!("[pime] 載入引擎 {:?}", t.elapsed());
                 }
                 Ok(Err(e)) => {
@@ -863,6 +976,15 @@ impl Backend {
     }
 
     fn save_adapter(&self) {
+        // 學到的打錯習慣跟著存（有資料才寫，沒開過的人不多一個檔）
+        if let (Some(f), Some(ch)) = (
+            typos_file(&self.cfg),
+            self.eng.as_ref().and_then(|e| e.channel.as_ref()),
+        ) {
+            if ch.has_learned() {
+                write_atomic(&f, &ch.learned_json().to_string());
+            }
+        }
         let (Some(f), Some(a)) = (
             self.cfg.adapter_file.as_ref().filter(|_| self.save_ok),
             self.eng.as_ref().and_then(|e| e.adapter.as_ref()),
@@ -1284,7 +1406,7 @@ impl Backend {
                 r.insert(
                     "return".into(),
                     json!([
-                        {"id": ID_SHOW_LEARNED, "text": "學習資料與使用紀錄…"},
+                        {"id": ID_SHOW_LEARNED, "text": "總控台（學習資料、實驗功能）…"},
                         {"id": 0, "text": ""},
                         {"id": ID_SHIFT_LEFT, "text": "左 Shift 切換中英", "checked": l},
                         {"id": ID_SHIFT_RIGHT, "text": "右 Shift 切換中英", "checked": r2},

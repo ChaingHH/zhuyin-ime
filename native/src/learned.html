@@ -1,13 +1,13 @@
 <!doctype html>
-<!-- 右鍵選單「學習資料與使用紀錄」開的頁面（pime.rs show_learned）。後端把學習資料換進下面的 DATA、
+<!-- 右鍵選單「總控台」開的頁面（學習資料、使用紀錄、打錯更正與實驗性功能）（pime.rs show_learned）。後端把學習資料換進下面的 DATA、
      開關狀態與使用紀錄統計換進 STATE、本機網頁服務的 token 換進 TOKEN（learned_web.rs）；
-     刪除送 POST /delete，開關與清除送 POST /action。
+     刪除送 POST /delete，開關與清除送 POST /action（實驗性功能的 op 就是 config.json 的鍵）。
      服務開不起來時是唯讀的檔案版（TOKEN 是空字串，不顯示刪除鈕）。 -->
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>學習資料與使用紀錄</title>
+<title>注音總控台</title>
 <style>
   :root {
     --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4; --card: #fff; --accent: #2563eb; --bar: #dbeafe;
@@ -51,7 +51,7 @@
   .card h2 { font-size: 16px; margin: 0 0 6px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .card p { margin: 4px 0; color: var(--muted); font-size: 13px; }
   .card ol { margin: 6px 0 0; padding-left: 20px; font-size: 14px; }
-  label.sw { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: normal; cursor: pointer; }
+  label.sw { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: normal; cursor: pointer; flex-shrink: 0; white-space: nowrap; }
   label.sw input { width: 18px; height: 18px; accent-color: var(--accent); }
   button.danger { font: inherit; font-size: 13px; border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 4px 12px; border-radius: 5px; cursor: pointer; }
   button.danger:hover { border-color: #dc2626; color: #dc2626; }
@@ -61,7 +61,7 @@
 </head>
 <body>
 <main>
-  <h1>學習資料與使用紀錄</h1>
+  <h1>注音總控台</h1>
   <p class="sub" id="sub"></p>
   <div class="cards">
     <section class="card">
@@ -75,7 +75,10 @@
       <div id="usageInfo"></div>
     </section>
   </div>
-  <div class="clearall"><button class="danger" id="clearAll">全部清除</button><span>刪掉學習資料和使用紀錄（只存在這台電腦，不會上傳）</span></div>
+  <h2 class="sec">打錯更正與實驗性功能</h2>
+  <p class="hint">改了馬上生效，存在 config.json。標「實驗」的還在試，數字是合成錯誤的評測，不是真的打字資料。</p>
+  <div class="cards" id="exp"></div>
+  <div class="clearall"><button class="danger" id="clearAll">全部清除</button><span>刪掉學習資料、使用紀錄和學到的打錯習慣（只存在這台電腦，不會上傳）</span></div>
   <h2 class="sec">學到的字詞</h2>
   <div class="stats" id="stats"></div>
   <div class="bar">
@@ -275,12 +278,76 @@ document.getElementById('usageInfo').addEventListener('click', async (e) => {
     toast(`刪除失敗：${err.message}`);
   }
 });
+// 打錯更正（L3）與實驗性功能：後端 web_action 的 op 就是 config.json 的鍵
+const EXP = [
+  { op: 'l3', name: '打錯自動更正', tag: '',
+    desc: '打到相鄰的鍵、模糊音（ㄣㄥ、ㄓㄗ…）、聲調打錯時，照前後文猜你要打的字。下面三項都要它開著。' },
+  { op: 'refine', name: '單字打錯換回來', tag: '實驗',
+    desc: '打錯成另一個字（魔跳出東西 → 沒跳出東西）時，解碼後看前後文換回來；只在很有把握時才換。',
+    num: '評測：沒打錯的句子 ±0.1，有打錯的句子多對 1.4%。' },
+  { op: 'menuPromote', name: '選字視窗先列最可能的更正字', tag: '實驗',
+    desc: '打錯的字常在選字視窗好幾頁之後。開了以後，照前後文最可能的那個更正字排到第二個。',
+    num: '評測：打錯的字出現在前 3 個從 6.5% 升到 30%；沒打錯時正確的字掉出前 3 個的機會多 0.4%。' },
+  { op: 'typoLearning', name: '學我的打錯習慣', tag: '實驗',
+    desc: '從選字視窗選了更正讀音的字，就記下「打成 A、其實要 B」。同一種錯占那個注音 5% 以上才算習慣，之後更正這種錯比較積極。',
+    num: '模擬：有固定習慣的人從 41.9% 升到 66.0%（學 50 句後）；隨機手滑的人不受影響。' },
+];
+const ex = st.experiments || {};
+function typosHtml() {
+  const t = st.typos || [];
+  if (!t.length) return '<p>還沒有學到。</p>';
+  const rows = t.slice(0, 50).map(([a, b, n, on]) =>
+    `<li>打成 ${esc(a)}、其實要 ${esc(b)}：${n} 次${on ? '（已算習慣）' : ''}</li>`).join('');
+  return `<ol>${rows}</ol>` + (TOKEN ? '<p><button class="danger" id="clearTypos">清除學到的打錯習慣</button></p>' : '');
+}
+document.getElementById('exp').innerHTML = EXP.map((e) => `
+  <section class="card">
+    <h2>${e.name}${e.tag ? `（${e.tag}）` : ''} <label class="sw"><input type="checkbox" data-op="${e.op}"> 開啟</label></h2>
+    <p>${e.desc}</p>${e.num ? `<p>${e.num}</p>` : ''}
+    ${e.op === 'typoLearning' ? '<div id="typos"></div>' : ''}
+  </section>`).join('');
+document.getElementById('typos').innerHTML = typosHtml();
+const expBoxes = [...document.querySelectorAll('#exp input[data-op]')];
+function syncExp() {
+  for (const b of expBoxes) {
+    b.checked = !!ex[b.dataset.op];
+    b.disabled = !TOKEN || (b.dataset.op !== 'l3' && !ex.l3);
+  }
+}
+syncExp();
+for (const b of expBoxes) {
+  b.onchange = async () => {
+    const name = EXP.find((e) => e.op === b.dataset.op).name;
+    try {
+      await action({ op: b.dataset.op, on: b.checked });
+      ex[b.dataset.op] = b.checked;
+      syncExp();
+      toast(`${name}已${b.checked ? '開啟' : '關閉'}`);
+    } catch (e) {
+      b.checked = !b.checked;
+      toast(`沒有改成：${e.message}（輸入法可能重開過，從右鍵選單再開一次）`);
+    }
+  };
+}
+document.getElementById('typos').addEventListener('click', async (e) => {
+  if (e.target.id !== 'clearTypos' || !confirm('清除學到的打錯習慣？')) return;
+  try {
+    await action({ op: 'clearTypos' });
+    st.typos = [];
+    document.getElementById('typos').innerHTML = typosHtml();
+    toast('已清除學到的打錯習慣');
+  } catch (err) {
+    toast(`清除失敗：${err.message}`);
+  }
+});
 document.getElementById('clearAll').onclick = async () => {
   if (!confirm('刪掉所有學習資料和使用紀錄？刪了就不能復原。')) return;
   try {
     await action({ op: 'clearAll' });
     for (const t of TABS) t.rows.splice(0);
     st.usageSummary = null;
+    st.typos = [];
+    document.getElementById('typos').innerHTML = typosHtml();
     usageInfo();
     document.getElementById('stats').innerHTML = TABS.map(
       (t) => `<div class="stat"><b>${t.rows.length}</b><span>${t.name}</span></div>`,
