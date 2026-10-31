@@ -59,7 +59,7 @@ pub fn menu_order(
                 MenuRank::Cost => c.cost,
                 MenuRank::Unigram => uni,
                 // 有上下文分數的單字排在沒有的前面
-                MenuRank::Context | MenuRank::Promote => ctx.map_or(1e6 + uni, |k| k),
+                MenuRank::Context | MenuRank::Promote => ctx.unwrap_or(1e6 + uni),
             };
             corrected.push((f, key));
         }
@@ -72,7 +72,12 @@ pub fn menu_order(
             let mut cur = String::new();
             for b in &t.breakdown {
                 if (at..at + b.reading.len()).contains(&start) {
-                    cur = b.word.chars().nth(start - at).map(String::from).unwrap_or_default();
+                    cur = b
+                        .word
+                        .chars()
+                        .nth(start - at)
+                        .map(String::from)
+                        .unwrap_or_default();
                 }
                 at += b.reading.len();
             }
@@ -413,7 +418,14 @@ impl ImeEngine {
         let seq = self.comp.sequence();
         let alts = self.alternatives(seq);
         let top = self.last.first().filter(|_| self.last_seq == seq);
-        let mut exact = menu_order(&self.decoder, seq, start, alts.as_deref(), top, self.menu_rank);
+        let mut exact = menu_order(
+            &self.decoder,
+            seq,
+            start,
+            alts.as_deref(),
+            top,
+            self.menu_rank,
+        );
         let syl = &seq[start];
         if with_reading && !is_literal(syl) {
             exact.push(FixedSpan {
@@ -802,7 +814,8 @@ impl ImeEngine {
                 self.usage_lines.push(line);
             }
         }
-        if let (Some(ch), Some(chosen), true) = (self.channel.as_mut(), chosen, self.typo_learning) {
+        if let (Some(ch), Some(chosen), true) = (self.channel.as_mut(), chosen, self.typo_learning)
+        {
             // 送出的讀音都記（算比例用）；選字選了更正讀音的字才算一次打錯。
             // ponytail: 只看選字，退格重打（打 ㄇㄛˊ、退掉改打 ㄇㄟˊ）沒記；要記得在 slots 比對退掉的音節
             let seq = self.comp.sequence();
@@ -1204,7 +1217,10 @@ mod tests {
         type_syllables(&mut e, "ㄇㄛˊ");
         assert_eq!(pick(&mut e), "沒");
         let l = e.channel.as_ref().unwrap().learned_list();
-        assert_eq!((l[0].0.as_str(), l[0].1.as_str(), l[0].2), ("ㄛ", "ㄟ", 1.0));
+        assert_eq!(
+            (l[0].0.as_str(), l[0].1.as_str(), l[0].2),
+            ("ㄛ", "ㄟ", 1.0)
+        );
         // 沒選字（照打的讀音送出）只記出現次數
         type_syllables(&mut e, "ㄇㄛˊ");
         assert_eq!(e.commit(0), "魔");

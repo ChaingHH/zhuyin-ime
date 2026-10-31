@@ -676,7 +676,13 @@ impl Decoder {
     /// 把 top 第 pos 個音節換成單字 word（讀音 reading）後的整句 LM 分數（不含 X2、L3 代價）。
     /// 蓋住 pos 的詞拆成前段／word／後段：同一個位置的候選都拆得一樣，只拿來互相比。
     /// 位置落在原樣 token（英文）或字數與音節數不同的詞上回 None
-    pub fn context_score(&self, top: &DecodePath, pos: usize, word: &str, reading: &str) -> Option<f64> {
+    pub fn context_score(
+        &self,
+        top: &DecodePath,
+        pos: usize,
+        word: &str,
+        reading: &str,
+    ) -> Option<f64> {
         let mut bd = vec![];
         let mut at = 0;
         for b in &top.breakdown {
@@ -758,7 +764,7 @@ impl Decoder {
                                 * (self.lm.word_unigram(&cur[i].word)
                                     - self.lm.word_unigram(&orig.word));
                         let d = self.path_score(&cur, o) - cost - base;
-                        if d > margin && best.as_ref().map_or(true, |b| d > b.0) {
+                        if d > margin && best.as_ref().is_none_or(|b| d > b.0) {
                             best = Some((d, cost, cur[i].clone()));
                         }
                     }
@@ -774,7 +780,7 @@ impl Decoder {
             }
             pos += len;
         }
-        (gain > 0.0).then(|| DecodePath {
+        (gain > 0.0).then_some(DecodePath {
             score: top.score + gain,
             breakdown: cur,
         })

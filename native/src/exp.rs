@@ -89,7 +89,10 @@ pub fn menu(dec: &Decoder, legal: &HashSet<String>, samples: &[crate::Sample]) {
             }
         }
     }
-    for (k, title) in ["有錯輸入、打錯的音節", "沒錯輸入、選錯的字"].iter().enumerate() {
+    for (k, title) in ["有錯輸入、打錯的音節", "沒錯輸入、選錯的字"]
+        .iter()
+        .enumerate()
+    {
         println!("{title}");
         for (r, rank) in ranks.iter().enumerate() {
             println!("  {:<8} {}", format!("{rank:?}"), st[k][r].line());
@@ -100,7 +103,12 @@ pub fn menu(dec: &Decoder, legal: &HashSet<String>, samples: &[crate::Sample]) {
 /// 想打的 → 打成的。p＝每個符合的音節打錯的機率
 const HABITS: [(&str, &str); 3] = [("ㄟ", "ㄛ"), ("ㄓ", "ㄗ"), ("ˇ", "ˋ")];
 
-fn with_habit(syls: &[String], legal: &HashSet<String>, p: f64, rng: &mut noise::Rng) -> Vec<String> {
+fn with_habit(
+    syls: &[String],
+    legal: &HashSet<String>,
+    p: f64,
+    rng: &mut noise::Rng,
+) -> Vec<String> {
     syls.iter()
         .map(|s| {
             for (a, b) in HABITS {

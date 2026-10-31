@@ -484,7 +484,10 @@ mod tests {
         assert_eq!(cost(&c.expand("ㄇㄛˊ"), "ㄇㄟˊ"), Some(3.5));
         c.observe("ㄇㄟˊ");
         assert_eq!(cost(&c.expand("ㄇㄛˊ"), "ㄇㄟˊ"), Some(18.0));
-        assert_eq!(c.learned_list()[0], ("ㄛ".into(), "ㄟ".into(), 101.0, false));
+        assert_eq!(
+            c.learned_list()[0],
+            ("ㄛ".into(), "ㄟ".into(), 101.0, false)
+        );
         // 存檔再讀回來一樣；use_learned 關掉就照原本的代價
         let mut d = channel(&["ㄇㄛˊ", "ㄇㄟˊ", "ㄇㄚˋ"], Default::default());
         d.load_learned(&c.learned_json());

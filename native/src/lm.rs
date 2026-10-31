@@ -214,7 +214,11 @@ impl BackoffLm {
     /// 詞的一元 log 機率（不看上下文）；沒存回 unseen
     pub fn word_unigram(&self, w: &str) -> f64 {
         let p = self.word.uni.found(hash1(w), 0);
-        if p != 0.0 { p } else { self.word.unseen }
+        if p != 0.0 {
+            p
+        } else {
+            self.word.unseen
+        }
     }
 
     /// 詞一元表裡有這個詞（TS BackoffLM.knowsWord）
