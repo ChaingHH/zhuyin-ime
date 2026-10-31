@@ -61,6 +61,33 @@ Setup.exe 做的事：
 
 沒有用 MSI：MSI 的元件模型和修復、回復機制，不適合「改 PIME 的 `backends.json`、執行 `regsvr32`」這種安裝；WiX 也比較重。
 
+## 發新版
+
+在 `master` 上做，要先裝好 Inno Setup 6 和 `gh`（GitHub CLI，已登入）。下面用 1.0.5 當例子。
+
+1. 檢查。CI（`.github/workflows/ci.yml`）跑的就是這幾項，有一項不過 CI 就是紅的：
+   ```bash
+   cd native && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+   ```
+   改過 PIME 行為時，再跑 `debug-pime.ts zhuyin` 和 `debug-pime-fuzz.ts`（CLAUDE.md「檢查」）。
+2. 改版本號，這 5 個地方要一樣：
+   - `native/Cargo.toml` 的 `version`（建置時 `Cargo.lock` 會跟著改）
+   - `native/pime/ime.json` 的 `version`
+   - `native/pime/setup.iss` 的 `AppVersion`
+   - `package.json`、`package-lock.json`：`npm version 1.0.5 --no-git-tag-version`
+3. `CHANGELOG.md`：把「未發布」改成「v1.0.5（日期）」。內容寫給使用者看：寫打字時有什麼不同，不寫函式名稱。
+4. 雙擊 `native\pime\build-setup.cmd`，編出 `native\pime\dist\zhuyin-native-setup.exe`（見上一節）。
+5. commit、打 tag、推上去：
+   ```bash
+   git commit -am "Release v1.0.5" && git tag v1.0.5 && git push origin master v1.0.5
+   ```
+6. 開 Release。說明用 CHANGELOG 的 v1.0.5 那一節，附上 Setup.exe：
+   ```bash
+   awk '/^## v1.0.5/{f=1;next} /^## v/{f=0} f' CHANGELOG.md > notes.md
+   gh release create v1.0.5 --title v1.0.5 --notes-file notes.md native/pime/dist/zhuyin-native-setup.exe
+   ```
+7. 確認 Release 頁有 `zhuyin-native-setup.exe`，CI 是綠的（`gh run list --limit 1`）。
+
 ## 會改到什麼
 
 - `C:\Program Files (x86)\PIME\backends.json` 多一筆 `zhuyin` 後端（先備份成 `backends.json.bak`）。
@@ -231,7 +258,7 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 
 ## 設定
 
-設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 開關、鍵盤排列與簡體輸出開關、學習資料頁的兩個開關也是寫進這個檔。
+設定檔在 `%APPDATA%\PIME\zhuyin\config.json`（沒有就用預設）。每次切到這個輸入法時重讀，改完不用重開。右鍵選單的 Shift 開關、鍵盤排列與簡體輸出開關、總控台的兩個開關也是寫進這個檔。
 
 ```json
 {
@@ -248,8 +275,8 @@ powershell -ExecutionPolicy Bypass -File C:\Users\q2927\Desktop\vscode\type\nati
 |---|---|---|
 | `shiftToggle` | `"both"` | 哪一邊的 Shift 單按會切換中英：`"both"` 兩邊、`"left"` 只有左邊、`"right"` 只有右邊、`"none"` 都不切換（用左鍵點圖示切換）。關掉的那邊單按不做事；其他值當 `"both"` |
 | `layout` | `"dachen"` | 鍵盤排列：`"dachen"` 大千、`"eten"` 倚天（41 鍵）、`"hsu"` 許氏、`"ibm"` IBM、`"eten26"` 倚天 26 鍵。鍵位照新酷音（libchewing）。許氏、倚天 26 鍵一鍵多音：同一個音節裡依前面打的符號判斷（例如許氏的 J 開頭是 ㄐ，後面接 ㄨ 或韻母就換成 ㄓ；已有符號時 S D F J 是聲調鍵），規則同新酷音，所以 ㄟ、ㄝˋ 這類單韻母音節有幾個打不出來。右鍵選單「鍵盤排列」切換；沒寫或其他值當大千 |
-| `learning` | `true` | `false`：關掉學習。不學新的，已學到的也暫停使用（資料保留）。學習資料頁的「學習」開關切換 |
-| `usageLog` | `false` | `true`：記錄使用情形。學習資料頁的「使用紀錄」開關切換 |
+| `learning` | `true` | `false`：關掉學習。不學新的，已學到的也暫停使用（資料保留）。總控台的「學習」開關切換 |
+| `usageLog` | `false` | `true`：記錄使用情形。總控台的「使用紀錄」開關切換 |
 | `simplified` | `false` | `true`：簡體輸出（組字區、候選、送出的字轉成簡體；轉換表是 OpenCC 的 TSPhrases＋TSCharacters，詞組優先）。學習資料與使用紀錄仍存繁體。Ctrl+Shift+F 或右鍵選單「簡體輸出」切換 |
 | `idleSecs` | 300 | 閒置幾秒卸載模型 |
 | `l3` | `true` | `false` 關閉打錯／模糊音更正。總控台的「打錯自動更正」切換 |

@@ -123,7 +123,7 @@ L3 的更正要靠上下文才會發生。以鄰鍵那一句為例，逐音節�
 
 ### 3.1 引擎（`native/`）
 
-Rust，相依只有 `indexmap`、`serde_json`。其他檔案：`lexicon.rs`（唯讀 `lexicon.bin`＋執行中加詞的疊加層）、`lm.rs`（記憶體映射讀 `lm.bo.bin`）、`usage.rs`（使用紀錄統計）、`learned_web.rs`（學習資料頁）、`nontrad.txt`（非台灣繁體字表：學習資料裡含這些字的詞不加進解碼器）。`cargo build --release` 產生 `native/target/release/zhuyin-native.exe`，指令見 `native/src/main.rs` 檔頭。
+Rust，相依只有 `indexmap`、`serde_json`。其他檔案：`lexicon.rs`（唯讀 `lexicon.bin`＋執行中加詞的疊加層）、`lm.rs`（記憶體映射讀 `lm.bo.bin`）、`usage.rs`（使用紀錄統計）、`learned_web.rs`（總控台）、`nontrad.txt`（非台灣繁體字表：學習資料裡含這些字的詞不加進解碼器）。`cargo build --release` 產生 `native/target/release/zhuyin-native.exe`，指令見 `native/src/main.rs` 檔頭。
 
 **L1 鍵盤映射**（`keymap.rs`）
 
@@ -212,7 +212,7 @@ Score = Σ_詞 [ a·logP_word(w | 前兩詞)
 - ↓ 開選字視窗，選的詞成為之後解碼的固定段（`fixed`）。
 - `commit(k)`：送出第 k 個候選，觸發 X2 學習。X2 學的是 `breakdown.reading`（L3 更正後的讀音），不是打錯的觀察讀音。
 - 總控台（右鍵選單「總控台（學習資料、實驗功能）…」，`learned_web.rs`、`learned.html`）：刪除學到的詞、學習開關（關掉時加分歸零、使用者詞與挖詞從解碼器拿掉）、使用紀錄開關與統計（`usage.rs`）、L3 與實驗性功能的開關（`refine`／`menuPromote`／`typoLearning`）、學到的打錯習慣（`typos.json`）、全部清除。
-- 使用紀錄（學習資料頁的開關，預設關）：每次送出往 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行，欄位見 `engine.rs` `usage_record`；超過 10MB 丟掉舊的一半。`zhuyin-native usage <檔>` 統計。
+- 使用紀錄（總控台的開關，預設關）：每次送出往 `%APPDATA%\PIME\zhuyin\usage.jsonl` 加一行，欄位見 `engine.rs` `usage_record`；超過 10MB 丟掉舊的一半。`zhuyin-native usage <檔>` 統計。
 - PIME 協定的限制（不能停 PIMELauncher、每則請求都要回 seqNum 等）見 CLAUDE.md 與 [PIME-NOTES.md](PIME-NOTES.md)。
 
 **`noise.rs`**：在按鍵層級注入錯誤（鄰鍵 60%、漏按 20%、多按 20%；認知錯誤中模糊音 70%、聲調 30%），再走真正的 L2，得到「打錯後的音節序列」。用固定種子的 mulberry32 亂數，可重現。
@@ -311,7 +311,7 @@ npm workspaces monorepo。套件之間透過各自的 `dist/` 互相引用，所
 |---|---|---|
 | 舊 `lm.json` L5 | 59.0% | 70.2% |
 | `lm.tsv` L5（計數模型） | 76.7% | 80.4% |
-| `lm.bo.bin` L5（目前，2026-10-24 `eval`） | 78.7% | 82.0% |
+| `lm.bo.bin` L5（目前，2026-10-31 `eval`） | 79.3% | 82.4% |
 | `lm.tsv` + Kev `runs/zy-choice16k` w=3（已封存） | 80.4% | 89.0% |
 
 L3 只用合成錯誤評測過，錯誤分布跟 L3 共用同一張鄰鍵表與模糊音表，結果偏樂觀。
@@ -383,7 +383,7 @@ X1＝外面準備好的資料，X2＝從這個使用者自己的送出學。兩�
 | `debug-pime.ts` | 驅動 PIME 後端：行為檢查＋打 1500 句量準確率、延遲、記憶體；也能驅動新酷音、小麥注音 |
 | `debug-pime-fuzz.ts` | 隨機按鍵壓力測試 |
 | `debug-pime-idle.ts` | 閒置卸載與重新載入 |
-| `debug-learned-web.ts` | 學習資料頁的端對端檢查 |
+| `debug-learned-web.ts` | 總控台的端對端檢查 |
 | `debug-ms-keys.ts` | 產生微軟注音測試用的大千 VK 序列 |
 | `debug-ms-bopomofo.ps1` | 用 SendInput 把 VK 序列打進自己的 WinForms 文字框，讀回微軟注音（或 PIME 輸入法）的結果。會佔用鍵盤與前景視窗 |
 | `debug-ime-bench.ps1` | 包住 `debug-ms-bopomofo.ps1`，前後記錄輸入法引擎行程（`ctfmon` 或 PIME）的 CPU 與記憶體。`-Ime` 選 `ms`／`chewing`／`mcbopomofo` |

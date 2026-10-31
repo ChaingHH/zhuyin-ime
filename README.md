@@ -7,7 +7,7 @@ Windows 的注音輸入法（大千、倚天、許氏、IBM、倚天 26 鍵）�
 
 需要：Windows 10 或 11（64 位元）。其他什麼都不用先裝。
 
-1. 到 [Releases](https://github.com/ChaingHH/zhuyin-ime/releases/latest) 下載 **`zhuyin-native-setup.exe`**。
+1. 到 [Releases](https://github.com/ChiangHeHe/zhuyin-ime/releases/latest) 下載 **`zhuyin-native-setup.exe`**。
 2. 雙擊它。Windows 問「要允許此應用程式變更您的裝置嗎？」時按「是」。
    - 電腦上沒有 PIME（輸入法框架，本輸入法跑在它上面）時，會自動一起裝好。
    - SmartScreen 擋下時，按「其他資訊」→「仍要執行」。
@@ -52,7 +52,7 @@ Windows 的注音輸入法（大千、倚天、許氏、IBM、倚天 26 鍵）�
 ## 常見問題
 
 - **登入後清單裡沒有它**：到「設定 > 時間與語言 > 語言與地區 > 中文(台灣) > 語言選項 > 鍵盤」，按「新增鍵盤」，選「注音 (zhuyin-native)」。
-- **切過去打不出字**：再登出登入一次。還是不行，把 `%APPDATA%\PIME\zhuyin\backend.log` 附在 [Issues](https://github.com/ChaingHH/zhuyin-ime/issues) 回報。
+- **切過去打不出字**：再登出登入一次。還是不行，把 `%APPDATA%\PIME\zhuyin\backend.log` 附在 [Issues](https://github.com/ChiangHeHe/zhuyin-ime/issues) 回報。
 - 完整的按鍵表、設定檔與疑難排解：[docs/PIME-INSTALL.md](docs/PIME-INSTALL.md)。
 
 ## 授權與資料來源
@@ -63,17 +63,17 @@ Windows 的注音輸入法（大千、倚天、許氏、IBM、倚天 26 鍵）�
   - [libchewing-data](https://github.com/chewing/libchewing-data)：LGPL-2.1-or-later。本專案有修改，安裝目錄的 `THIRD-PARTY-NOTICES.txt` 列出改了什麼。
 - 簡體輸出的轉換表：[OpenCC](https://github.com/BYVoid/OpenCC) ver.1.4.2 的 `TSCharacters.txt`、`TSPhrases.txt`，Apache-2.0，未修改。
 - 語言模型的訓練語料：Hugging Face `yuhuanstudio/PTT-pretrain-zhtw`、`voidful/fineweb-zhtw`、`wikimedia/wikipedia`（經 OpenCC s2twp 轉繁體）。
-- 安裝程式內附 [PIME](https://github.com/EasyIME/PIME) v2.0.0-beta3 官方安裝檔（LGPL），未修改。
+- 安裝程式內附 [PIME](https://github.com/EasyIME/PIME) v2.0.0-beta4 官方安裝檔（LGPL），未修改。
 
 ## 開發者
 
 使用者版本（Setup.exe）只有 Rust 編出的引擎與資料檔。這個 repo 還有引擎原始碼（`native/`）、資料管線與模型訓練（TypeScript）。
 
-`master` 是開發中的程式碼，可能比最新的 Release 新，也還沒驗證過。要拿使用者版本的原始碼，切到 Release 的 tag（例如 `git checkout v1.0.1`）。舊的 TS 版引擎封存在 tag `archive/ts-engine`。
+`master` 是開發中的程式碼，可能比最新的 Release 新，也還沒驗證過。要拿使用者版本的原始碼，切到 Release 的 tag（例如 `git checkout v1.0.5`）。舊的 TS 版引擎封存在 tag `archive/ts-engine`。
 
 - 專案全貌、架構、評測：[docs/PROJECT.md](docs/PROJECT.md)
 - 指令速查：[CLAUDE.md](CLAUDE.md)
-- 從原始碼安裝到 PIME、做 Setup.exe：[docs/PIME-INSTALL.md](docs/PIME-INSTALL.md)
+- 從原始碼安裝到 PIME、做 Setup.exe、發新版：[docs/PIME-INSTALL.md](docs/PIME-INSTALL.md)
 - 版本紀錄：[CHANGELOG.md](CHANGELOG.md)
 
 ```bash
